@@ -1,0 +1,19 @@
+appId: edu.wisc.niedenthal.ducksoupconference
+productName: DuckSoup Conference Lab
+directories:
+  buildResources: build
+files:
+  - out/**
+  - package.json
+asarUnpack:
+  - resources/**
+mac:
+  target:
+    - dmg
+win:
+  target:
+    - nsis
+linux:
+  target:
+    - AppImage
+

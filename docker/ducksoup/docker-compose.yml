@@ -1,0 +1,17 @@
+services:
+  ducksoup:
+    image: ducksouplab/ducksoup:arm_latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DUCKSOUP_PORT=8100
+      - DUCKSOUP_NVCODEC=false
+      - DUCKSOUP_NVCUDA=false
+    volumes:
+      - ./data:/app/data
+      - ./log:/app/log
+      - ../../vendor/ducksoup-plugins:/app/plugins
+    ports:
+      - "8100:8100"
+
