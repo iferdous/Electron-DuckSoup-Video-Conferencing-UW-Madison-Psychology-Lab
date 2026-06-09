@@ -106,10 +106,13 @@ app.whenReady().then(() => {
     try {
       const url = new URL('/test/mirror/', baseUrl)
       const response = await fetch(url, { method: 'GET' })
+      const reachable = response.ok || response.status === 401
       return {
-        ok: response.ok,
+        ok: reachable,
         status: response.status,
-        detail: response.ok ? 'DuckSoup test page is reachable.' : `HTTP ${response.status}`
+        detail: reachable
+          ? 'DuckSoup server is reachable.'
+          : `HTTP ${response.status}`
       }
     } catch (error) {
       return {
@@ -130,4 +133,3 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
-
