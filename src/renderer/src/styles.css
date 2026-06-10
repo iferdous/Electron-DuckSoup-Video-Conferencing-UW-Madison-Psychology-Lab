@@ -352,6 +352,31 @@ label {
   font-size: 14px;
 }
 
+.connection-tip {
+  border: 1px solid rgb(56 189 248 / 0.35);
+  border-radius: 7px;
+  background: rgb(14 116 144 / 0.12);
+  color: #bde8f8;
+  padding: 10px 12px;
+  margin: 12px 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.connection-tip strong {
+  color: #7dd3fc;
+}
+
+.connection-tip.error {
+  border-color: rgb(239 68 68 / 0.45);
+  background: rgb(127 29 29 / 0.25);
+  color: #fecaca;
+}
+
+.connection-tip.error strong {
+  color: #fca5a5;
+}
+
 .log-panel {
   flex: 1;
   min-height: 160px;

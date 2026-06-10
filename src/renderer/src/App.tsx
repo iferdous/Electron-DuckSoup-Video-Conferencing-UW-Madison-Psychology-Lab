@@ -422,6 +422,19 @@ export default function App(): ReactElement {
 
   const connect = useCallback(async () => {
     try {
+      const stationId = form.participantId.trim()
+      const partnerId = form.partnerId.trim()
+      if (!stationId) {
+        setConnectionState('error')
+        addLog('Enter a unique This station ID before connecting, for example P001 or P002.', 'error')
+        return
+      }
+      if (partnerId && stationId === partnerId) {
+        setConnectionState('error')
+        addLog('This station ID and Partner ID must be different. DuckSoup rejects duplicate users in the same room.', 'error')
+        return
+      }
+
       setConnectionState('connecting')
       setLatency(emptyLatency)
       await loadDuckSoupScript()
@@ -456,12 +469,21 @@ export default function App(): ReactElement {
               addLog('DuckSoup room started.', 'success')
             } else if (message.kind === 'joined') {
               addLog('Joined DuckSoup room.', 'success')
+            } else if (message.kind === 'other_joined') {
+              addLog('Partner station joined the DuckSoup room.', 'success')
+            } else if (message.kind === 'other_left') {
+              addLog('Partner station left the DuckSoup room.', 'warn')
             } else if (message.kind === 'closed' || message.kind === 'end') {
               setConnectionState('ready')
               addLog('DuckSoup connection closed.', 'warn')
             } else if (message.kind.startsWith('error')) {
               setConnectionState('error')
-              addLog(`${message.kind}: ${String(message.payload ?? '')}`, 'error')
+              const detail = String(message.payload ?? message.kind)
+              if (detail.toLowerCase().includes('duplicate') || message.kind.toLowerCase().includes('duplicate')) {
+                addLog('DuckSoup rejected the join as a duplicate user. Use different station IDs on the two laptops, such as P001 and P002.', 'error')
+              } else {
+                addLog(`${message.kind}: ${detail}`, 'error')
+              }
             } else if (message.kind === 'stats') {
               const nextLatency = latencyFromStats(message.payload)
               if (nextLatency) setLatency(nextLatency)
@@ -471,7 +493,7 @@ export default function App(): ReactElement {
         {
           signalingUrl: buildSignalingUrl(form.duckSoupUrl),
           interactionName: form.roomId,
-          userId: form.participantId || `station-${Date.now()}`,
+          userId: stationId,
           duration: 3600,
           size: 2,
           width: 1280,
@@ -492,7 +514,7 @@ export default function App(): ReactElement {
       setConnectionState('error')
       addLog(error instanceof Error ? error.message : 'Connection failed.', 'error')
     }
-  }, [addLog, appendControlEvent, controls, form.duckSoupUrl, form.participantId, form.roomId, loadDuckSoupScript])
+  }, [addLog, appendControlEvent, controls, form, loadDuckSoupScript])
 
   const disconnect = (): void => {
     playerRef.current?.stop()
@@ -675,6 +697,9 @@ export default function App(): ReactElement {
               Room ID
               <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
             </label>
+            <div className={form.participantId && form.participantId === form.partnerId ? 'connection-tip error' : 'connection-tip'}>
+              <strong>Two-laptop rule:</strong> use the same Room ID, different station IDs, and press Connect on both laptops within about 10 seconds.
+            </div>
             <label>
               DuckSoup server
               <input value={form.duckSoupUrl} onChange={(event) => updateForm('duckSoupUrl', event.target.value)} />
@@ -708,7 +733,7 @@ export default function App(): ReactElement {
           <section className="panel">
             <div className="section-title">Two-Computer Setup</div>
             <p className="plain-text">
-              Run DuckSoup on one host laptop. On both participant laptops, use the same Room ID and set DuckSoup server to the host IP.
+              Run DuckSoup on one host laptop. Use the same Room ID on both laptops, but set different station IDs, such as P001 on laptop A and P002 on laptop B.
             </p>
             <div className="network-list">
               <div><strong>Host name</strong><span>{networkInfo.hostname || 'unknown'}</span></div>
