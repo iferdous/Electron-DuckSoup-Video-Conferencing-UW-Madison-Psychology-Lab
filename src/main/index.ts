@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { mkdir, writeFile } from 'node:fs/promises'
+import os from 'node:os'
 import { join, sanitize } from './path-utils'
 
 type SessionMetadata = {
@@ -120,6 +121,19 @@ app.whenReady().then(() => {
         status: 0,
         detail: error instanceof Error ? error.message : 'DuckSoup is not reachable.'
       }
+    }
+  })
+
+  ipcMain.handle('get-network-info', () => {
+    const interfaces = os.networkInterfaces()
+    const addresses = Object.values(interfaces)
+      .flatMap((items) => items ?? [])
+      .filter((item) => item.family === 'IPv4' && !item.internal)
+      .map((item) => item.address)
+
+    return {
+      hostname: os.hostname(),
+      addresses
     }
   })
 

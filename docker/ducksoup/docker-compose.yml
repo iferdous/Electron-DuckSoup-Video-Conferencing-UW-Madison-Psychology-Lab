@@ -11,7 +11,6 @@ services:
     volumes:
       - ./data:/app/data
       - ./log:/app/log
-      - ../../vendor/ducksoup-plugins:/app/plugins
+      - ./plugins:/app/plugins
     ports:
       - "8100:8100"
-

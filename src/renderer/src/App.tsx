@@ -1,21 +1,15 @@
-import {
-  Activity,
-  FolderOpen,
-  HeartPulse,
-  Mic2,
-  Network,
-  Phone,
-  PhoneOff,
-  Radio,
-  Save,
-  Settings2,
-  SlidersHorizontal,
-  Square,
-  Video
-} from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import type { ConnectionState, ControlEvent, LogEvent, ManipulationControls, RecordingState, SessionForm } from './types'
+import type {
+  ConnectionState,
+  ControlEvent,
+  LatencyStats,
+  LocalNetworkInfo,
+  LogEvent,
+  ManipulationControls,
+  RecordingState,
+  SessionForm
+} from './types'
 
 const initialForm: SessionForm = {
   studyId: 'PPS2026',
@@ -36,6 +30,9 @@ const initialControls: ManipulationControls = {
   landmarkBeta: 0.1,
   smoothingCutoff: 5,
   overlay: false,
+  audioPreset: 'none',
+  audioPitch: 1,
+  audioGain: 1,
   partnerVolume: 1,
   synchronyDelayMs: 0
 }
@@ -51,6 +48,71 @@ const conditionPresets: Array<{ label: string; alpha: number; threshold?: number
   { label: 'Low confidence lighting', alpha: 1, threshold: 0.05, note: 'More sensitive face detection.' },
   { label: 'Strict tracking', alpha: 1, threshold: 0.55, note: 'Rejects weaker detections.' }
 ]
+
+const audioPresets: Array<{
+  label: string
+  preset: string
+  effectName: 'pitch' | 'volume' | ''
+  property: string
+  value: number
+  audioFx: string
+  note: string
+}> = [
+  {
+    label: 'Voice neutral',
+    preset: 'none',
+    effectName: '',
+    property: '',
+    value: 1,
+    audioFx: '',
+    note: 'No DuckSoup audio effect requested.'
+  },
+  {
+    label: 'Warmer voice',
+    preset: 'warmer',
+    effectName: 'pitch',
+    property: 'pitch',
+    value: 0.92,
+    audioFx: 'pitch pitch=0.92',
+    note: 'DuckSoup audioFx preset using the pitch effect.'
+  },
+  {
+    label: 'Brighter voice',
+    preset: 'brighter',
+    effectName: 'pitch',
+    property: 'pitch',
+    value: 1.08,
+    audioFx: 'pitch pitch=1.08',
+    note: 'DuckSoup audioFx preset using the pitch effect.'
+  },
+  {
+    label: 'Quieter voice',
+    preset: 'quieter',
+    effectName: 'volume',
+    property: 'volume',
+    value: 0.75,
+    audioFx: 'volume volume=0.75',
+    note: 'DuckSoup audioFx preset using a GStreamer volume element.'
+  },
+  {
+    label: 'Louder voice',
+    preset: 'louder',
+    effectName: 'volume',
+    property: 'volume',
+    value: 1.25,
+    audioFx: 'volume volume=1.25',
+    note: 'DuckSoup audioFx preset using a GStreamer volume element.'
+  }
+]
+
+const emptyLatency: LatencyStats = {
+  rttMs: null,
+  jitterMs: null,
+  audioRttMs: null,
+  videoRttMs: null,
+  packetsLost: 0,
+  updatedAt: ''
+}
 
 const makeId = (): string => `${Date.now()}-${Math.random().toString(16).slice(2)}`
 
@@ -104,6 +166,56 @@ const buildSignalingUrl = (baseUrl: string): string => {
   return url.toString()
 }
 
+const selectedAudioFx = (controlState: ManipulationControls): string | undefined => {
+  if (controlState.audioPreset === 'custom-pitch') {
+    return `pitch pitch=${controlState.audioPitch}`
+  }
+  if (controlState.audioPreset === 'custom-volume') {
+    return `volume volume=${controlState.audioGain}`
+  }
+  const match = audioPresets.find((item) => item.preset === controlState.audioPreset)
+  return match?.audioFx || undefined
+}
+
+const toMs = (value: unknown): number | null => {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 1000) : null
+}
+
+const readPacketsLost = (stats: Record<string, unknown> | undefined): number => {
+  return typeof stats?.packetsLost === 'number' ? stats.packetsLost : 0
+}
+
+const latencyFromStats = (payload: unknown): LatencyStats | null => {
+  if (!payload || typeof payload !== 'object') return null
+  const stats = payload as {
+    remoteInboundRTPVideo?: Record<string, unknown>
+    remoteInboundRTPAudio?: Record<string, unknown>
+    inboundRTPVideo?: Record<string, unknown>
+    inboundRTPAudio?: Record<string, unknown>
+  }
+  const videoRttMs = toMs(stats.remoteInboundRTPVideo?.roundTripTime)
+  const audioRttMs = toMs(stats.remoteInboundRTPAudio?.roundTripTime)
+  const jitterMs = toMs(stats.inboundRTPVideo?.jitter) ?? toMs(stats.inboundRTPAudio?.jitter)
+  const rttValues = [videoRttMs, audioRttMs].filter((value): value is number => value !== null)
+  const rttMs =
+    rttValues.length > 0
+      ? Math.round(rttValues.reduce((total, value) => total + value, 0) / rttValues.length)
+      : null
+
+  return {
+    rttMs,
+    jitterMs,
+    audioRttMs,
+    videoRttMs,
+    packetsLost:
+      readPacketsLost(stats.remoteInboundRTPVideo) +
+      readPacketsLost(stats.remoteInboundRTPAudio) +
+      readPacketsLost(stats.inboundRTPVideo) +
+      readPacketsLost(stats.inboundRTPAudio),
+    updatedAt: new Date().toLocaleTimeString()
+  }
+}
+
 const supportedRecorderType = (): string => {
   const candidates = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
   return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? ''
@@ -131,12 +243,14 @@ export default function App(): ReactElement {
   const [logs, setLogs] = useState<LogEvent[]>([])
   const [controlEvents, setControlEvents] = useState<ControlEvent[]>([])
   const [recordingSeconds, setRecordingSeconds] = useState(0)
+  const [latency, setLatency] = useState<LatencyStats>(emptyLatency)
+  const [networkInfo, setNetworkInfo] = useState<LocalNetworkInfo>({ hostname: '', addresses: [] })
 
   const statusLabel = useMemo(() => {
     const labels: Record<ConnectionState, string> = {
       idle: 'Not checked',
       checking: 'Checking DuckSoup',
-      ready: 'DuckSoup ready',
+      ready: 'Server reachable',
       connecting: 'Joining room',
       connected: 'Connected',
       error: 'Needs attention'
@@ -165,6 +279,13 @@ export default function App(): ReactElement {
       }
     }, 500)
     return () => window.clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    window.researchApi
+      .getNetworkInfo()
+      .then(setNetworkInfo)
+      .catch(() => setNetworkInfo({ hostname: '', addresses: [] }))
   }, [])
 
   useEffect(() => {
@@ -243,16 +364,16 @@ export default function App(): ReactElement {
   )
 
   const sendDuckSoupControl = useCallback(
-    (property: string, value: number | boolean, notes = '') => {
+    (property: string, value: number | boolean, notes = '', effectName = 'mozza') => {
       const normalizedValue = typeof value === 'boolean' ? (value ? 1 : 0) : value
       const targetUser = form.targetUserId || form.participantId
       if (playerRef.current) {
-        playerRef.current.controlFx('mozza', property, normalizedValue, undefined, targetUser)
-        appendControlEvent(property, value, true, notes)
-        addLog(`Applied ${property} = ${value} to ${targetUser || 'current user'}.`, 'info')
+        playerRef.current.controlFx(effectName, property, normalizedValue, undefined, targetUser)
+        appendControlEvent(`${effectName}.${property}`, value, true, notes)
+        addLog(`Applied ${effectName}.${property} = ${value} to ${targetUser || 'current user'}.`, 'info')
       } else {
-        appendControlEvent(property, value, false, 'Queued/logged before DuckSoup connection. ' + notes)
-        addLog(`Logged ${property} = ${value}; connect before it can be applied live.`, 'warn')
+        appendControlEvent(`${effectName}.${property}`, value, false, 'Queued/logged before DuckSoup connection. ' + notes)
+        addLog(`Logged ${effectName}.${property} = ${value}; connect before it can be applied live.`, 'warn')
       }
     },
     [addLog, appendControlEvent, form.participantId, form.targetUserId]
@@ -283,9 +404,26 @@ export default function App(): ReactElement {
     if (typeof preset.threshold === 'number') sendDuckSoupControl('face-thresh', preset.threshold, preset.note)
   }
 
+  const applyAudioPreset = (preset: (typeof audioPresets)[number]): void => {
+    setControls((prev) => ({
+      ...prev,
+      audioPreset: preset.preset,
+      audioPitch: preset.effectName === 'pitch' ? preset.value : prev.audioPitch,
+      audioGain: preset.effectName === 'volume' ? preset.value : prev.audioGain
+    }))
+
+    if (preset.effectName) {
+      sendDuckSoupControl(preset.property, preset.value, preset.note, preset.effectName)
+    } else {
+      appendControlEvent('audioFx', 'none', false, preset.note)
+      addLog('Audio preset set to neutral. Reconnect to remove an active DuckSoup audio effect.', 'info')
+    }
+  }
+
   const connect = useCallback(async () => {
     try {
       setConnectionState('connecting')
+      setLatency(emptyLatency)
       await loadDuckSoupScript()
 
       const cleanStream = await navigator.mediaDevices.getUserMedia({
@@ -306,7 +444,7 @@ export default function App(): ReactElement {
 
       const player = await window.DuckSoup!.render(
         {
-          stats: false,
+          stats: true,
           callback: (message) => {
             if (message.kind === 'track') {
               const event = message.payload as RTCTrackEvent
@@ -324,6 +462,9 @@ export default function App(): ReactElement {
             } else if (message.kind.startsWith('error')) {
               setConnectionState('error')
               addLog(`${message.kind}: ${String(message.payload ?? '')}`, 'error')
+            } else if (message.kind === 'stats') {
+              const nextLatency = latencyFromStats(message.payload)
+              if (nextLatency) setLatency(nextLatency)
             }
           }
         },
@@ -340,6 +481,7 @@ export default function App(): ReactElement {
           recordingMode: 'forced',
           namespace: 'uw_conference_lab',
           gpu: false,
+          audioFx: selectedAudioFx(controls),
           videoFx: `mozza alpha=${controls.smileAlpha} face-thresh=${controls.faceThreshold} beta=${controls.landmarkBeta} fc=${controls.smoothingCutoff} overlay=${controls.overlay ? 'true' : 'false'}`
         }
       )
@@ -361,6 +503,7 @@ export default function App(): ReactElement {
     alteredStreamRef.current = null
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
     if (localDiagnosticVideoRef.current) localDiagnosticVideoRef.current.srcObject = null
+    setLatency(emptyLatency)
     setConnectionState(duckSoupReady ? 'ready' : 'idle')
     addLog('Disconnected and released local media tracks.', 'info')
   }
@@ -491,21 +634,13 @@ export default function App(): ReactElement {
       <header className="topbar">
         <div>
           <h1>DuckSoup Conference Lab</h1>
-          <p>Niedenthal Emotions Lab · live manipulation and recording console</p>
-        </div>
-        <div className={`status-pill status-${connectionState}`}>
-          <span />
-          {statusLabel}
         </div>
       </header>
 
       <main className="workspace">
         <aside className="sidebar">
           <section className="panel">
-            <div className="section-title">
-              <Settings2 size={16} />
-              Session
-            </div>
+            <div className="section-title">Session</div>
             <div className="field-grid two">
               <label>
                 Study
@@ -546,34 +681,55 @@ export default function App(): ReactElement {
             </label>
             <div className="folder-row">
               <input value={form.outputFolder} readOnly placeholder="Choose output folder" />
-              <button className="icon-button" onClick={pickFolder} title="Select output folder">
-                <FolderOpen size={17} />
+              <button className="browse-button" onClick={pickFolder} title="Select output folder">
+                Browse
               </button>
             </div>
             <div className="button-row">
               <button onClick={checkDuckSoup}>
-                <Network size={16} />
                 Check
               </button>
               {connectionState === 'connected' ? (
                 <button className="danger" onClick={disconnect}>
-                  <PhoneOff size={16} />
                   Disconnect
                 </button>
               ) : (
                 <button className="primary" onClick={connect} disabled={!duckSoupReady && connectionState !== 'ready'}>
-                  <Phone size={16} />
                   Connect
                 </button>
+              )}
+            </div>
+            <div className="inline-status">
+              <span className={`status-dot status-${connectionState}`} />
+              {statusLabel}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-title">Two-Computer Setup</div>
+            <p className="plain-text">
+              Run DuckSoup on one host laptop. On both participant laptops, use the same Room ID and set DuckSoup server to the host IP.
+            </p>
+            <div className="network-list">
+              <div><strong>Host name</strong><span>{networkInfo.hostname || 'unknown'}</span></div>
+              {networkInfo.addresses.length === 0 ? (
+                <div><strong>LAN IP</strong><span>not detected</span></div>
+              ) : (
+                networkInfo.addresses.map((address) => (
+                  <button
+                    key={address}
+                    className="network-address"
+                    onClick={() => updateForm('duckSoupUrl', `http://${address}:8100`)}
+                  >
+                    http://{address}:8100
+                  </button>
+                ))
               )}
             </div>
           </section>
 
           <section className="panel">
-            <div className="section-title">
-              <SlidersHorizontal size={16} />
-              Modification Condition
-            </div>
+            <div className="section-title">Modification Condition</div>
             <div className="preset-list">
               {conditionPresets.map((preset) => (
                 <button
@@ -613,11 +769,9 @@ export default function App(): ReactElement {
 
           <div className="operations-row">
             <button onClick={startRecording} disabled={recordingState !== 'idle' || connectionState !== 'connected'} className="record">
-              <Radio size={17} />
               Start recording
             </button>
             <button onClick={stopRecording} disabled={recordingState !== 'recording'} className="stop">
-              <Square size={15} />
               Stop
             </button>
             <div className="metric">
@@ -628,6 +782,14 @@ export default function App(): ReactElement {
               <span>Events logged</span>
               <strong>{controlEvents.length}</strong>
             </div>
+            <div className="metric">
+              <span>RTT</span>
+              <strong>{latency.rttMs === null ? 'waiting' : `${latency.rttMs} ms`}</strong>
+            </div>
+            <div className="metric">
+              <span>Jitter</span>
+              <strong>{latency.jitterMs === null ? 'waiting' : `${latency.jitterMs} ms`}</strong>
+            </div>
             <div className="metric wide">
               <span>Session folder</span>
               <strong>{sessionDir || 'created on recording start'}</strong>
@@ -635,20 +797,14 @@ export default function App(): ReactElement {
           </div>
 
           <section className="panel">
-            <div className="section-title">
-              <Save size={16} />
-              Output to PPS / Questionnaire Pipeline
-            </div>
+            <div className="section-title">Output to PPS / Questionnaire Pipeline</div>
             <p className="plain-text">
-              Each recorded session writes a clean video, an altered video, a JSON manifest, and a manipulation-events CSV. The PPS app can use the chosen video as its later conversation playback file; the manifest keeps dyad, participant, condition, and live-control timing together.
+              Each recorded session writes clean and altered `.webm` videos, a JSON manifest, and a manipulation-events CSV. The PPS app can use the chosen video as its later conversation playback file; the manifest keeps dyad, participant, condition, and live-control timing together.
             </p>
           </section>
 
           <section className="panel log-panel">
-            <div className="section-title">
-              <Activity size={16} />
-              Event Log
-            </div>
+            <div className="section-title">Event Log</div>
             <div className="log-list">
               {logs.length === 0 ? (
                 <p className="muted">No events yet. Start by checking DuckSoup.</p>
@@ -666,10 +822,7 @@ export default function App(): ReactElement {
 
         <aside className="controls">
           <section className="panel">
-            <div className="section-title accent">
-              <HeartPulse size={16} />
-              Face Modulation
-            </div>
+            <div className="section-title accent">Face Modulation</div>
             <RangeControl
               label="Smile alpha"
               value={controls.smileAlpha}
@@ -717,9 +870,17 @@ export default function App(): ReactElement {
           </section>
 
           <section className="panel">
-            <div className="section-title">
-              <Mic2 size={16} />
-              Voice / Synchrony
+            <div className="section-title">Voice / Synchrony</div>
+            <div className="preset-list compact">
+              {audioPresets.map((preset) => (
+                <button
+                  key={preset.preset}
+                  className={controls.audioPreset === preset.preset ? 'preset active' : 'preset'}
+                  onClick={() => applyAudioPreset(preset)}
+                >
+                  {preset.label}
+                </button>
+              ))}
             </div>
             <RangeControl
               label="Partner playback volume"
@@ -729,8 +890,32 @@ export default function App(): ReactElement {
               step={0.05}
               markers={['Muted', 'Normal', 'Boosted']}
               onChange={(value) =>
-                setControl('partnerVolume', value, undefined, 'Local participant playback gain. This does not yet rewrite the outgoing DuckSoup audio track.')
+                setControl('partnerVolume', value, undefined, 'Local playback monitor gain. DuckSoup voice manipulation is controlled by the audioFx presets below.')
               }
+            />
+            <RangeControl
+              label="DuckSoup pitch"
+              value={controls.audioPitch}
+              min={0.6}
+              max={1.4}
+              step={0.02}
+              markers={['Deeper', 'Neutral', 'Brighter']}
+              onChange={(value) => {
+                setControls((prev) => ({ ...prev, audioPreset: 'custom-pitch', audioPitch: value }))
+                sendDuckSoupControl('pitch', value, 'Custom DuckSoup pitch audioFx control.', 'pitch')
+              }}
+            />
+            <RangeControl
+              label="DuckSoup gain"
+              value={controls.audioGain}
+              min={0}
+              max={2}
+              step={0.05}
+              markers={['Muted', 'Neutral', 'Boosted']}
+              onChange={(value) => {
+                setControls((prev) => ({ ...prev, audioPreset: 'custom-volume', audioGain: value }))
+                sendDuckSoupControl('volume', value, 'Custom DuckSoup volume audioFx control.', 'volume')
+              }}
             />
             <RangeControl
               label="Synchrony delay target (ms)"
@@ -744,15 +929,24 @@ export default function App(): ReactElement {
               }
             />
             <div className="constraint-note">
-              Voice warmth, pitch, eye-contact redirection, and true AV delay should be implemented as DuckSoup/GStreamer effects so both participants receive the same controlled manipulation.
+              Audio presets are sent as DuckSoup `audioFx` requests. If a neutral preset is selected after a live audio effect, reconnect the room to fully remove the active effect chain.
             </div>
           </section>
 
           <section className="panel">
-            <div className="section-title">
-              <Video size={16} />
-              Analysis Hooks
+            <div className="section-title">Latency Viewer</div>
+            <div className="analysis-list">
+              <div><strong>Round trip</strong><span>{latency.rttMs === null ? 'waiting' : `${latency.rttMs} ms`}</span></div>
+              <div><strong>Video RTT</strong><span>{latency.videoRttMs === null ? 'waiting' : `${latency.videoRttMs} ms`}</span></div>
+              <div><strong>Audio RTT</strong><span>{latency.audioRttMs === null ? 'waiting' : `${latency.audioRttMs} ms`}</span></div>
+              <div><strong>Jitter</strong><span>{latency.jitterMs === null ? 'waiting' : `${latency.jitterMs} ms`}</span></div>
+              <div><strong>Packets lost</strong><span>{latency.packetsLost}</span></div>
+              <div><strong>Updated</strong><span>{latency.updatedAt || 'waiting'}</span></div>
             </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-title">Analysis Hooks</div>
             <div className="analysis-list">
               <div><strong>Emotion inference</strong><span>adapter placeholder</span></div>
               <div><strong>Smile intensity</strong><span>Mozza alpha log</span></div>

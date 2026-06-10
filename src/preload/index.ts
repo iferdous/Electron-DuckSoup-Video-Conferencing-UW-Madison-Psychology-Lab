@@ -16,7 +16,9 @@ const researchApi = {
     contents: string
   }): Promise<string> => ipcRenderer.invoke('write-text-file', payload),
   checkDuckSoup: (baseUrl: string): Promise<{ ok: boolean; status: number; detail: string }> =>
-    ipcRenderer.invoke('check-ducksoup', baseUrl)
+    ipcRenderer.invoke('check-ducksoup', baseUrl),
+  getNetworkInfo: (): Promise<{ hostname: string; addresses: string[] }> =>
+    ipcRenderer.invoke('get-network-info')
 }
 
 if (process.contextIsolated) {

@@ -36,6 +36,7 @@ declare global {
         contents: string
       }) => Promise<string>
       checkDuckSoup: (baseUrl: string) => Promise<{ ok: boolean; status: number; detail: string }>
+      getNetworkInfo: () => Promise<{ hostname: string; addresses: string[] }>
     }
     DuckSoup?: {
       render: (
@@ -69,4 +70,3 @@ declare global {
     }
   }
 }
-

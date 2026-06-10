@@ -7,4 +7,7 @@ build
 .env
 .env.local
 recordings
-
+docker/ducksoup/data/
+docker/ducksoup/log/
+docker/ducksoup/plugins/*
+!docker/ducksoup/plugins/.gitkeep

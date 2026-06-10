@@ -118,43 +118,35 @@ label {
   letter-spacing: 0;
 }
 
-.topbar p {
-  margin: 5px 0 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.status-pill {
+.inline-status {
   display: inline-flex;
   align-items: center;
   gap: 9px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 8px 12px;
+  margin-top: 12px;
   color: var(--muted);
-  background: #111827;
   font-weight: 700;
   font-size: 13px;
 }
 
-.status-pill span {
+.status-dot {
   width: 10px;
   height: 10px;
   border-radius: 999px;
   background: var(--muted);
+  display: inline-block;
 }
 
-.status-ready span,
-.status-connected span {
+.status-dot.status-ready,
+.status-dot.status-connected {
   background: var(--emerald);
 }
 
-.status-checking span,
-.status-connecting span {
+.status-dot.status-checking,
+.status-dot.status-connecting {
   background: var(--amber);
 }
 
-.status-error span {
+.status-dot.status-error {
   background: var(--red);
 }
 
@@ -231,15 +223,20 @@ label {
   margin-top: 12px;
 }
 
-.icon-button {
-  width: 42px;
-  flex: 0 0 42px;
+.browse-button {
+  flex: 0 0 auto;
   padding: 0;
+  min-width: 76px;
 }
 
 .preset-list {
   display: grid;
   gap: 9px;
+}
+
+.preset-list.compact {
+  margin-bottom: 18px;
+  gap: 7px;
 }
 
 .preset {
@@ -317,7 +314,7 @@ label {
 
 .operations-row {
   display: grid;
-  grid-template-columns: auto auto 120px 120px minmax(240px, 1fr);
+  grid-template-columns: auto auto 110px 110px 110px 110px minmax(220px, 1fr);
   gap: 12px;
   align-items: stretch;
 }
@@ -446,6 +443,30 @@ label {
   padding-left: 12px;
 }
 
+.network-list {
+  display: grid;
+  gap: 8px;
+}
+
+.network-list div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.network-list strong {
+  color: #c7d2e5;
+}
+
+.network-address {
+  justify-content: flex-start;
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
 .analysis-list {
   display: grid;
   gap: 10px;
@@ -481,4 +502,3 @@ label {
     grid-template-columns: 1fr 1fr;
   }
 }
-

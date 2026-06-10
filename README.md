@@ -1,6 +1,6 @@
 # DuckSoup Conference Lab
 
-Research-oriented video conferencing console for live affective manipulation studies at the Niedenthal Emotions Lab.
+Research-oriented video conferencing console for live affective manipulation studies.
 
 This app is an Electron + React + TypeScript desktop application designed to sit on top of the DuckSoup/Mozza stack:
 
@@ -15,16 +15,19 @@ Participant camera/mic
 
 ## What Works In This MVP
 
-- Connects to a self-hosted DuckSoup server at `http://localhost:8100`.
+- Connects to a self-hosted DuckSoup server at `http://localhost:8100` or another LAN/server URL.
 - Loads DuckSoup's browser client script from the DuckSoup server.
 - Joins a named two-person DuckSoup room over WebRTC.
 - Hides participant self-view by default while retaining an optional diagnostic self check.
+- Shows LAN host IPs for two-computer testing.
+- Shows WebRTC latency, jitter, and packet-loss stats when DuckSoup stats are available.
 - Exposes live Mozza controls for:
   - smile alpha
   - face detection threshold
   - landmark beta
   - smoothing cutoff
   - debug overlay
+- Exposes DuckSoup `audioFx` presets for basic pitch and gain changes.
 - Records:
   - clean local webcam/mic stream
   - altered returned DuckSoup/Mozza stream
@@ -55,6 +58,8 @@ npm install
 npm run dev
 ```
 
+For two-laptop testing, see [docs/TWO_COMPUTER_TESTING.md](docs/TWO_COMPUTER_TESTING.md).
+
 ## Two-Computer Session Model
 
 For two participants, both stations should point to the same DuckSoup server and use the same Room ID. Each station should use a unique station/participant ID. The experimenter can choose which target user receives live Mozza control commands.
@@ -63,16 +68,15 @@ If the two computers are not on the same machine, `localhost:8100` must be repla
 
 ## Current Constraints
 
-- Voice warmth, pitch, eye-contact redirection, and true synchrony delay are represented as UI/logging hooks. To make those manipulations scientifically controlled for both participants, they should be implemented as DuckSoup/GStreamer effects.
+- Voice pitch and gain are wired as DuckSoup `audioFx` presets. The running DuckSoup image still needs the matching GStreamer elements available.
+- More advanced voice warmth, eye-contact redirection, gaze changes, and true synchrony delay still need dedicated DuckSoup/GStreamer pipeline work.
 - The clean and altered streams may have different latency because the altered stream travels through DuckSoup/WebRTC/GStreamer before returning.
-- Recordings are `.webm`; the PPS app currently accepts MP4/MOV, so either PPS should accept `.webm` or the session export should add conversion.
+- Recordings stay as `.webm`. If PPS needs to load these files directly, PPS should accept `.webm`.
 
 ## Recommended Next Engineering Steps
 
-1. Add a small DuckSoup deployment profile for lab LAN and remote testing.
+1. Validate the DuckSoup audio presets against the lab Docker image and document which GStreamer elements are installed.
 2. Add TURN configuration for two-computer sessions outside the same network.
-3. Implement audio effects as GStreamer elements or DuckSoup audioFx presets.
-4. Add a true delay/synchrony buffer in the media pipeline, not just a logged design variable.
-5. Decide whether PPS should consume `.webm` directly or whether this app should export MP4.
-6. Add automated pre-session checks for camera, mic, DuckSoup, returned altered stream, recording support, and output folder writability.
-
+3. Add a true delay/synchrony buffer in the media pipeline, not just a logged design variable.
+4. Update PPS to accept `.webm` if DuckSoup recordings should be loaded directly.
+5. Add automated pre-session checks for camera, mic, DuckSoup, returned altered stream, recording support, and output folder writability.

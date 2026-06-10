@@ -65,6 +65,8 @@ Lowest latency comes from:
 
 For scientific timing, the app should log when a control was requested and later add server-side acknowledgement timestamps if DuckSoup exposes them.
 
+The app now displays approximate RTT, jitter, and packet loss from DuckSoup/WebRTC stats. Treat this as a live health indicator, not a final scientific timing measure.
+
 ## Manipulations Worth Considering
 
 Face:
@@ -97,4 +99,3 @@ Interaction timing:
 - mimicry timing alignment/misalignment
 
 The first production-safe manipulations should be the ones DuckSoup/Mozza already supports: smile alpha, face threshold, beta, fc, and overlay.
-

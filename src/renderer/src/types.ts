@@ -20,8 +20,25 @@ export type ManipulationControls = {
   landmarkBeta: number
   smoothingCutoff: number
   overlay: boolean
+  audioPreset: string
+  audioPitch: number
+  audioGain: number
   partnerVolume: number
   synchronyDelayMs: number
+}
+
+export type LatencyStats = {
+  rttMs: number | null
+  jitterMs: number | null
+  audioRttMs: number | null
+  videoRttMs: number | null
+  packetsLost: number
+  updatedAt: string
+}
+
+export type LocalNetworkInfo = {
+  hostname: string
+  addresses: string[]
 }
 
 export type ControlEvent = {
@@ -45,4 +62,3 @@ export type LogEvent = {
   level: 'info' | 'warn' | 'error' | 'success'
   message: string
 }
-
