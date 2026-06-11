@@ -1,10 +1,12 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
+import dgram, { type Socket } from 'node:dgram'
 import { mkdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import { join, sanitize } from './path-utils'
 
 type SessionMetadata = {
+  serverName?: string
   studyId: string
   dyadId: string
   participantId: string
@@ -15,6 +17,42 @@ type SessionMetadata = {
   outputFolder: string
 }
 
+type HostAdvertisement = {
+  serverName: string
+  duckSoupUrl: string
+  roomId: string
+}
+
+type DiscoveryPacket = {
+  app: 'ducksoup-conference-lab'
+  version: 1
+  serverName: string
+  hostName: string
+  duckSoupUrl: string
+  roomId: string
+  addresses: string[]
+  port: number
+  sentAt: number
+}
+
+type DiscoveredHost = {
+  id: string
+  serverName: string
+  hostName: string
+  duckSoupUrl: string
+  roomId: string
+  address: string
+  port: number
+  seenAt: number
+}
+
+const DISCOVERY_GROUP = '239.255.42.99'
+const DISCOVERY_PORT = 44563
+
+let advertisementSocket: Socket | null = null
+let advertisementTimer: NodeJS.Timeout | null = null
+let mainWindowRef: BrowserWindow | null = null
+
 const safeSegment = (value: string, fallback: string): string => {
   const trimmed = sanitize(value).trim()
   return trimmed.length > 0 ? trimmed : fallback
@@ -22,13 +60,155 @@ const safeSegment = (value: string, fallback: string): string => {
 
 const timestampSegment = (): string => new Date().toISOString().replace(/[:.]/g, '-')
 
+const localAddresses = (): string[] => {
+  const interfaces = os.networkInterfaces()
+  return Object.values(interfaces)
+    .flatMap((items) => items ?? [])
+    .filter((item) => item.family === 'IPv4' && !item.internal)
+    .map((item) => item.address)
+}
+
+const firstLanAddress = (): string => localAddresses()[0] ?? '127.0.0.1'
+
+const hostUrlFrom = (baseUrl: string, fallbackAddress = firstLanAddress()): string => {
+  try {
+    const url = new URL(baseUrl)
+    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+      url.hostname = fallbackAddress
+    }
+    if (!url.port) url.port = '8100'
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return `http://${fallbackAddress}:8100`
+  }
+}
+
+const stopAdvertisement = (): void => {
+  if (advertisementTimer) {
+    clearInterval(advertisementTimer)
+    advertisementTimer = null
+  }
+  if (advertisementSocket) {
+    advertisementSocket.close()
+    advertisementSocket = null
+  }
+}
+
+const startAdvertisement = (payload: HostAdvertisement): Promise<{ ok: boolean; detail: string; url?: string }> => {
+  stopAdvertisement()
+
+  return new Promise((resolve) => {
+    const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
+    advertisementSocket = socket
+    let resolved = false
+
+    const finish = (result: { ok: boolean; detail: string; url?: string }): void => {
+      if (resolved) return
+      resolved = true
+      resolve(result)
+    }
+
+    const address = firstLanAddress()
+    const duckSoupUrl = hostUrlFrom(payload.duckSoupUrl, address)
+    const packet = (): Buffer =>
+      Buffer.from(
+        JSON.stringify({
+          app: 'ducksoup-conference-lab',
+          version: 1,
+          serverName: payload.serverName.trim() || os.hostname(),
+          hostName: os.hostname(),
+          duckSoupUrl,
+          roomId: payload.roomId,
+          addresses: localAddresses(),
+          port: 8100,
+          sentAt: Date.now()
+        } satisfies DiscoveryPacket)
+      )
+
+    const sendPacket = (): void => {
+      const message = packet()
+      socket.send(message, 0, message.length, DISCOVERY_PORT, DISCOVERY_GROUP)
+      socket.send(message, 0, message.length, DISCOVERY_PORT, '255.255.255.255')
+    }
+
+    socket.on('error', (error) => {
+      stopAdvertisement()
+      finish({ ok: false, detail: error.message })
+    })
+
+    socket.bind(() => {
+      try {
+        socket.setBroadcast(true)
+        socket.setMulticastTTL(2)
+        socket.setMulticastLoopback(true)
+        sendPacket()
+        advertisementTimer = setInterval(sendPacket, 1000)
+        finish({ ok: true, detail: `Advertising ${duckSoupUrl} on the local network.`, url: duckSoupUrl })
+      } catch (error) {
+        stopAdvertisement()
+        finish({ ok: false, detail: error instanceof Error ? error.message : 'Could not advertise host.' })
+      }
+    })
+  })
+}
+
+const discoverHosts = (durationMs = 3500): Promise<DiscoveredHost[]> => {
+  return new Promise((resolve) => {
+    const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
+    const found = new Map<string, DiscoveredHost>()
+    let timer: NodeJS.Timeout | null = null
+
+    const close = (): void => {
+      if (timer) clearTimeout(timer)
+      socket.close()
+      resolve([...found.values()].sort((a, b) => b.seenAt - a.seenAt))
+    }
+
+    socket.on('message', (message, remoteInfo) => {
+      try {
+        const packet = JSON.parse(message.toString()) as Partial<DiscoveryPacket>
+        if (packet.app !== 'ducksoup-conference-lab' || packet.version !== 1) return
+        const address = remoteInfo.address
+        const duckSoupUrl = hostUrlFrom(packet.duckSoupUrl || `http://${address}:8100`, address)
+        const id = `${address}:${packet.port ?? 8100}:${packet.roomId ?? ''}`
+        found.set(id, {
+          id,
+          serverName: packet.serverName || packet.hostName || address,
+          hostName: packet.hostName || address,
+          duckSoupUrl,
+          roomId: packet.roomId || '',
+          address,
+          port: packet.port ?? 8100,
+          seenAt: Date.now()
+        })
+      } catch {
+        // Ignore unrelated multicast traffic.
+      }
+    })
+
+    socket.on('error', close)
+
+    socket.bind(DISCOVERY_PORT, () => {
+      try {
+        socket.addMembership(DISCOVERY_GROUP)
+        socket.setBroadcast(true)
+      } catch {
+        // Some networks disallow multicast membership; broadcast packets can still arrive.
+      }
+      timer = setTimeout(close, durationMs)
+    })
+  })
+}
+
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
+    x: 60,
+    y: 80,
     width: 1440,
     height: 920,
     minWidth: 1180,
     minHeight: 760,
-    show: false,
+    show: true,
     title: 'DuckSoup Conference Lab',
     backgroundColor: '#0b1020',
     webPreferences: {
@@ -37,10 +217,39 @@ function createWindow(): void {
       sandbox: false
     }
   })
+  mainWindowRef = mainWindow
+
+  mainWindow.on('closed', () => {
+    mainWindowRef = null
+  })
 
   mainWindow.on('ready-to-show', () => {
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    mainWindow.setBounds({ x: 60, y: 80, width: 1440, height: 920 })
     mainWindow.show()
+    mainWindow.focus()
   })
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    mainWindow.setBounds({ x: 60, y: 80, width: 1440, height: 920 })
+    if (!mainWindow.isVisible()) mainWindow.show()
+    mainWindow.focus()
+  })
+
+  mainWindow.webContents.on('did-fail-load', (_, errorCode, errorDescription) => {
+    console.error(`Renderer failed to load: ${errorCode} ${errorDescription}`)
+    if (!mainWindow.isVisible()) mainWindow.show()
+  })
+
+  setTimeout(() => {
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    mainWindow.setBounds({ x: 60, y: 80, width: 1440, height: 920 })
+    mainWindow.show()
+    mainWindow.focus()
+    mainWindow.moveTop()
+    app.focus({ steal: true })
+  }, 1000)
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
@@ -56,6 +265,11 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === 'darwin') {
+    app.setActivationPolicy('regular')
+    app.dock?.show()
+  }
+
   electronApp.setAppUserModelId('edu.wisc.niedenthal.ducksoupconference')
 
   app.on('browser-window-created', (_, window) => {
@@ -125,17 +339,22 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('get-network-info', () => {
-    const interfaces = os.networkInterfaces()
-    const addresses = Object.values(interfaces)
-      .flatMap((items) => items ?? [])
-      .filter((item) => item.family === 'IPv4' && !item.internal)
-      .map((item) => item.address)
-
     return {
       hostname: os.hostname(),
-      addresses
+      addresses: localAddresses()
     }
   })
+
+  ipcMain.handle('advertise-ducksoup-host', async (_, payload: HostAdvertisement) => {
+    return startAdvertisement(payload)
+  })
+
+  ipcMain.handle('stop-ducksoup-host-advertisement', () => {
+    stopAdvertisement()
+    return { ok: true }
+  })
+
+  ipcMain.handle('discover-ducksoup-hosts', async () => discoverHosts())
 
   createWindow()
 
@@ -145,5 +364,6 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  stopAdvertisement()
   if (process.platform !== 'darwin') app.quit()
 })

@@ -1,7 +1,9 @@
 export type ConnectionState = 'idle' | 'checking' | 'ready' | 'connecting' | 'connected' | 'error'
 export type RecordingState = 'idle' | 'recording' | 'saving'
+export type ComputerRole = 'mac-host' | 'windows'
 
 export type SessionForm = {
+  serverName: string
   studyId: string
   raId: string
   dyadId: string
@@ -39,6 +41,17 @@ export type LatencyStats = {
 export type LocalNetworkInfo = {
   hostname: string
   addresses: string[]
+}
+
+export type DiscoveredDuckSoupHost = {
+  id: string
+  serverName: string
+  hostName: string
+  duckSoupUrl: string
+  roomId: string
+  address: string
+  port: number
+  seenAt: number
 }
 
 export type ControlEvent = {

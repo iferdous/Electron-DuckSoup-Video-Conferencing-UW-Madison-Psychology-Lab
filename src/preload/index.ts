@@ -18,7 +18,27 @@ const researchApi = {
   checkDuckSoup: (baseUrl: string): Promise<{ ok: boolean; status: number; detail: string }> =>
     ipcRenderer.invoke('check-ducksoup', baseUrl),
   getNetworkInfo: (): Promise<{ hostname: string; addresses: string[] }> =>
-    ipcRenderer.invoke('get-network-info')
+    ipcRenderer.invoke('get-network-info'),
+  advertiseDuckSoupHost: (payload: {
+    serverName: string
+    duckSoupUrl: string
+    roomId: string
+  }): Promise<{ ok: boolean; detail: string; url?: string }> =>
+    ipcRenderer.invoke('advertise-ducksoup-host', payload),
+  stopDuckSoupHostAdvertisement: (): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('stop-ducksoup-host-advertisement'),
+  discoverDuckSoupHosts: (): Promise<
+    Array<{
+      id: string
+      serverName: string
+      hostName: string
+      duckSoupUrl: string
+      roomId: string
+      address: string
+      port: number
+      seenAt: number
+    }>
+  > => ipcRenderer.invoke('discover-ducksoup-hosts')
 }
 
 if (process.contextIsolated) {

@@ -223,6 +223,81 @@ label {
   margin-top: 12px;
 }
 
+.input-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.role-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.role-button {
+  min-height: 44px;
+  font-weight: 800;
+}
+
+.role-button.active {
+  background: #0e7490;
+  border-color: #22d3ee;
+}
+
+.host-summary {
+  border: 1px solid rgb(16 185 129 / 0.35);
+  border-radius: 7px;
+  background: rgb(6 78 59 / 0.2);
+  padding: 10px 12px;
+  margin: 12px 0;
+  display: grid;
+  gap: 4px;
+}
+
+.host-summary span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.host-summary strong {
+  color: #a7f3d0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.discovery-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.discovery-list button {
+  height: auto;
+  min-height: 52px;
+  justify-content: flex-start;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+}
+
+.discovery-list span {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.discovery-list strong {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .browse-button {
   flex: 0 0 auto;
   padding: 0;

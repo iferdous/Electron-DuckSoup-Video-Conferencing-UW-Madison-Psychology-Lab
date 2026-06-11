@@ -37,6 +37,24 @@ declare global {
       }) => Promise<string>
       checkDuckSoup: (baseUrl: string) => Promise<{ ok: boolean; status: number; detail: string }>
       getNetworkInfo: () => Promise<{ hostname: string; addresses: string[] }>
+      advertiseDuckSoupHost: (payload: {
+        serverName: string
+        duckSoupUrl: string
+        roomId: string
+      }) => Promise<{ ok: boolean; detail: string; url?: string }>
+      stopDuckSoupHostAdvertisement: () => Promise<{ ok: boolean }>
+      discoverDuckSoupHosts: () => Promise<
+        Array<{
+          id: string
+          serverName: string
+          hostName: string
+          duckSoupUrl: string
+          roomId: string
+          address: string
+          port: number
+          seenAt: number
+        }>
+      >
     }
     DuckSoup?: {
       render: (

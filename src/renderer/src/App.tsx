@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import type {
+  ComputerRole,
   ConnectionState,
   ControlEvent,
+  DiscoveredDuckSoupHost,
   LatencyStats,
   LocalNetworkInfo,
   LogEvent,
@@ -12,11 +14,12 @@ import type {
 } from './types'
 
 const initialForm: SessionForm = {
+  serverName: 'Mac DuckSoup Host',
   studyId: 'PPS2026',
   raId: '',
   dyadId: '',
-  participantId: '',
-  partnerId: '',
+  participantId: 'P001',
+  partnerId: 'P002',
   roomId: `pps-room-${Date.now()}`,
   targetUserId: '',
   duckSoupUrl: 'http://localhost:8100',
@@ -115,6 +118,17 @@ const emptyLatency: LatencyStats = {
 }
 
 const makeId = (): string => `${Date.now()}-${Math.random().toString(16).slice(2)}`
+
+const slugify = (value: string, fallback: string): string => {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return slug || fallback
+}
+
+const makeRoomId = (dyadId: string): string => `pps-${slugify(dyadId, 'room')}-${Date.now().toString(36)}`
 
 const csvEscape = (value: unknown): string => {
   const text = value == null ? '' : String(value)
@@ -233,6 +247,7 @@ export default function App(): ReactElement {
   const cleanChunksRef = useRef<Blob[]>([])
   const alteredChunksRef = useRef<Blob[]>([])
 
+  const [computerRole, setComputerRole] = useState<ComputerRole>('mac-host')
   const [form, setForm] = useState<SessionForm>(initialForm)
   const [controls, setControls] = useState<ManipulationControls>(initialControls)
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle')
@@ -245,6 +260,12 @@ export default function App(): ReactElement {
   const [recordingSeconds, setRecordingSeconds] = useState(0)
   const [latency, setLatency] = useState<LatencyStats>(emptyLatency)
   const [networkInfo, setNetworkInfo] = useState<LocalNetworkInfo>({ hostname: '', addresses: [] })
+  const [discoveredHosts, setDiscoveredHosts] = useState<DiscoveredDuckSoupHost[]>([])
+  const [isDiscovering, setIsDiscovering] = useState(false)
+  const [hostAdvertisement, setHostAdvertisement] = useState<{ active: boolean; detail: string; url?: string }>({
+    active: false,
+    detail: ''
+  })
 
   const statusLabel = useMemo(() => {
     const labels: Record<ConnectionState, string> = {
@@ -289,6 +310,12 @@ export default function App(): ReactElement {
   }, [])
 
   useEffect(() => {
+    return () => {
+      window.researchApi.stopDuckSoupHostAdvertisement().catch(() => undefined)
+    }
+  }, [])
+
+  useEffect(() => {
     if (remoteVideoRef.current) {
       remoteVideoRef.current.volume = Math.min(Math.max(controls.partnerVolume, 0), 2)
     }
@@ -296,6 +323,71 @@ export default function App(): ReactElement {
 
   const updateForm = (field: keyof SessionForm, value: string): void => {
     setForm((prev) => ({ ...prev, [field]: value }))
+  }
+
+  const chooseRole = (role: ComputerRole): void => {
+    setComputerRole(role)
+    setForm((prev) => ({
+      ...prev,
+      participantId: role === 'mac-host' ? 'P001' : 'P002',
+      partnerId: role === 'mac-host' ? 'P002' : 'P001',
+      duckSoupUrl: role === 'mac-host' ? 'http://localhost:8100' : prev.duckSoupUrl
+    }))
+    setDuckSoupReady(false)
+    setConnectionState('idle')
+    addLog(role === 'mac-host' ? 'Role set to Mac/host as P001.' : 'Role set to Windows as P002.', 'info')
+  }
+
+  const generateNewRoom = (): void => {
+    const roomId = makeRoomId(form.dyadId)
+    updateForm('roomId', roomId)
+    addLog(`New Room ID created: ${roomId}`, 'success')
+  }
+
+  const useDiscoveredHost = (host: DiscoveredDuckSoupHost): void => {
+    setForm((prev) => ({
+      ...prev,
+      serverName: host.serverName,
+      duckSoupUrl: host.duckSoupUrl,
+      roomId: host.roomId || prev.roomId
+    }))
+    setDuckSoupReady(false)
+    setConnectionState('idle')
+    addLog(`Using ${host.serverName} at ${host.duckSoupUrl}.`, 'success')
+  }
+
+  const advertiseHost = async (): Promise<void> => {
+    chooseRole('mac-host')
+    const result = await window.researchApi.advertiseDuckSoupHost({
+      serverName: form.serverName,
+      duckSoupUrl: 'http://localhost:8100',
+      roomId: form.roomId
+    })
+    setHostAdvertisement({ active: result.ok, detail: result.detail, url: result.url })
+    if (result.url) updateForm('duckSoupUrl', result.url)
+    addLog(result.detail, result.ok ? 'success' : 'error')
+  }
+
+  const stopAdvertiseHost = async (): Promise<void> => {
+    await window.researchApi.stopDuckSoupHostAdvertisement()
+    setHostAdvertisement({ active: false, detail: 'Mac/host advertisement stopped.' })
+    addLog('Mac/host advertisement stopped.', 'info')
+  }
+
+  const findHost = async (): Promise<void> => {
+    setIsDiscovering(true)
+    try {
+      const hosts = await window.researchApi.discoverDuckSoupHosts()
+      setDiscoveredHosts(hosts)
+      if (hosts[0]) {
+        chooseRole('windows')
+        useDiscoveredHost(hosts[0])
+      } else {
+        addLog('No Mac/host found. Check that both laptops are on the same non-guest Wi-Fi and Windows network is Private.', 'warn')
+      }
+    } finally {
+      setIsDiscovering(false)
+    }
   }
 
   const loadDuckSoupScript = useCallback(async () => {
@@ -475,12 +567,14 @@ export default function App(): ReactElement {
               addLog('Partner station left the DuckSoup room.', 'warn')
             } else if (message.kind === 'closed' || message.kind === 'end') {
               setConnectionState('ready')
-              addLog('DuckSoup connection closed.', 'warn')
+              addLog('DuckSoup connection closed. If this happened after about 15 seconds, the other laptop did not join the same room as a different station.', 'warn')
             } else if (message.kind.startsWith('error')) {
               setConnectionState('error')
               const detail = String(message.payload ?? message.kind)
               if (detail.toLowerCase().includes('duplicate') || message.kind.toLowerCase().includes('duplicate')) {
                 addLog('DuckSoup rejected the join as a duplicate user. Use different station IDs on the two laptops, such as P001 and P002.', 'error')
+              } else if (detail.toLowerCase().includes('aborted')) {
+                addLog('DuckSoup aborted the room because both laptops were not connected together in time. Use the same Room ID and different station IDs, then press Connect on both laptops within about 10 seconds.', 'error')
               } else {
                 addLog(`${message.kind}: ${detail}`, 'error')
               }
@@ -662,7 +756,93 @@ export default function App(): ReactElement {
       <main className="workspace">
         <aside className="sidebar">
           <section className="panel">
-            <div className="section-title">Session</div>
+            <div className="section-title">Connect First</div>
+            <label>
+              Server name
+              <input value={form.serverName} onChange={(event) => updateForm('serverName', event.target.value)} />
+            </label>
+            <div className="role-switch" aria-label="Computer role">
+              <button
+                className={computerRole === 'mac-host' ? 'role-button active' : 'role-button'}
+                onClick={() => chooseRole('mac-host')}
+              >
+                Mac/host
+              </button>
+              <button
+                className={computerRole === 'windows' ? 'role-button active' : 'role-button'}
+                onClick={() => chooseRole('windows')}
+              >
+                Windows
+              </button>
+            </div>
+            <div className="button-row">
+              {hostAdvertisement.active ? (
+                <button onClick={stopAdvertiseHost}>Stop sharing</button>
+              ) : (
+                <button onClick={advertiseHost}>Share Mac/host</button>
+              )}
+              <button onClick={findHost} disabled={isDiscovering}>
+                {isDiscovering ? 'Finding...' : 'Find Mac/host'}
+              </button>
+            </div>
+            <div className="connection-tip">
+              <strong>{computerRole === 'mac-host' ? 'Mac/host:' : 'Windows:'}</strong>{' '}
+              {computerRole === 'mac-host'
+                ? 'start DuckSoup here, share the host, then connect as P001.'
+                : 'find the Mac/host, keep the same Room ID, then connect as P002.'}
+            </div>
+            {hostAdvertisement.detail && (
+              <div className="host-summary">
+                <span>{hostAdvertisement.active ? 'Sharing' : 'Status'}</span>
+                <strong>{hostAdvertisement.url || hostAdvertisement.detail}</strong>
+              </div>
+            )}
+            {discoveredHosts.length > 0 && (
+              <div className="discovery-list">
+                {discoveredHosts.map((host) => (
+                  <button key={host.id} onClick={() => useDiscoveredHost(host)}>
+                    <span>{host.serverName}</span>
+                    <strong>{host.duckSoupUrl}</strong>
+                  </button>
+                ))}
+              </div>
+            )}
+            <label>
+              DuckSoup server
+              <input value={form.duckSoupUrl} onChange={(event) => updateForm('duckSoupUrl', event.target.value)} />
+            </label>
+            <div className="button-row">
+              <button onClick={checkDuckSoup}>
+                Check
+              </button>
+              {connectionState === 'connected' ? (
+                <button className="danger" onClick={disconnect}>
+                  Disconnect
+                </button>
+              ) : (
+                <button className="primary" onClick={connect} disabled={!duckSoupReady && connectionState !== 'ready'}>
+                  Connect
+                </button>
+              )}
+            </div>
+            <div className="inline-status">
+              <span className={`status-dot status-${connectionState}`} />
+              {statusLabel}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-title">Room and Session</div>
+            <label>
+              Room ID
+              <div className="input-action-row">
+                <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
+                <button onClick={generateNewRoom}>New</button>
+              </div>
+            </label>
+            <div className={form.participantId && form.participantId === form.partnerId ? 'connection-tip error' : 'connection-tip'}>
+              <strong>Important:</strong> both laptops need the same Room ID. Mac/host should be P001 and Windows should be P002.
+            </div>
             <div className="field-grid two">
               <label>
                 Study
@@ -693,47 +873,18 @@ export default function App(): ReactElement {
                 />
               </label>
             </div>
-            <label>
-              Room ID
-              <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
-            </label>
-            <div className={form.participantId && form.participantId === form.partnerId ? 'connection-tip error' : 'connection-tip'}>
-              <strong>Two-laptop rule:</strong> use the same Room ID, different station IDs, and press Connect on both laptops within about 10 seconds.
-            </div>
-            <label>
-              DuckSoup server
-              <input value={form.duckSoupUrl} onChange={(event) => updateForm('duckSoupUrl', event.target.value)} />
-            </label>
             <div className="folder-row">
               <input value={form.outputFolder} readOnly placeholder="Choose output folder" />
               <button className="browse-button" onClick={pickFolder} title="Select output folder">
                 Browse
               </button>
             </div>
-            <div className="button-row">
-              <button onClick={checkDuckSoup}>
-                Check
-              </button>
-              {connectionState === 'connected' ? (
-                <button className="danger" onClick={disconnect}>
-                  Disconnect
-                </button>
-              ) : (
-                <button className="primary" onClick={connect} disabled={!duckSoupReady && connectionState !== 'ready'}>
-                  Connect
-                </button>
-              )}
-            </div>
-            <div className="inline-status">
-              <span className={`status-dot status-${connectionState}`} />
-              {statusLabel}
-            </div>
           </section>
 
           <section className="panel">
-            <div className="section-title">Two-Computer Setup</div>
+            <div className="section-title">Local Network</div>
             <p className="plain-text">
-              Run DuckSoup on one host laptop. Use the same Room ID on both laptops, but set different station IDs, such as P001 on laptop A and P002 on laptop B.
+              If automatic discovery does not find the Mac/host, use one of these addresses on the Windows laptop. Windows also needs its Wi-Fi network set to Private.
             </p>
             <div className="network-list">
               <div><strong>Host name</strong><span>{networkInfo.hostname || 'unknown'}</span></div>
@@ -822,9 +973,9 @@ export default function App(): ReactElement {
           </div>
 
           <section className="panel">
-            <div className="section-title">Output to PPS / Questionnaire Pipeline</div>
+            <div className="section-title">Saved Files</div>
             <p className="plain-text">
-              Each recorded session writes clean and altered `.webm` videos, a JSON manifest, and a manipulation-events CSV. The PPS app can use the chosen video as its later conversation playback file; the manifest keeps dyad, participant, condition, and live-control timing together.
+              Each session saves two videos: the normal webcam video and the DuckSoup/Mozza altered video. It also saves small data files with the session details and the timing of any setting changes, so PPS can use the chosen video later.
             </p>
           </section>
 
