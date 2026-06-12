@@ -40,6 +40,7 @@ declare global {
       advertiseDuckSoupHost: (payload: {
         serverName: string
         duckSoupUrl: string
+        callSignalUrl?: string
         roomId: string
       }) => Promise<{ ok: boolean; detail: string; url?: string }>
       stopDuckSoupHostAdvertisement: () => Promise<{ ok: boolean }>
@@ -49,9 +50,11 @@ declare global {
           serverName: string
           hostName: string
           duckSoupUrl: string
+          callSignalUrl: string
           roomId: string
           address: string
           port: number
+          signalPort: number
           seenAt: number
         }>
       >

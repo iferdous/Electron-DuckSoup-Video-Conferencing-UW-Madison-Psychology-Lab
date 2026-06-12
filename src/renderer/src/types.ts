@@ -51,9 +51,11 @@ export type DiscoveredDuckSoupHost = {
   serverName: string
   hostName: string
   duckSoupUrl: string
+  callSignalUrl: string
   roomId: string
   address: string
   port: number
+  signalPort: number
   seenAt: number
 }
 

@@ -57,6 +57,7 @@ type SignalEnvelope = {
     peers?: CallPeer[]
     role?: CallRole
     displayName?: string
+    userId?: string
   }
 }
 
@@ -198,6 +199,16 @@ const buildSignalingUrl = (baseUrl: string): string => {
   return url.toString()
 }
 
+const buildCallSignalUrlFromDuckSoupUrl = (duckSoupUrl: string): string => {
+  try {
+    const url = new URL(duckSoupUrl)
+    url.port = '8765'
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return 'http://localhost:8765'
+  }
+}
+
 const selectedAudioFx = (controlState: ManipulationControls): string | undefined => {
   if (controlState.audioPreset === 'custom-pitch') {
     return `pitch pitch=${controlState.audioPitch}`
@@ -244,6 +255,65 @@ const latencyFromStats = (payload: unknown): LatencyStats | null => {
       readPacketsLost(stats.remoteInboundRTPAudio) +
       readPacketsLost(stats.inboundRTPVideo) +
       readPacketsLost(stats.inboundRTPAudio),
+    updatedAt: new Date().toLocaleTimeString()
+  }
+}
+
+const latencyFromPeerConnection = async (peer: RTCPeerConnection): Promise<LatencyStats | null> => {
+  const report = await peer.getStats()
+  let rttMs: number | null = null
+  let videoRttMs: number | null = null
+  let audioRttMs: number | null = null
+  let jitterMs: number | null = null
+  let packetsLost = 0
+
+  report.forEach((stat) => {
+    const item = stat as RTCStats & {
+      state?: string
+      nominated?: boolean
+      currentRoundTripTime?: number
+      roundTripTime?: number
+      kind?: string
+      mediaType?: string
+      jitter?: number
+      packetsLost?: number
+    }
+
+    if (
+      item.type === 'candidate-pair' &&
+      item.state === 'succeeded' &&
+      item.nominated &&
+      typeof item.currentRoundTripTime === 'number'
+    ) {
+      rttMs = toMs(item.currentRoundTripTime)
+    }
+
+    if (item.type === 'remote-inbound-rtp' && typeof item.roundTripTime === 'number') {
+      const kind = item.kind ?? item.mediaType
+      if (kind === 'video') videoRttMs = toMs(item.roundTripTime)
+      if (kind === 'audio') audioRttMs = toMs(item.roundTripTime)
+    }
+
+    if (item.type === 'inbound-rtp') {
+      if (typeof item.jitter === 'number') jitterMs = toMs(item.jitter)
+      if (typeof item.packetsLost === 'number') packetsLost += item.packetsLost
+    }
+  })
+
+  const rttValues = [rttMs, videoRttMs, audioRttMs].filter((value): value is number => value !== null)
+  const averageRtt =
+    rttValues.length > 0
+      ? Math.round(rttValues.reduce((total, value) => total + value, 0) / rttValues.length)
+      : null
+
+  if (averageRtt === null && jitterMs === null && packetsLost === 0) return null
+
+  return {
+    rttMs: averageRtt,
+    jitterMs,
+    audioRttMs,
+    videoRttMs,
+    packetsLost,
     updatedAt: new Date().toLocaleTimeString()
   }
 }
@@ -354,6 +424,22 @@ export default function App(): ReactElement {
     }
   }, [controls.partnerVolume])
 
+  useEffect(() => {
+    if (!['waiting', 'connecting', 'connected'].includes(callState)) return undefined
+
+    const interval = window.setInterval(() => {
+      const peer = callPeerRef.current
+      if (!peer) return
+      latencyFromPeerConnection(peer)
+        .then((nextLatency) => {
+          if (nextLatency) setLatency(nextLatency)
+        })
+        .catch(() => undefined)
+    }, 1000)
+
+    return () => window.clearInterval(interval)
+  }, [callState])
+
   const updateForm = (field: keyof SessionForm, value: string): void => {
     setForm((prev) => ({ ...prev, [field]: value }))
   }
@@ -382,23 +468,33 @@ export default function App(): ReactElement {
       ...prev,
       serverName: host.serverName,
       duckSoupUrl: host.duckSoupUrl,
+      callSignalUrl: host.callSignalUrl,
       roomId: host.roomId || prev.roomId
     }))
     setDuckSoupReady(false)
     setConnectionState('idle')
-    addLog(`Using ${host.serverName} at ${host.duckSoupUrl}.`, 'success')
+    addLog(`Using ${host.serverName}: DuckSoup ${host.duckSoupUrl}, call server ${host.callSignalUrl}.`, 'success')
   }
 
   const advertiseHost = async (): Promise<void> => {
     chooseRole('mac-host')
+    const signal = await window.researchApi.startCallSignalServer(8765)
+    setSignalServer({ active: signal.ok, localUrl: signal.localUrl, lanUrl: signal.lanUrl })
+    updateForm('callSignalUrl', signal.localUrl)
     const result = await window.researchApi.advertiseDuckSoupHost({
       serverName: form.serverName,
       duckSoupUrl: 'http://localhost:8100',
+      callSignalUrl: signal.localUrl,
       roomId: form.roomId
     })
     setHostAdvertisement({ active: result.ok, detail: result.detail, url: result.url })
     if (result.url) updateForm('duckSoupUrl', result.url)
-    addLog(result.detail, result.ok ? 'success' : 'error')
+    addLog(
+      result.ok
+        ? `Mac/host is sharing this room. Windows should find ${signal.lanUrl} automatically.`
+        : result.detail,
+      result.ok ? 'success' : 'error'
+    )
   }
 
   const stopAdvertiseHost = async (): Promise<void> => {
@@ -533,7 +629,7 @@ export default function App(): ReactElement {
     }
 
     if (envelope.type === 'peer-left') {
-      const userId = envelope.payload?.from || envelope.payload?.peer?.userId
+      const userId = envelope.payload?.userId || envelope.payload?.from || envelope.payload?.peer?.userId
       if (userId) setCallPeers((prev) => prev.filter((peer) => peer.userId !== userId))
       addLog('A live call peer left the room.', 'warn')
       return
@@ -1144,7 +1240,13 @@ export default function App(): ReactElement {
                   <button
                     key={address}
                     className="network-address"
-                    onClick={() => updateForm('duckSoupUrl', `http://${address}:8100`)}
+                    onClick={() =>
+                      setForm((prev) => ({
+                        ...prev,
+                        duckSoupUrl: `http://${address}:8100`,
+                        callSignalUrl: `http://${address}:8765`
+                      }))
+                    }
                   >
                     http://{address}:8100
                   </button>
@@ -1209,7 +1311,8 @@ export default function App(): ReactElement {
                 </button>
               </div>
               <div className="button-row no-margin">
-                <button onClick={startSignalServer}>Start Mac server</button>
+                <button onClick={advertiseHost}>Start Mac host</button>
+                <button onClick={startSignalServer}>Signal only</button>
                 <button onClick={checkSignalServer}>Check</button>
                 {callState === 'idle' || callState === 'error' ? (
                   <button className="primary" onClick={joinLiveCall}>Join call</button>
@@ -1224,6 +1327,10 @@ export default function App(): ReactElement {
                 <strong>Mac uses {signalServer.localUrl} · Windows uses {signalServer.lanUrl}</strong>
               </div>
             )}
+            <div className="connection-tip">
+              Mac/host starts the call server once. Windows should use the same Room ID and this signal URL:{' '}
+              <strong>{buildCallSignalUrlFromDuckSoupUrl(form.duckSoupUrl)}</strong>
+            </div>
             <div className="inline-status">
               <span className={`status-dot status-${callState === 'connected' ? 'connected' : callState === 'error' ? 'error' : callState === 'idle' ? 'idle' : 'connecting'}`} />
               Live call: {callState}

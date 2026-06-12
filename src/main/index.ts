@@ -21,6 +21,7 @@ type SessionMetadata = {
 type HostAdvertisement = {
   serverName: string
   duckSoupUrl: string
+  callSignalUrl?: string
   roomId: string
 }
 
@@ -30,9 +31,11 @@ type DiscoveryPacket = {
   serverName: string
   hostName: string
   duckSoupUrl: string
+  callSignalUrl: string
   roomId: string
   addresses: string[]
   port: number
+  signalPort: number
   sentAt: number
 }
 
@@ -41,9 +44,11 @@ type DiscoveredHost = {
   serverName: string
   hostName: string
   duckSoupUrl: string
+  callSignalUrl: string
   roomId: string
   address: string
   port: number
+  signalPort: number
   seenAt: number
 }
 
@@ -77,6 +82,7 @@ let advertisementSocket: Socket | null = null
 let advertisementTimer: NodeJS.Timeout | null = null
 let mainWindowRef: BrowserWindow | null = null
 let callSignalServer: Server | null = null
+let callSignalServerPort: number | null = null
 const signalClients = new Map<string, SignalClient>()
 
 const safeSegment = (value: string, fallback: string): string => {
@@ -96,16 +102,16 @@ const localAddresses = (): string[] => {
 
 const firstLanAddress = (): string => localAddresses()[0] ?? '127.0.0.1'
 
-const hostUrlFrom = (baseUrl: string, fallbackAddress = firstLanAddress()): string => {
+const hostUrlFrom = (baseUrl: string, fallbackAddress = firstLanAddress(), fallbackPort = 8100): string => {
   try {
     const url = new URL(baseUrl)
     if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
       url.hostname = fallbackAddress
     }
-    if (!url.port) url.port = '8100'
+    if (!url.port) url.port = String(fallbackPort)
     return url.toString().replace(/\/$/, '')
   } catch {
-    return `http://${fallbackAddress}:8100`
+    return `http://${fallbackAddress}:${fallbackPort}`
   }
 }
 
@@ -135,7 +141,12 @@ const startAdvertisement = (payload: HostAdvertisement): Promise<{ ok: boolean; 
     }
 
     const address = firstLanAddress()
-    const duckSoupUrl = hostUrlFrom(payload.duckSoupUrl, address)
+    const duckSoupUrl = hostUrlFrom(payload.duckSoupUrl, address, 8100)
+    const callSignalUrl = hostUrlFrom(
+      payload.callSignalUrl || `http://localhost:${callSignalServerPort ?? DEFAULT_SIGNAL_PORT}`,
+      address,
+      callSignalServerPort ?? DEFAULT_SIGNAL_PORT
+    )
     const packet = (): Buffer =>
       Buffer.from(
         JSON.stringify({
@@ -144,9 +155,11 @@ const startAdvertisement = (payload: HostAdvertisement): Promise<{ ok: boolean; 
           serverName: payload.serverName.trim() || os.hostname(),
           hostName: os.hostname(),
           duckSoupUrl,
+          callSignalUrl,
           roomId: payload.roomId,
           addresses: localAddresses(),
           port: 8100,
+          signalPort: callSignalServerPort ?? DEFAULT_SIGNAL_PORT,
           sentAt: Date.now()
         } satisfies DiscoveryPacket)
       )
@@ -169,7 +182,7 @@ const startAdvertisement = (payload: HostAdvertisement): Promise<{ ok: boolean; 
         socket.setMulticastLoopback(true)
         sendPacket()
         advertisementTimer = setInterval(sendPacket, 1000)
-        finish({ ok: true, detail: `Advertising ${duckSoupUrl} on the local network.`, url: duckSoupUrl })
+        finish({ ok: true, detail: `Advertising DuckSoup ${duckSoupUrl} and call server ${callSignalUrl}.`, url: duckSoupUrl })
       } catch (error) {
         stopAdvertisement()
         finish({ ok: false, detail: error instanceof Error ? error.message : 'Could not advertise host.' })
@@ -195,16 +208,20 @@ const discoverHosts = (durationMs = 3500): Promise<DiscoveredHost[]> => {
         const packet = JSON.parse(message.toString()) as Partial<DiscoveryPacket>
         if (packet.app !== 'ducksoup-conference-lab' || packet.version !== 1) return
         const address = remoteInfo.address
-        const duckSoupUrl = hostUrlFrom(packet.duckSoupUrl || `http://${address}:8100`, address)
-        const id = `${address}:${packet.port ?? 8100}:${packet.roomId ?? ''}`
+        const duckSoupUrl = hostUrlFrom(packet.duckSoupUrl || `http://${address}:8100`, address, 8100)
+        const signalPort = packet.signalPort ?? DEFAULT_SIGNAL_PORT
+        const callSignalUrl = hostUrlFrom(packet.callSignalUrl || `http://${address}:${signalPort}`, address, signalPort)
+        const id = `${address}:${packet.port ?? 8100}:${signalPort}:${packet.roomId ?? ''}`
         found.set(id, {
           id,
           serverName: packet.serverName || packet.hostName || address,
           hostName: packet.hostName || address,
           duckSoupUrl,
+          callSignalUrl,
           roomId: packet.roomId || '',
           address,
           port: packet.port ?? 8100,
+          signalPort,
           seenAt: Date.now()
         })
       } catch {
@@ -286,10 +303,11 @@ const broadcastSignalEvent = (
 
 const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolean; localUrl: string; lanUrl: string }> => {
   if (callSignalServer) {
+    const activePort = callSignalServerPort ?? port
     return Promise.resolve({
       ok: true,
-      localUrl: `http://localhost:${port}`,
-      lanUrl: `http://${firstLanAddress()}:${port}`
+      localUrl: `http://localhost:${activePort}`,
+      lanUrl: `http://${firstLanAddress()}:${activePort}`
     })
   }
 
@@ -329,6 +347,13 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
             'Content-Type': 'text/event-stream'
           })
           response.write(': connected\n\n')
+
+          for (const existing of roomClients(roomId)) {
+            if (existing.userId === userId) {
+              existing.response.end()
+              signalClients.delete(existing.id)
+            }
+          }
 
           const client: SignalClient = {
             id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -396,6 +421,7 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
     server.once('error', reject)
     server.listen(port, '0.0.0.0', () => {
       callSignalServer = server
+      callSignalServerPort = port
       resolve({
         ok: true,
         localUrl: `http://localhost:${port}`,
@@ -410,6 +436,7 @@ const stopCallSignalServer = (): void => {
   signalClients.clear()
   callSignalServer?.close()
   callSignalServer = null
+  callSignalServerPort = null
 }
 
 function createWindow(): void {

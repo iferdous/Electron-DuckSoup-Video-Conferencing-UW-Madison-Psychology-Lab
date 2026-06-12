@@ -22,6 +22,7 @@ const researchApi = {
   advertiseDuckSoupHost: (payload: {
     serverName: string
     duckSoupUrl: string
+    callSignalUrl?: string
     roomId: string
   }): Promise<{ ok: boolean; detail: string; url?: string }> =>
     ipcRenderer.invoke('advertise-ducksoup-host', payload),
@@ -33,9 +34,11 @@ const researchApi = {
       serverName: string
       hostName: string
       duckSoupUrl: string
+      callSignalUrl: string
       roomId: string
       address: string
       port: number
+      signalPort: number
       seenAt: number
     }>
   > => ipcRenderer.invoke('discover-ducksoup-hosts'),
