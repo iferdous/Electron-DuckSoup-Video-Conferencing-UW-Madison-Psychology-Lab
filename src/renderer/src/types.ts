@@ -9,6 +9,7 @@ export type SessionForm = {
   studyId: string
   raId: string
   dyadId: string
+  displayName: string
   participantId: string
   partnerId: string
   roomId: string

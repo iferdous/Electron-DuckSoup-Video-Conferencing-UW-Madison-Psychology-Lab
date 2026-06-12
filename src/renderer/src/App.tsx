@@ -21,6 +21,7 @@ const initialForm: SessionForm = {
   studyId: 'PPS2026',
   raId: '',
   dyadId: '',
+  displayName: 'Participant',
   participantId: 'P001',
   partnerId: 'P002',
   roomId: `pps-room-${Date.now()}`,
@@ -333,6 +334,7 @@ export default function App(): ReactElement {
   const callLocalStreamRef = useRef<MediaStream | null>(null)
   const callRemoteStreamRef = useRef<MediaStream | null>(null)
   const callTargetRef = useRef<string>('')
+  const callUserIdRef = useRef<string>(`station-${makeId()}`)
   const cleanStreamRef = useRef<MediaStream | null>(null)
   const alteredStreamRef = useRef<MediaStream | null>(null)
   const playerRef = useRef<DuckSoupPlayerHandle | null>(null)
@@ -521,7 +523,7 @@ export default function App(): ReactElement {
 
   const callDisplayName = (): string => {
     if (callRole === 'director') return form.raId ? `Director ${form.raId}` : 'Director'
-    return form.participantId || 'Participant'
+    return form.displayName.trim() || 'Participant'
   }
 
   const signalBaseUrl = (): string => form.callSignalUrl.replace(/\/$/, '')
@@ -532,7 +534,7 @@ export default function App(): ReactElement {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         roomId: form.roomId,
-        from: form.participantId,
+        from: callUserIdRef.current,
         to,
         type,
         payload,
@@ -599,9 +601,9 @@ export default function App(): ReactElement {
   const maybeOfferToPeer = (peer: CallPeer): void => {
     if (callRole !== 'participant') return
     if (peer.role !== 'participant') return
-    if (peer.userId === form.participantId) return
+    if (peer.userId === callUserIdRef.current) return
     if (callPeerRef.current) return
-    if (form.participantId.localeCompare(peer.userId) < 0) {
+    if (callUserIdRef.current.localeCompare(peer.userId) < 0) {
       makeCallOffer(peer.userId).catch((error) =>
         addLog(error instanceof Error ? error.message : 'Could not start live call offer.', 'error')
       )
@@ -613,7 +615,8 @@ export default function App(): ReactElement {
     if (envelope.type === 'hello' || envelope.type === 'peer-list') {
       const peers = envelope.payload?.peers ?? []
       setCallPeers(peers)
-      peers.find((peer) => peer.userId !== form.participantId && peer.role === 'participant') && setCallState('connecting')
+      peers.find((peer) => peer.userId !== callUserIdRef.current && peer.role === 'participant') &&
+        setCallState('connecting')
       peers.forEach(maybeOfferToPeer)
       return
     }
@@ -641,7 +644,7 @@ export default function App(): ReactElement {
     }
 
     if (envelope.type !== 'signal' || !envelope.payload?.type || !envelope.payload.from) return
-    if (envelope.payload.to && envelope.payload.to !== form.participantId) return
+    if (envelope.payload.to && envelope.payload.to !== callUserIdRef.current) return
 
     const from = envelope.payload.from
     const peer = await getOrCreateCallPeer(from)
@@ -674,8 +677,8 @@ export default function App(): ReactElement {
   }
 
   const joinLiveCall = async (): Promise<void> => {
-    if (!form.roomId.trim() || !form.participantId.trim()) {
-      addLog('Room ID and This station ID are required before joining the live call.', 'error')
+    if (!form.callSignalUrl.trim() || !form.roomId.trim() || !callDisplayName().trim()) {
+      addLog('Server URL, Room ID, and Display name are required before joining the live call.', 'error')
       return
     }
 
@@ -695,7 +698,7 @@ export default function App(): ReactElement {
 
       const params = new URLSearchParams({
         roomId: form.roomId,
-        userId: form.participantId,
+        userId: callUserIdRef.current,
         role: callRole,
         displayName: callDisplayName()
       })
@@ -1100,66 +1103,82 @@ export default function App(): ReactElement {
 
       <main className="workspace">
         <aside className="sidebar">
-          <section className="panel">
-            <div className="section-title">Connect First</div>
+          <section className="panel live-setup-panel">
+            <div className="section-title accent">Live Call Setup</div>
             <label>
-              Server name
-              <input value={form.serverName} onChange={(event) => updateForm('serverName', event.target.value)} />
+              Server URL
+              <input
+                value={form.callSignalUrl}
+                onChange={(event) => updateForm('callSignalUrl', event.target.value)}
+                placeholder="Mac: http://localhost:8765 · Windows: http://Mac-IP:8765"
+              />
             </label>
-            <div className="role-switch" aria-label="Computer role">
-              <button
-                className={computerRole === 'mac-host' ? 'role-button active' : 'role-button'}
-                onClick={() => chooseRole('mac-host')}
-              >
-                Mac/host
-              </button>
-              <button
-                className={computerRole === 'windows' ? 'role-button active' : 'role-button'}
-                onClick={() => chooseRole('windows')}
-              >
-                Windows
-              </button>
+            <label>
+              Display name
+              <input
+                value={form.displayName}
+                onChange={(event) => updateForm('displayName', event.target.value)}
+                placeholder="Your name"
+              />
+            </label>
+            <label>
+              Room ID
+              <div className="input-action-row">
+                <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
+                <button onClick={generateNewRoom}>New</button>
+              </div>
+            </label>
+            <div className="button-row">
+              <button onClick={startSignalServer}>Start server here</button>
+              <button onClick={checkSignalServer}>Check</button>
             </div>
             <div className="button-row">
-              {hostAdvertisement.active ? (
-                <button onClick={stopAdvertiseHost}>Stop sharing</button>
+              {callState === 'idle' || callState === 'error' ? (
+                <button className="primary wide-button" onClick={joinLiveCall}>
+                  Join live call
+                </button>
               ) : (
-                <button onClick={advertiseHost}>Share Mac/host</button>
+                <button className="danger wide-button" onClick={leaveLiveCall}>
+                  Leave live call
+                </button>
               )}
-              <button onClick={findHost} disabled={isDiscovering}>
-                {isDiscovering ? 'Finding...' : 'Find Mac/host'}
-              </button>
             </div>
-            <div className="connection-tip">
-              <strong>{computerRole === 'mac-host' ? 'Mac/host:' : 'Windows:'}</strong>{' '}
-              {computerRole === 'mac-host'
-                ? 'start DuckSoup here, share the host, then connect as P001.'
-                : 'find the Mac/host, keep the same Room ID, then connect as P002.'}
+            <div className="inline-status">
+              <span
+                className={`status-dot status-${
+                  callState === 'connected'
+                    ? 'connected'
+                    : callState === 'error'
+                      ? 'error'
+                      : callState === 'idle'
+                        ? 'idle'
+                        : 'connecting'
+                }`}
+              />
+              Live call: {callState}
             </div>
-            {hostAdvertisement.detail && (
+            {signalServer.active && (
               <div className="host-summary">
-                <span>{hostAdvertisement.active ? 'Sharing' : 'Status'}</span>
-                <strong>{hostAdvertisement.url || hostAdvertisement.detail}</strong>
+                <span>This computer is hosting the call server</span>
+                <strong>Other computer uses {signalServer.lanUrl}</strong>
               </div>
             )}
-            {discoveredHosts.length > 0 && (
-              <div className="discovery-list">
-                {discoveredHosts.map((host) => (
-                  <button key={host.id} onClick={() => useDiscoveredHost(host)}>
-                    <span>{host.serverName}</span>
-                    <strong>{host.duckSoupUrl}</strong>
-                  </button>
-                ))}
-              </div>
-            )}
+            <div className="connection-tip">
+              For this test, only this box matters. Mac starts the server here. Windows types the Mac URL, uses the same Room ID, enters a display name, then joins.
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-title">Optional DuckSoup / Mozza</div>
+            <p className="plain-text">
+              Skip this for the basic two-computer video test. This is only for the older Mozza altered-stream path.
+            </p>
             <label>
               DuckSoup server
               <input value={form.duckSoupUrl} onChange={(event) => updateForm('duckSoupUrl', event.target.value)} />
             </label>
             <div className="button-row">
-              <button onClick={checkDuckSoup}>
-                Check
-              </button>
+              <button onClick={checkDuckSoup}>Check</button>
               {connectionState === 'connected' ? (
                 <button className="danger" onClick={disconnect}>
                   Disconnect
@@ -1172,22 +1191,12 @@ export default function App(): ReactElement {
             </div>
             <div className="inline-status">
               <span className={`status-dot status-${connectionState}`} />
-              {statusLabel}
+              DuckSoup: {statusLabel}
             </div>
           </section>
 
           <section className="panel">
-            <div className="section-title">Room and Session</div>
-            <label>
-              Room ID
-              <div className="input-action-row">
-                <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
-                <button onClick={generateNewRoom}>New</button>
-              </div>
-            </label>
-            <div className={form.participantId && form.participantId === form.partnerId ? 'connection-tip error' : 'connection-tip'}>
-              <strong>Important:</strong> both laptops need the same Room ID. Mac/host should be P001 and Windows should be P002.
-            </div>
+            <div className="section-title">Session Details</div>
             <div className="field-grid two">
               <label>
                 Study
@@ -1225,111 +1234,24 @@ export default function App(): ReactElement {
               </button>
             </div>
           </section>
-
-          <section className="panel">
-            <div className="section-title">Local Network</div>
-            <p className="plain-text">
-              If automatic discovery does not find the Mac/host, use one of these addresses on the Windows laptop. Windows also needs its Wi-Fi network set to Private.
-            </p>
-            <div className="network-list">
-              <div><strong>Host name</strong><span>{networkInfo.hostname || 'unknown'}</span></div>
-              {networkInfo.addresses.length === 0 ? (
-                <div><strong>LAN IP</strong><span>not detected</span></div>
-              ) : (
-                networkInfo.addresses.map((address) => (
-                  <button
-                    key={address}
-                    className="network-address"
-                    onClick={() =>
-                      setForm((prev) => ({
-                        ...prev,
-                        duckSoupUrl: `http://${address}:8100`,
-                        callSignalUrl: `http://${address}:8765`
-                      }))
-                    }
-                  >
-                    http://{address}:8100
-                  </button>
-                ))
-              )}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="section-title">Modification Condition</div>
-            <div className="preset-list">
-              {conditionPresets.map((preset) => (
-                <button
-                  key={preset.label}
-                  className={form.condition === preset.label ? 'preset active' : 'preset'}
-                  onClick={() => applyPreset(preset)}
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-          </section>
         </aside>
 
         <section className="center-stage">
           <section className="panel call-panel">
             <div className="section-title accent">Live Video Conference</div>
-            <div className="call-controls">
-              <label>
-                Signal server
-                <input
-                  value={form.callSignalUrl}
-                  onChange={(event) => updateForm('callSignalUrl', event.target.value)}
-                  placeholder="http://localhost:8765 or ngrok URL"
-                />
-              </label>
-              <label>
-                Display name
-                <input
-                  value={callDisplayName()}
-                  onChange={(event) => {
-                    if (callRole === 'director') updateForm('raId', event.target.value.replace(/^Director\s*/i, ''))
-                    else updateForm('participantId', event.target.value)
-                  }}
-                />
-              </label>
-              <div className="role-switch compact-switch">
-                <button
-                  className={callRole === 'participant' ? 'role-button active' : 'role-button'}
-                  onClick={() => setCallRole('participant')}
-                >
-                  Participant
-                </button>
-                <button
-                  className={callRole === 'director' ? 'role-button active' : 'role-button'}
-                  onClick={() => {
-                    setCallRole('director')
-                    if (form.participantId === 'P001' || form.participantId === 'P002') updateForm('participantId', 'director')
-                  }}
-                >
-                  Director
-                </button>
+            <div className="call-summary-grid">
+              <div className="metric">
+                <span>Server</span>
+                <strong>{form.callSignalUrl}</strong>
               </div>
-              <div className="button-row no-margin">
-                <button onClick={advertiseHost}>Start Mac host</button>
-                <button onClick={startSignalServer}>Signal only</button>
-                <button onClick={checkSignalServer}>Check</button>
-                {callState === 'idle' || callState === 'error' ? (
-                  <button className="primary" onClick={joinLiveCall}>Join call</button>
-                ) : (
-                  <button className="danger" onClick={leaveLiveCall}>Leave call</button>
-                )}
+              <div className="metric">
+                <span>Room</span>
+                <strong>{form.roomId}</strong>
               </div>
-            </div>
-            {signalServer.active && (
-              <div className="host-summary">
-                <span>Mac/host signal server</span>
-                <strong>Mac uses {signalServer.localUrl} · Windows uses {signalServer.lanUrl}</strong>
+              <div className="metric">
+                <span>You</span>
+                <strong>{callDisplayName()}</strong>
               </div>
-            )}
-            <div className="connection-tip">
-              Mac/host starts the call server once. Windows should use the same Room ID and this signal URL:{' '}
-              <strong>{buildCallSignalUrlFromDuckSoupUrl(form.duckSoupUrl)}</strong>
             </div>
             <div className="inline-status">
               <span className={`status-dot status-${callState === 'connected' ? 'connected' : callState === 'error' ? 'error' : callState === 'idle' ? 'idle' : 'connecting'}`} />
@@ -1348,10 +1270,9 @@ export default function App(): ReactElement {
             </div>
             <div className="video-grid call-video-grid">
               <div className="video-panel">
-                <div className="video-label">Local camera · {callRole}</div>
+                <div className="video-label">Local camera · {callDisplayName()}</div>
                 <video ref={callLocalVideoRef} autoPlay muted playsInline className="video-surface" />
-                {callRole === 'director' && <div className="video-empty">Director joins invisibly with no camera.</div>}
-                {callRole === 'participant' && callState === 'idle' && <div className="video-empty">Join the call to start your camera.</div>}
+                {callState === 'idle' && <div className="video-empty">Join the call to start your camera.</div>}
               </div>
               <div className="video-panel">
                 <div className="video-label">Remote participant</div>

@@ -338,11 +338,22 @@ label {
   margin-bottom: 0;
 }
 
+.live-setup-panel {
+  border-color: rgb(125 211 252 / 0.45);
+}
+
 .call-controls {
   display: grid;
   grid-template-columns: minmax(220px, 1.3fr) minmax(160px, 0.8fr) 220px auto;
   gap: 12px;
   align-items: end;
+}
+
+.call-summary-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) minmax(180px, 1fr) minmax(140px, 0.7fr);
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .call-video-grid {
@@ -377,6 +388,10 @@ label {
 .button-row.no-margin {
   margin-top: 0;
   align-self: end;
+}
+
+.wide-button {
+  width: 100%;
 }
 
 .video-panel {
