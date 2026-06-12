@@ -236,6 +236,10 @@ label {
   margin-top: 12px;
 }
 
+.compact-switch {
+  margin-top: 0;
+}
+
 .role-button {
   min-height: 44px;
   font-weight: 800;
@@ -328,6 +332,51 @@ label {
   display: grid;
   grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
   gap: 16px;
+}
+
+.call-panel {
+  margin-bottom: 0;
+}
+
+.call-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.3fr) minmax(160px, 0.8fr) 220px auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.call-video-grid {
+  margin-top: 14px;
+}
+
+.call-video-grid .video-panel {
+  min-height: 300px;
+}
+
+.call-video-grid .video-surface {
+  min-height: 300px;
+}
+
+.participant-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.participant-strip span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: #c7d2e5;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 6px 10px;
+}
+
+.button-row.no-margin {
+  margin-top: 0;
+  align-self: end;
 }
 
 .video-panel {
@@ -595,6 +644,10 @@ label {
   }
 
   .video-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .call-controls {
     grid-template-columns: 1fr;
   }
 

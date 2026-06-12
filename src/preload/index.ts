@@ -38,7 +38,12 @@ const researchApi = {
       port: number
       seenAt: number
     }>
-  > => ipcRenderer.invoke('discover-ducksoup-hosts')
+  > => ipcRenderer.invoke('discover-ducksoup-hosts'),
+  startCallSignalServer: (port?: number): Promise<{ ok: boolean; localUrl: string; lanUrl: string }> =>
+    ipcRenderer.invoke('start-call-signal-server', port),
+  stopCallSignalServer: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('stop-call-signal-server'),
+  checkCallSignalServer: (baseUrl: string): Promise<{ ok: boolean; status: number; detail: string }> =>
+    ipcRenderer.invoke('check-call-signal-server', baseUrl)
 }
 
 if (process.contextIsolated) {

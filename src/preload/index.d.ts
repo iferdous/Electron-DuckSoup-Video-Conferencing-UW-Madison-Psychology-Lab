@@ -55,6 +55,9 @@ declare global {
           seenAt: number
         }>
       >
+      startCallSignalServer: (port?: number) => Promise<{ ok: boolean; localUrl: string; lanUrl: string }>
+      stopCallSignalServer: () => Promise<{ ok: boolean }>
+      checkCallSignalServer: (baseUrl: string) => Promise<{ ok: boolean; status: number; detail: string }>
     }
     DuckSoup?: {
       render: (

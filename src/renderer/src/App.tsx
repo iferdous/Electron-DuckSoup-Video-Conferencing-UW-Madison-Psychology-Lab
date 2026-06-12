@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import type {
+  CallPeer,
+  CallRole,
+  CallState,
   ComputerRole,
   ConnectionState,
   ControlEvent,
@@ -23,6 +26,7 @@ const initialForm: SessionForm = {
   roomId: `pps-room-${Date.now()}`,
   targetUserId: '',
   duckSoupUrl: 'http://localhost:8100',
+  callSignalUrl: 'http://localhost:8765',
   outputFolder: '',
   condition: 'Neutral / Sham'
 }
@@ -41,6 +45,20 @@ const initialControls: ManipulationControls = {
 }
 
 type DuckSoupPlayerHandle = Awaited<ReturnType<NonNullable<Window['DuckSoup']>['render']>>
+
+type SignalEnvelope = {
+  type: string
+  payload?: {
+    from?: string
+    to?: string
+    type?: string
+    payload?: unknown
+    peer?: CallPeer
+    peers?: CallPeer[]
+    role?: CallRole
+    displayName?: string
+  }
+}
 
 const conditionPresets: Array<{ label: string; alpha: number; threshold?: number; note: string }> = [
   { label: 'Neutral / Sham', alpha: 1, note: 'No intended smile/frown shift.' },
@@ -236,8 +254,15 @@ const supportedRecorderType = (): string => {
 }
 
 export default function App(): ReactElement {
+  const callLocalVideoRef = useRef<HTMLVideoElement>(null)
+  const callRemoteVideoRef = useRef<HTMLVideoElement>(null)
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
   const localDiagnosticVideoRef = useRef<HTMLVideoElement>(null)
+  const callPeerRef = useRef<RTCPeerConnection | null>(null)
+  const callEventsRef = useRef<EventSource | null>(null)
+  const callLocalStreamRef = useRef<MediaStream | null>(null)
+  const callRemoteStreamRef = useRef<MediaStream | null>(null)
+  const callTargetRef = useRef<string>('')
   const cleanStreamRef = useRef<MediaStream | null>(null)
   const alteredStreamRef = useRef<MediaStream | null>(null)
   const playerRef = useRef<DuckSoupPlayerHandle | null>(null)
@@ -248,6 +273,14 @@ export default function App(): ReactElement {
   const alteredChunksRef = useRef<Blob[]>([])
 
   const [computerRole, setComputerRole] = useState<ComputerRole>('mac-host')
+  const [callRole, setCallRole] = useState<CallRole>('participant')
+  const [callState, setCallState] = useState<CallState>('idle')
+  const [callPeers, setCallPeers] = useState<CallPeer[]>([])
+  const [signalServer, setSignalServer] = useState<{ active: boolean; localUrl: string; lanUrl: string }>({
+    active: false,
+    localUrl: '',
+    lanUrl: ''
+  })
   const [form, setForm] = useState<SessionForm>(initialForm)
   const [controls, setControls] = useState<ManipulationControls>(initialControls)
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle')
@@ -388,6 +421,222 @@ export default function App(): ReactElement {
     } finally {
       setIsDiscovering(false)
     }
+  }
+
+  const callDisplayName = (): string => {
+    if (callRole === 'director') return form.raId ? `Director ${form.raId}` : 'Director'
+    return form.participantId || 'Participant'
+  }
+
+  const signalBaseUrl = (): string => form.callSignalUrl.replace(/\/$/, '')
+
+  const postSignal = async (type: string, payload?: unknown, to?: string): Promise<void> => {
+    await fetch(`${signalBaseUrl()}/signal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roomId: form.roomId,
+        from: form.participantId,
+        to,
+        type,
+        payload,
+        role: callRole,
+        displayName: callDisplayName()
+      })
+    })
+  }
+
+  const getOrCreateCallPeer = async (targetUserId: string): Promise<RTCPeerConnection> => {
+    if (callPeerRef.current) return callPeerRef.current
+    callTargetRef.current = targetUserId
+
+    const peer = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    })
+
+    const remoteStream = new MediaStream()
+    callRemoteStreamRef.current = remoteStream
+    if (callRemoteVideoRef.current) callRemoteVideoRef.current.srcObject = remoteStream
+
+    callLocalStreamRef.current?.getTracks().forEach((track) => {
+      peer.addTrack(track, callLocalStreamRef.current!)
+    })
+
+    peer.ontrack = (event) => {
+      event.streams[0]?.getTracks().forEach((track) => {
+        if (!remoteStream.getTrackById(track.id)) remoteStream.addTrack(track)
+      })
+      callRemoteVideoRef.current?.play().catch(() => undefined)
+      setCallState('connected')
+      addLog(`Receiving live video from ${targetUserId}.`, 'success')
+    }
+
+    peer.onicecandidate = (event) => {
+      if (event.candidate) {
+        postSignal('candidate', event.candidate.toJSON(), callTargetRef.current).catch((error) =>
+          addLog(error instanceof Error ? error.message : 'Could not send ICE candidate.', 'error')
+        )
+      }
+    }
+
+    peer.onconnectionstatechange = () => {
+      if (peer.connectionState === 'connected') setCallState('connected')
+      if (['failed', 'disconnected', 'closed'].includes(peer.connectionState)) {
+        setCallState(peer.connectionState === 'closed' ? 'idle' : 'error')
+        addLog(`Live call connection ${peer.connectionState}.`, peer.connectionState === 'failed' ? 'error' : 'warn')
+      }
+    }
+
+    callPeerRef.current = peer
+    return peer
+  }
+
+  const makeCallOffer = async (targetUserId: string): Promise<void> => {
+    const peer = await getOrCreateCallPeer(targetUserId)
+    setCallState('connecting')
+    const offer = await peer.createOffer()
+    await peer.setLocalDescription(offer)
+    await postSignal('offer', offer, targetUserId)
+    addLog(`Sent live call offer to ${targetUserId}.`, 'info')
+  }
+
+  const maybeOfferToPeer = (peer: CallPeer): void => {
+    if (callRole !== 'participant') return
+    if (peer.role !== 'participant') return
+    if (peer.userId === form.participantId) return
+    if (callPeerRef.current) return
+    if (form.participantId.localeCompare(peer.userId) < 0) {
+      makeCallOffer(peer.userId).catch((error) =>
+        addLog(error instanceof Error ? error.message : 'Could not start live call offer.', 'error')
+      )
+    }
+  }
+
+  const handleSignalEvent = async (event: MessageEvent<string>): Promise<void> => {
+    const envelope = JSON.parse(event.data) as SignalEnvelope
+    if (envelope.type === 'hello' || envelope.type === 'peer-list') {
+      const peers = envelope.payload?.peers ?? []
+      setCallPeers(peers)
+      peers.find((peer) => peer.userId !== form.participantId && peer.role === 'participant') && setCallState('connecting')
+      peers.forEach(maybeOfferToPeer)
+      return
+    }
+
+    if (envelope.type === 'peer-joined' && envelope.payload?.peer) {
+      setCallPeers((prev) => {
+        const next = prev.filter((peer) => peer.userId !== envelope.payload!.peer!.userId)
+        return [...next, envelope.payload!.peer!]
+      })
+      addLog(`${envelope.payload.peer.displayName} joined the live call room.`, 'success')
+      maybeOfferToPeer(envelope.payload.peer)
+      return
+    }
+
+    if (envelope.type === 'peer-left') {
+      const userId = envelope.payload?.from || envelope.payload?.peer?.userId
+      if (userId) setCallPeers((prev) => prev.filter((peer) => peer.userId !== userId))
+      addLog('A live call peer left the room.', 'warn')
+      return
+    }
+
+    if (envelope.type === 'director-control') {
+      addLog('Director control update received.', 'info')
+      return
+    }
+
+    if (envelope.type !== 'signal' || !envelope.payload?.type || !envelope.payload.from) return
+    if (envelope.payload.to && envelope.payload.to !== form.participantId) return
+
+    const from = envelope.payload.from
+    const peer = await getOrCreateCallPeer(from)
+
+    if (envelope.payload.type === 'offer') {
+      setCallState('connecting')
+      await peer.setRemoteDescription(envelope.payload.payload as RTCSessionDescriptionInit)
+      const answer = await peer.createAnswer()
+      await peer.setLocalDescription(answer)
+      await postSignal('answer', answer, from)
+      addLog(`Answered live call offer from ${from}.`, 'success')
+    } else if (envelope.payload.type === 'answer') {
+      await peer.setRemoteDescription(envelope.payload.payload as RTCSessionDescriptionInit)
+      addLog(`Live call answer received from ${from}.`, 'success')
+    } else if (envelope.payload.type === 'candidate') {
+      await peer.addIceCandidate(envelope.payload.payload as RTCIceCandidateInit)
+    }
+  }
+
+  const startSignalServer = async (): Promise<void> => {
+    const result = await window.researchApi.startCallSignalServer(8765)
+    setSignalServer({ active: result.ok, localUrl: result.localUrl, lanUrl: result.lanUrl })
+    updateForm('callSignalUrl', result.localUrl)
+    addLog(`Video call signal server running. Windows can use ${result.lanUrl}.`, 'success')
+  }
+
+  const checkSignalServer = async (): Promise<void> => {
+    const result = await window.researchApi.checkCallSignalServer(form.callSignalUrl)
+    addLog(result.detail, result.ok ? 'success' : 'error')
+  }
+
+  const joinLiveCall = async (): Promise<void> => {
+    if (!form.roomId.trim() || !form.participantId.trim()) {
+      addLog('Room ID and This station ID are required before joining the live call.', 'error')
+      return
+    }
+
+    setCallState('starting')
+    try {
+      if (callRole === 'participant') {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+          audio: true
+        })
+        callLocalStreamRef.current = stream
+        if (callLocalVideoRef.current) {
+          callLocalVideoRef.current.srcObject = stream
+          await callLocalVideoRef.current.play().catch(() => undefined)
+        }
+      }
+
+      const params = new URLSearchParams({
+        roomId: form.roomId,
+        userId: form.participantId,
+        role: callRole,
+        displayName: callDisplayName()
+      })
+      const events = new EventSource(`${signalBaseUrl()}/events?${params.toString()}`)
+      callEventsRef.current = events
+      events.onmessage = (event) => {
+        handleSignalEvent(event).catch((error) =>
+          addLog(error instanceof Error ? error.message : 'Could not handle live call signal.', 'error')
+        )
+      }
+      events.onerror = () => {
+        setCallState('error')
+        addLog('Live call signal connection dropped. Check the signal server URL or tunnel.', 'error')
+      }
+      setCallState('waiting')
+      addLog(`${callDisplayName()} joined live call room ${form.roomId}.`, 'success')
+    } catch (error) {
+      setCallState('error')
+      addLog(error instanceof Error ? error.message : 'Could not join live call.', 'error')
+    }
+  }
+
+  const leaveLiveCall = (): void => {
+    callEventsRef.current?.close()
+    callPeerRef.current?.close()
+    callLocalStreamRef.current?.getTracks().forEach((track) => track.stop())
+    callRemoteStreamRef.current?.getTracks().forEach((track) => track.stop())
+    callEventsRef.current = null
+    callPeerRef.current = null
+    callLocalStreamRef.current = null
+    callRemoteStreamRef.current = null
+    callTargetRef.current = ''
+    if (callLocalVideoRef.current) callLocalVideoRef.current.srcObject = null
+    if (callRemoteVideoRef.current) callRemoteVideoRef.current.srcObject = null
+    setCallPeers([])
+    setCallState('idle')
+    addLog('Left the live call.', 'info')
   }
 
   const loadDuckSoupScript = useCallback(async () => {
@@ -921,6 +1170,90 @@ export default function App(): ReactElement {
         </aside>
 
         <section className="center-stage">
+          <section className="panel call-panel">
+            <div className="section-title accent">Live Video Conference</div>
+            <div className="call-controls">
+              <label>
+                Signal server
+                <input
+                  value={form.callSignalUrl}
+                  onChange={(event) => updateForm('callSignalUrl', event.target.value)}
+                  placeholder="http://localhost:8765 or ngrok URL"
+                />
+              </label>
+              <label>
+                Display name
+                <input
+                  value={callDisplayName()}
+                  onChange={(event) => {
+                    if (callRole === 'director') updateForm('raId', event.target.value.replace(/^Director\s*/i, ''))
+                    else updateForm('participantId', event.target.value)
+                  }}
+                />
+              </label>
+              <div className="role-switch compact-switch">
+                <button
+                  className={callRole === 'participant' ? 'role-button active' : 'role-button'}
+                  onClick={() => setCallRole('participant')}
+                >
+                  Participant
+                </button>
+                <button
+                  className={callRole === 'director' ? 'role-button active' : 'role-button'}
+                  onClick={() => {
+                    setCallRole('director')
+                    if (form.participantId === 'P001' || form.participantId === 'P002') updateForm('participantId', 'director')
+                  }}
+                >
+                  Director
+                </button>
+              </div>
+              <div className="button-row no-margin">
+                <button onClick={startSignalServer}>Start Mac server</button>
+                <button onClick={checkSignalServer}>Check</button>
+                {callState === 'idle' || callState === 'error' ? (
+                  <button className="primary" onClick={joinLiveCall}>Join call</button>
+                ) : (
+                  <button className="danger" onClick={leaveLiveCall}>Leave call</button>
+                )}
+              </div>
+            </div>
+            {signalServer.active && (
+              <div className="host-summary">
+                <span>Mac/host signal server</span>
+                <strong>Mac uses {signalServer.localUrl} · Windows uses {signalServer.lanUrl}</strong>
+              </div>
+            )}
+            <div className="inline-status">
+              <span className={`status-dot status-${callState === 'connected' ? 'connected' : callState === 'error' ? 'error' : callState === 'idle' ? 'idle' : 'connecting'}`} />
+              Live call: {callState}
+            </div>
+            <div className="participant-strip">
+              {callPeers.length === 0 ? (
+                <span>No one else is in this room yet.</span>
+              ) : (
+                callPeers.map((peer) => (
+                  <span key={`${peer.userId}-${peer.role}`}>
+                    {peer.displayName} · {peer.role}
+                  </span>
+                ))
+              )}
+            </div>
+            <div className="video-grid call-video-grid">
+              <div className="video-panel">
+                <div className="video-label">Local camera · {callRole}</div>
+                <video ref={callLocalVideoRef} autoPlay muted playsInline className="video-surface" />
+                {callRole === 'director' && <div className="video-empty">Director joins invisibly with no camera.</div>}
+                {callRole === 'participant' && callState === 'idle' && <div className="video-empty">Join the call to start your camera.</div>}
+              </div>
+              <div className="video-panel">
+                <div className="video-label">Remote participant</div>
+                <video ref={callRemoteVideoRef} autoPlay playsInline className="video-surface" />
+                {callState !== 'connected' && <div className="video-empty">Waiting for another participant in the same room.</div>}
+              </div>
+            </div>
+          </section>
+
           <div className="video-grid">
             <div className="video-panel">
               <div className="video-label">Partner view · altered stream participant sees</div>

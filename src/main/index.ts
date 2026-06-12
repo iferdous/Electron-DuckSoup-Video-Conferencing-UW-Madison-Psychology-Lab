@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import dgram, { type Socket } from 'node:dgram'
 import { mkdir, writeFile } from 'node:fs/promises'
+import http, { type Server, type ServerResponse } from 'node:http'
 import os from 'node:os'
 import { join, sanitize } from './path-utils'
 
@@ -46,12 +47,37 @@ type DiscoveredHost = {
   seenAt: number
 }
 
+type CallRole = 'participant' | 'director'
+
+type SignalClient = {
+  id: string
+  roomId: string
+  userId: string
+  role: CallRole
+  displayName: string
+  response: ServerResponse
+  joinedAt: number
+}
+
+type SignalMessage = {
+  roomId: string
+  from: string
+  to?: string
+  type: string
+  payload?: unknown
+  role?: CallRole
+  displayName?: string
+}
+
 const DISCOVERY_GROUP = '239.255.42.99'
 const DISCOVERY_PORT = 44563
+const DEFAULT_SIGNAL_PORT = 8765
 
 let advertisementSocket: Socket | null = null
 let advertisementTimer: NodeJS.Timeout | null = null
 let mainWindowRef: BrowserWindow | null = null
+let callSignalServer: Server | null = null
+const signalClients = new Map<string, SignalClient>()
 
 const safeSegment = (value: string, fallback: string): string => {
   const trimmed = sanitize(value).trim()
@@ -198,6 +224,192 @@ const discoverHosts = (durationMs = 3500): Promise<DiscoveredHost[]> => {
       timer = setTimeout(close, durationMs)
     })
   })
+}
+
+const jsonResponse = (response: ServerResponse, status: number, payload: unknown): void => {
+  response.writeHead(status, {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Content-Type': 'application/json'
+  })
+  response.end(JSON.stringify(payload))
+}
+
+const readJsonBody = async (request: http.IncomingMessage): Promise<Record<string, unknown>> => {
+  const chunks: Buffer[] = []
+  for await (const chunk of request) chunks.push(Buffer.from(chunk))
+  const text = Buffer.concat(chunks).toString('utf8')
+  return text ? JSON.parse(text) : {}
+}
+
+const sendSignalEvent = (client: SignalClient, type: string, payload: unknown): void => {
+  client.response.write(`data: ${JSON.stringify({ type, payload })}\n\n`)
+}
+
+const roomClients = (roomId: string): SignalClient[] =>
+  [...signalClients.values()].filter((client) => client.roomId === roomId)
+
+const roomPeers = (roomId: string): Array<Omit<SignalClient, 'id' | 'response' | 'roomId'>> => {
+  const unique = new Map<string, Omit<SignalClient, 'id' | 'response' | 'roomId'>>()
+  for (const client of roomClients(roomId)) {
+    unique.set(client.userId, {
+      userId: client.userId,
+      role: client.role,
+      displayName: client.displayName,
+      joinedAt: client.joinedAt
+    })
+  }
+  return [...unique.values()]
+}
+
+const peerPayload = (client: SignalClient): Omit<SignalClient, 'id' | 'response' | 'roomId'> => ({
+  userId: client.userId,
+  role: client.role,
+  displayName: client.displayName,
+  joinedAt: client.joinedAt
+})
+
+const broadcastSignalEvent = (
+  roomId: string,
+  type: string,
+  payload: unknown,
+  exceptClientId?: string,
+  toUserId?: string
+): void => {
+  for (const client of roomClients(roomId)) {
+    if (client.id === exceptClientId) continue
+    if (toUserId && client.userId !== toUserId) continue
+    sendSignalEvent(client, type, payload)
+  }
+}
+
+const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolean; localUrl: string; lanUrl: string }> => {
+  if (callSignalServer) {
+    return Promise.resolve({
+      ok: true,
+      localUrl: `http://localhost:${port}`,
+      lanUrl: `http://${firstLanAddress()}:${port}`
+    })
+  }
+
+  return new Promise((resolve, reject) => {
+    const server = http.createServer(async (request, response) => {
+      try {
+        if (request.method === 'OPTIONS') {
+          jsonResponse(response, 204, {})
+          return
+        }
+
+        const url = new URL(request.url ?? '/', `http://${request.headers.host ?? `localhost:${port}`}`)
+
+        if (request.method === 'GET' && url.pathname === '/health') {
+          jsonResponse(response, 200, {
+            ok: true,
+            rooms: [...new Set([...signalClients.values()].map((client) => client.roomId))]
+          })
+          return
+        }
+
+        if (request.method === 'GET' && url.pathname === '/events') {
+          const roomId = url.searchParams.get('roomId')?.trim()
+          const userId = url.searchParams.get('userId')?.trim()
+          const role = (url.searchParams.get('role') as CallRole | null) ?? 'participant'
+          const displayName = url.searchParams.get('displayName')?.trim() || userId || 'Participant'
+
+          if (!roomId || !userId || !['participant', 'director'].includes(role)) {
+            jsonResponse(response, 400, { ok: false, error: 'Missing roomId, userId, or role.' })
+            return
+          }
+
+          response.writeHead(200, {
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'Content-Type': 'text/event-stream'
+          })
+          response.write(': connected\n\n')
+
+          const client: SignalClient = {
+            id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            roomId,
+            userId,
+            role,
+            displayName,
+            response,
+            joinedAt: Date.now()
+          }
+          signalClients.set(client.id, client)
+          sendSignalEvent(client, 'hello', { peer: peerPayload(client), peers: roomPeers(roomId) })
+          broadcastSignalEvent(roomId, 'peer-joined', { peer: peerPayload(client) }, client.id)
+          broadcastSignalEvent(roomId, 'peer-list', { peers: roomPeers(roomId) })
+
+          request.on('close', () => {
+            signalClients.delete(client.id)
+            broadcastSignalEvent(roomId, 'peer-left', { userId, displayName, role }, client.id)
+            broadcastSignalEvent(roomId, 'peer-list', { peers: roomPeers(roomId) })
+          })
+          return
+        }
+
+        if (request.method === 'POST' && url.pathname === '/signal') {
+          const message = (await readJsonBody(request)) as SignalMessage
+          if (!message.roomId || !message.from || !message.type) {
+            jsonResponse(response, 400, { ok: false, error: 'Missing roomId, from, or type.' })
+            return
+          }
+          broadcastSignalEvent(
+            message.roomId,
+            'signal',
+            {
+              from: message.from,
+              to: message.to,
+              type: message.type,
+              payload: message.payload,
+              role: message.role,
+              displayName: message.displayName
+            },
+            undefined,
+            message.to
+          )
+          jsonResponse(response, 200, { ok: true })
+          return
+        }
+
+        if (request.method === 'POST' && url.pathname === '/director-control') {
+          const message = (await readJsonBody(request)) as SignalMessage
+          if (!message.roomId || !message.from) {
+            jsonResponse(response, 400, { ok: false, error: 'Missing roomId or from.' })
+            return
+          }
+          broadcastSignalEvent(message.roomId, 'director-control', message)
+          jsonResponse(response, 200, { ok: true })
+          return
+        }
+
+        jsonResponse(response, 404, { ok: false, error: 'Not found.' })
+      } catch (error) {
+        jsonResponse(response, 500, { ok: false, error: error instanceof Error ? error.message : 'Signal server error.' })
+      }
+    })
+
+    server.once('error', reject)
+    server.listen(port, '0.0.0.0', () => {
+      callSignalServer = server
+      resolve({
+        ok: true,
+        localUrl: `http://localhost:${port}`,
+        lanUrl: `http://${firstLanAddress()}:${port}`
+      })
+    })
+  })
+}
+
+const stopCallSignalServer = (): void => {
+  for (const client of signalClients.values()) client.response.end()
+  signalClients.clear()
+  callSignalServer?.close()
+  callSignalServer = null
 }
 
 function createWindow(): void {
@@ -356,6 +568,30 @@ app.whenReady().then(() => {
 
   ipcMain.handle('discover-ducksoup-hosts', async () => discoverHosts())
 
+  ipcMain.handle('start-call-signal-server', async (_, port?: number) => startCallSignalServer(port))
+
+  ipcMain.handle('stop-call-signal-server', () => {
+    stopCallSignalServer()
+    return { ok: true }
+  })
+
+  ipcMain.handle('check-call-signal-server', async (_, baseUrl: string) => {
+    try {
+      const response = await fetch(new URL('/health', baseUrl))
+      return {
+        ok: response.ok,
+        status: response.status,
+        detail: response.ok ? 'Video call signal server is reachable.' : `HTTP ${response.status}`
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        status: 0,
+        detail: error instanceof Error ? error.message : 'Video call signal server is not reachable.'
+      }
+    }
+  })
+
   createWindow()
 
   app.on('activate', () => {
@@ -365,5 +601,6 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   stopAdvertisement()
+  stopCallSignalServer()
   if (process.platform !== 'darwin') app.quit()
 })

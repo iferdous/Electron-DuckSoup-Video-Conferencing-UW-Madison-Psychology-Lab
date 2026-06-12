@@ -1,6 +1,8 @@
 export type ConnectionState = 'idle' | 'checking' | 'ready' | 'connecting' | 'connected' | 'error'
 export type RecordingState = 'idle' | 'recording' | 'saving'
 export type ComputerRole = 'mac-host' | 'windows'
+export type CallRole = 'participant' | 'director'
+export type CallState = 'idle' | 'starting' | 'waiting' | 'connecting' | 'connected' | 'error'
 
 export type SessionForm = {
   serverName: string
@@ -12,6 +14,7 @@ export type SessionForm = {
   roomId: string
   targetUserId: string
   duckSoupUrl: string
+  callSignalUrl: string
   outputFolder: string
   condition: string
 }
@@ -52,6 +55,13 @@ export type DiscoveredDuckSoupHost = {
   address: string
   port: number
   seenAt: number
+}
+
+export type CallPeer = {
+  userId: string
+  displayName: string
+  role: CallRole
+  joinedAt: number
 }
 
 export type ControlEvent = {
