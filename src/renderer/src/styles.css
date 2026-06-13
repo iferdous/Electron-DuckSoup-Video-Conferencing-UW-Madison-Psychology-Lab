@@ -567,6 +567,28 @@ label {
   font-weight: 800;
 }
 
+.label-with-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.info-dot {
+  width: 16px;
+  height: 16px;
+  border: 1px solid #5d697e;
+  border-radius: 50%;
+  color: #bae6fd;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  cursor: help;
+}
+
 .range-header strong {
   color: #5eead4;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

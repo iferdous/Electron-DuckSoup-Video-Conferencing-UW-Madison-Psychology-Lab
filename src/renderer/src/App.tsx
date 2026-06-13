@@ -62,11 +62,26 @@ type SignalEnvelope = {
   }
 }
 
+type LiveMediaProcessor = {
+  rawStream: MediaStream
+  processedStream: MediaStream
+  rawVideo: HTMLVideoElement
+  canvas: HTMLCanvasElement
+  ctx: CanvasRenderingContext2D
+  animationId: number
+  currentSmileAlpha: number
+  audioContext?: AudioContext
+  audioDelay?: DelayNode
+  audioGain?: GainNode
+  audioLowShelf?: BiquadFilterNode
+  audioHighShelf?: BiquadFilterNode
+}
+
 const conditionPresets: Array<{ label: string; alpha: number; threshold?: number; note: string }> = [
   { label: 'Neutral / Sham', alpha: 1, note: 'No intended smile/frown shift.' },
-  { label: 'Smile + subtle', alpha: 0.6, note: 'Naturalistic positive shift from Mozza notes.' },
+  { label: 'Smile + subtle', alpha: 1.35, note: 'Naturalistic positive shift from the live call processor.' },
   { label: 'Smile + strong', alpha: 1.8, note: 'Stronger positive shift for pilot testing.' },
-  { label: 'Smile - subtle', alpha: -0.6, note: 'Subtle frown/opposite-direction deformation.' },
+  { label: 'Smile - subtle', alpha: 0.55, note: 'Subtle frown/opposite-direction deformation.' },
   { label: 'Smile - strong', alpha: -1.5, note: 'Stronger frown/opposite-direction deformation.' },
   { label: 'Low confidence lighting', alpha: 1, threshold: 0.05, note: 'More sensitive face detection.' },
   { label: 'Strict tracking', alpha: 1, threshold: 0.55, note: 'Rejects weaker detections.' }
@@ -149,6 +164,8 @@ const slugify = (value: string, fallback: string): string => {
 }
 
 const makeRoomId = (dyadId: string): string => `pps-${slugify(dyadId, 'room')}-${Date.now().toString(36)}`
+
+const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value))
 
 const csvEscape = (value: unknown): string => {
   const text = value == null ? '' : String(value)
@@ -324,6 +341,79 @@ const supportedRecorderType = (): string => {
   return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? ''
 }
 
+const applyAudioControlsToProcessor = (
+  processor: LiveMediaProcessor | null,
+  controlState: ManipulationControls
+): void => {
+  if (!processor?.audioContext) return
+
+  const now = processor.audioContext.currentTime
+  processor.audioGain?.gain.setTargetAtTime(clamp(controlState.audioGain, 0, 2), now, 0.04)
+  processor.audioDelay?.delayTime.setTargetAtTime(clamp(controlState.synchronyDelayMs / 1000, 0, 1.5), now, 0.04)
+
+  const tone = clamp(controlState.audioPitch, 0.6, 1.4)
+  const warmerAmount = Math.max(0, 1 - tone)
+  const brighterAmount = Math.max(0, tone - 1)
+  processor.audioLowShelf?.gain.setTargetAtTime(warmerAmount * 14 - brighterAmount * 4, now, 0.05)
+  processor.audioHighShelf?.gain.setTargetAtTime(brighterAmount * 14 - warmerAmount * 5, now, 0.05)
+}
+
+const applySmileWarp = (
+  processor: LiveMediaProcessor,
+  width: number,
+  height: number,
+  controlState: ManipulationControls
+): void => {
+  const targetAlpha = controlState.smileAlpha - 1
+  const smoothing = clamp(0.03 + controlState.landmarkBeta * 0.25 + controlState.smoothingCutoff / 80, 0.03, 0.45)
+  processor.currentSmileAlpha += (targetAlpha - processor.currentSmileAlpha) * smoothing
+
+  const strength = clamp(processor.currentSmileAlpha, -2.5, 4) * (1 - controlState.faceThreshold * 0.25)
+  if (Math.abs(strength) < 0.02 && !controlState.overlay) return
+
+  const regionWidth = width * 0.5
+  const regionHeight = height * 0.2
+  const regionX = (width - regionWidth) / 2
+  const regionY = height * 0.54
+  const step = Math.max(3, Math.round(width / 260))
+  const maxOffset = clamp(Math.abs(strength) * height * 0.035, 0, height * 0.1)
+  const direction = strength >= 0 ? -1 : 1
+
+  for (let x = 0; x < regionWidth; x += step) {
+    const normalizedX = (x / regionWidth - 0.5) * 2
+    const edgeWeight = Math.pow(Math.abs(normalizedX), 1.8)
+    const centerWeight = 1 - Math.abs(normalizedX)
+    const smileCurve = direction * maxOffset * edgeWeight + -direction * maxOffset * 0.18 * centerWeight
+    const sx = regionX + x
+    const sw = Math.min(step + 1, regionWidth - x)
+    processor.ctx.drawImage(
+      processor.rawVideo,
+      sx,
+      regionY,
+      sw,
+      regionHeight,
+      sx,
+      regionY + smileCurve,
+      sw,
+      regionHeight
+    )
+  }
+
+  if (controlState.overlay) {
+    processor.ctx.save()
+    processor.ctx.strokeStyle = Math.abs(strength) > 0.02 ? '#22d3ee' : '#f59e0b'
+    processor.ctx.lineWidth = Math.max(2, width / 360)
+    processor.ctx.setLineDash([8, 6])
+    processor.ctx.strokeRect(regionX, regionY, regionWidth, regionHeight)
+    processor.ctx.fillStyle = 'rgba(2, 6, 23, 0.72)'
+    processor.ctx.fillRect(regionX, regionY - 28, Math.min(360, regionWidth), 24)
+    processor.ctx.fillStyle = '#bae6fd'
+    processor.ctx.font = `${Math.max(12, Math.round(width / 80))}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`
+    processor.ctx.fillText(`smile alpha ${controlState.smileAlpha.toFixed(2)}`, regionX + 8, regionY - 10)
+    processor.ctx.restore()
+  }
+}
+
 export default function App(): ReactElement {
   const callLocalVideoRef = useRef<HTMLVideoElement>(null)
   const callRemoteVideoRef = useRef<HTMLVideoElement>(null)
@@ -335,6 +425,8 @@ export default function App(): ReactElement {
   const callRemoteStreamRef = useRef<MediaStream | null>(null)
   const callTargetRef = useRef<string>('')
   const callUserIdRef = useRef<string>(`station-${makeId()}`)
+  const controlsRef = useRef<ManipulationControls>(initialControls)
+  const liveMediaProcessorRef = useRef<LiveMediaProcessor | null>(null)
   const cleanStreamRef = useRef<MediaStream | null>(null)
   const alteredStreamRef = useRef<MediaStream | null>(null)
   const playerRef = useRef<DuckSoupPlayerHandle | null>(null)
@@ -421,10 +513,15 @@ export default function App(): ReactElement {
   }, [])
 
   useEffect(() => {
+    controlsRef.current = controls
     if (remoteVideoRef.current) {
       remoteVideoRef.current.volume = Math.min(Math.max(controls.partnerVolume, 0), 2)
     }
-  }, [controls.partnerVolume])
+    if (callRemoteVideoRef.current) {
+      callRemoteVideoRef.current.volume = Math.min(Math.max(controls.partnerVolume, 0), 2)
+    }
+    applyAudioControlsToProcessor(liveMediaProcessorRef.current, controls)
+  }, [controls])
 
   useEffect(() => {
     if (!['waiting', 'connecting', 'connected'].includes(callState)) return undefined
@@ -676,6 +773,98 @@ export default function App(): ReactElement {
     addLog(result.detail, result.ok ? 'success' : 'error')
   }
 
+  const cleanupLiveMediaProcessor = (): void => {
+    const processor = liveMediaProcessorRef.current
+    if (!processor) return
+
+    window.cancelAnimationFrame(processor.animationId)
+    processor.processedStream.getTracks().forEach((track) => track.stop())
+    processor.rawStream.getTracks().forEach((track) => track.stop())
+    processor.rawVideo.pause()
+    processor.rawVideo.srcObject = null
+    processor.audioContext?.close().catch(() => undefined)
+    liveMediaProcessorRef.current = null
+  }
+
+  const createLiveMediaProcessor = async (rawStream: MediaStream): Promise<LiveMediaProcessor> => {
+    const rawVideo = document.createElement('video')
+    rawVideo.muted = true
+    rawVideo.playsInline = true
+    rawVideo.srcObject = rawStream
+    await rawVideo.play().catch(() => undefined)
+
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Could not create live video processor.')
+
+    const processedStream = new MediaStream()
+    const canvasStream = canvas.captureStream(30)
+    canvasStream.getVideoTracks().forEach((track) => processedStream.addTrack(track))
+
+    const processor: LiveMediaProcessor = {
+      rawStream,
+      processedStream,
+      rawVideo,
+      canvas,
+      ctx,
+      animationId: 0,
+      currentSmileAlpha: 0
+    }
+
+    const audioTracks = rawStream.getAudioTracks()
+    if (audioTracks.length > 0) {
+      const AudioContextConstructor =
+        window.AudioContext ||
+        (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      if (!AudioContextConstructor) throw new Error('This browser cannot create a live audio processor.')
+      const audioContext = new AudioContextConstructor()
+      const source = audioContext.createMediaStreamSource(new MediaStream(audioTracks))
+      const delay = audioContext.createDelay(1.5)
+      const lowShelf = audioContext.createBiquadFilter()
+      const highShelf = audioContext.createBiquadFilter()
+      const gain = audioContext.createGain()
+      const destination = audioContext.createMediaStreamDestination()
+
+      lowShelf.type = 'lowshelf'
+      lowShelf.frequency.value = 320
+      highShelf.type = 'highshelf'
+      highShelf.frequency.value = 2600
+
+      source.connect(delay)
+      delay.connect(lowShelf)
+      lowShelf.connect(highShelf)
+      highShelf.connect(gain)
+      gain.connect(destination)
+      destination.stream.getAudioTracks().forEach((track) => processedStream.addTrack(track))
+
+      processor.audioContext = audioContext
+      processor.audioDelay = delay
+      processor.audioGain = gain
+      processor.audioLowShelf = lowShelf
+      processor.audioHighShelf = highShelf
+      applyAudioControlsToProcessor(processor, controlsRef.current)
+    }
+
+    const draw = (): void => {
+      const width = rawVideo.videoWidth || 1280
+      const height = rawVideo.videoHeight || 720
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width
+        canvas.height = height
+      }
+
+      if (rawVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        ctx.drawImage(rawVideo, 0, 0, width, height)
+        applySmileWarp(processor, width, height, controlsRef.current)
+      }
+      processor.animationId = window.requestAnimationFrame(draw)
+    }
+
+    draw()
+    liveMediaProcessorRef.current = processor
+    return processor
+  }
+
   const joinLiveCall = async (): Promise<void> => {
     if (!form.callSignalUrl.trim() || !form.roomId.trim() || !callDisplayName().trim()) {
       addLog('Server URL, Room ID, and Display name are required before joining the live call.', 'error')
@@ -685,15 +874,17 @@ export default function App(): ReactElement {
     setCallState('starting')
     try {
       if (callRole === 'participant') {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        const rawStream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
           audio: true
         })
-        callLocalStreamRef.current = stream
+        const processor = await createLiveMediaProcessor(rawStream)
+        callLocalStreamRef.current = processor.processedStream
         if (callLocalVideoRef.current) {
-          callLocalVideoRef.current.srcObject = stream
+          callLocalVideoRef.current.srcObject = processor.processedStream
           await callLocalVideoRef.current.play().catch(() => undefined)
         }
+        addLog('Live camera/mic processor started. Face and voice controls now affect the outgoing call.', 'success')
       }
 
       const params = new URLSearchParams({
@@ -724,7 +915,7 @@ export default function App(): ReactElement {
   const leaveLiveCall = (): void => {
     callEventsRef.current?.close()
     callPeerRef.current?.close()
-    callLocalStreamRef.current?.getTracks().forEach((track) => track.stop())
+    cleanupLiveMediaProcessor()
     callRemoteStreamRef.current?.getTracks().forEach((track) => track.stop())
     callEventsRef.current = null
     callPeerRef.current = null
@@ -804,17 +995,16 @@ export default function App(): ReactElement {
   )
 
   const sendDuckSoupControl = useCallback(
-    (property: string, value: number | boolean, notes = '', effectName = 'mozza') => {
+    (property: string, value: number | boolean, notes = '', effectName = 'mozza'): boolean => {
       const normalizedValue = typeof value === 'boolean' ? (value ? 1 : 0) : value
       const targetUser = form.targetUserId || form.participantId
       if (playerRef.current) {
         playerRef.current.controlFx(effectName, property, normalizedValue, undefined, targetUser)
         appendControlEvent(`${effectName}.${property}`, value, true, notes)
         addLog(`Applied ${effectName}.${property} = ${value} to ${targetUser || 'current user'}.`, 'info')
-      } else {
-        appendControlEvent(`${effectName}.${property}`, value, false, 'Queued/logged before DuckSoup connection. ' + notes)
-        addLog(`Logged ${effectName}.${property} = ${value}; connect before it can be applied live.`, 'warn')
+        return true
       }
+      return false
     },
     [addLog, appendControlEvent, form.participantId, form.targetUserId]
   )
@@ -826,10 +1016,13 @@ export default function App(): ReactElement {
     notes?: string
   ): void => {
     setControls((prev) => ({ ...prev, [key]: value }))
+    appendControlEvent(String(key), value, false, notes || 'Applied to the live video-call processor.')
     if (duckSoupProperty) {
-      sendDuckSoupControl(duckSoupProperty, value as number | boolean, notes)
-    } else {
-      appendControlEvent(String(key), value, false, notes)
+      const sentToDuckSoup = sendDuckSoupControl(duckSoupProperty, value as number | boolean, notes)
+      addLog(
+        `${String(key)} = ${value} applied to the live call${sentToDuckSoup ? ' and optional DuckSoup path' : ''}.`,
+        'info'
+      )
     }
   }
 
@@ -840,24 +1033,29 @@ export default function App(): ReactElement {
       smileAlpha: preset.alpha,
       faceThreshold: preset.threshold ?? prev.faceThreshold
     }))
-    sendDuckSoupControl('alpha', preset.alpha, preset.note)
-    if (typeof preset.threshold === 'number') sendDuckSoupControl('face-thresh', preset.threshold, preset.note)
+    appendControlEvent('conditionPreset', preset.label, false, preset.note)
+    if (playerRef.current) {
+      sendDuckSoupControl('alpha', preset.alpha, preset.note)
+      if (typeof preset.threshold === 'number') sendDuckSoupControl('face-thresh', preset.threshold, preset.note)
+    }
+    addLog(`Applied ${preset.label} to the live call processor.`, 'info')
   }
 
   const applyAudioPreset = (preset: (typeof audioPresets)[number]): void => {
+    const nextPitch = preset.effectName === 'pitch' ? preset.value : preset.preset === 'none' ? 1 : controls.audioPitch
+    const nextGain = preset.effectName === 'volume' ? preset.value : preset.preset === 'none' ? 1 : controls.audioGain
     setControls((prev) => ({
       ...prev,
       audioPreset: preset.preset,
-      audioPitch: preset.effectName === 'pitch' ? preset.value : prev.audioPitch,
-      audioGain: preset.effectName === 'volume' ? preset.value : prev.audioGain
+      audioPitch: nextPitch,
+      audioGain: nextGain
     }))
 
-    if (preset.effectName) {
+    appendControlEvent('audioPreset', preset.label, false, 'Applied to outgoing live-call microphone audio. ' + preset.note)
+    if (preset.effectName && playerRef.current) {
       sendDuckSoupControl(preset.property, preset.value, preset.note, preset.effectName)
-    } else {
-      appendControlEvent('audioFx', 'none', false, preset.note)
-      addLog('Audio preset set to neutral. Reconnect to remove an active DuckSoup audio effect.', 'info')
     }
+    addLog(`${preset.label} applied to outgoing live-call audio.`, 'info')
   }
 
   const connect = useCallback(async () => {
@@ -1362,6 +1560,7 @@ export default function App(): ReactElement {
             <div className="section-title accent">Face Modulation</div>
             <RangeControl
               label="Smile alpha"
+              description="Controls the live smile/frown deformation sent to the other participant. 1.00 is neutral, higher pulls the lower face toward a smile, lower pushes toward a frown."
               value={controls.smileAlpha}
               min={-2}
               max={5}
@@ -1371,6 +1570,7 @@ export default function App(): ReactElement {
             />
             <RangeControl
               label="Detection threshold"
+              description="How strict the face effect should be before applying. Lower is more forgiving in poor lighting; higher is stricter and can reduce accidental warping."
               value={controls.faceThreshold}
               min={0}
               max={1}
@@ -1380,6 +1580,7 @@ export default function App(): ReactElement {
             />
             <RangeControl
               label="Landmark beta"
+              description="How quickly the facial warp follows movement. Lower feels steadier; higher reacts faster but can look more jumpy."
               value={controls.landmarkBeta}
               min={0}
               max={1}
@@ -1389,6 +1590,7 @@ export default function App(): ReactElement {
             />
             <RangeControl
               label="Smoothing cutoff"
+              description="How much temporal smoothing is applied to the face effect. Lower is smoother/slower; higher is more immediate."
               value={controls.smoothingCutoff}
               min={0}
               max={20}
@@ -1421,17 +1623,19 @@ export default function App(): ReactElement {
             </div>
             <RangeControl
               label="Partner playback volume"
+              description="Changes how loud the other participant sounds on this computer only. It does not change what they hear."
               value={controls.partnerVolume}
               min={0}
               max={2}
               step={0.05}
               markers={['Muted', 'Normal', 'Boosted']}
               onChange={(value) =>
-                setControl('partnerVolume', value, undefined, 'Local playback monitor gain. DuckSoup voice manipulation is controlled by the audioFx presets below.')
+                setControl('partnerVolume', value, undefined, 'Local playback monitor gain for the remote participant.')
               }
             />
             <RangeControl
-              label="DuckSoup pitch"
+              label="Outgoing voice tone"
+              description="Applies a live tone filter to your outgoing microphone. Lower sounds warmer/deeper, higher sounds brighter. This is a browser-side approximation, not the full GStreamer pitch plugin."
               value={controls.audioPitch}
               min={0.6}
               max={1.4}
@@ -1439,11 +1643,14 @@ export default function App(): ReactElement {
               markers={['Deeper', 'Neutral', 'Brighter']}
               onChange={(value) => {
                 setControls((prev) => ({ ...prev, audioPreset: 'custom-pitch', audioPitch: value }))
-                sendDuckSoupControl('pitch', value, 'Custom DuckSoup pitch audioFx control.', 'pitch')
+                appendControlEvent('audioTone', value, false, 'Applied to outgoing live-call microphone audio.')
+                if (playerRef.current) sendDuckSoupControl('pitch', value, 'Custom optional DuckSoup pitch audioFx control.', 'pitch')
+                addLog(`Outgoing voice tone = ${value.toFixed(2)} applied to the live call.`, 'info')
               }}
             />
             <RangeControl
-              label="DuckSoup gain"
+              label="Outgoing voice gain"
+              description="Changes how loud your microphone is for the other participant. This is the control to use for louder/quieter voice."
               value={controls.audioGain}
               min={0}
               max={2}
@@ -1451,22 +1658,25 @@ export default function App(): ReactElement {
               markers={['Muted', 'Neutral', 'Boosted']}
               onChange={(value) => {
                 setControls((prev) => ({ ...prev, audioPreset: 'custom-volume', audioGain: value }))
-                sendDuckSoupControl('volume', value, 'Custom DuckSoup volume audioFx control.', 'volume')
+                appendControlEvent('audioGain', value, false, 'Applied to outgoing live-call microphone audio.')
+                if (playerRef.current) sendDuckSoupControl('volume', value, 'Custom optional DuckSoup volume audioFx control.', 'volume')
+                addLog(`Outgoing voice gain = ${value.toFixed(2)} applied to the live call.`, 'info')
               }}
             />
             <RangeControl
-              label="Synchrony delay target (ms)"
+              label="Voice delay (ms)"
+              description="Adds delay to your outgoing microphone audio before the other participant hears it. Use this to test voice synchrony/asynchrony."
               value={controls.synchronyDelayMs}
               min={0}
               max={1200}
               step={50}
               markers={['Live', 'Lagged', 'Very delayed']}
               onChange={(value) =>
-                setControl('synchronyDelayMs', value, undefined, 'Logged design variable. Live media delay requires a dedicated delay buffer in the DuckSoup/GStreamer pipeline.')
+                setControl('synchronyDelayMs', value, undefined, 'Applied as a live outgoing microphone delay.')
               }
             />
             <div className="constraint-note">
-              Audio presets are sent as DuckSoup `audioFx` requests. If a neutral preset is selected after a live audio effect, reconnect the room to fully remove the active effect chain.
+              These controls now affect the working live call. The optional DuckSoup/Mozza path below can still receive the same values if it is connected.
             </div>
           </section>
 
@@ -1499,6 +1709,7 @@ export default function App(): ReactElement {
 
 function RangeControl({
   label,
+  description,
   value,
   min,
   max,
@@ -1507,6 +1718,7 @@ function RangeControl({
   onChange
 }: {
   label: string
+  description?: string
   value: number
   min: number
   max: number
@@ -1517,7 +1729,14 @@ function RangeControl({
   return (
     <div className="range-control">
       <div className="range-header">
-        <span>{label}</span>
+        <span className="label-with-info">
+          {label}
+          {description && (
+            <span className="info-dot" title={description} aria-label={description}>
+              i
+            </span>
+          )}
+        </span>
         <strong>{Number.isInteger(value) ? value : value.toFixed(2)}</strong>
       </div>
       <input
