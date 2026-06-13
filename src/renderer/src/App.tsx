@@ -4,12 +4,9 @@ import type {
   CallPeer,
   CallRole,
   CallState,
-  ComputerRole,
   ConnectionState,
   ControlEvent,
-  DiscoveredDuckSoupHost,
   LatencyStats,
-  LocalNetworkInfo,
   LogEvent,
   ManipulationControls,
   RecordingState,
@@ -76,16 +73,6 @@ type LiveMediaProcessor = {
   audioLowShelf?: BiquadFilterNode
   audioHighShelf?: BiquadFilterNode
 }
-
-const conditionPresets: Array<{ label: string; alpha: number; threshold?: number; note: string }> = [
-  { label: 'Neutral / Sham', alpha: 1, note: 'No intended smile/frown shift.' },
-  { label: 'Smile + subtle', alpha: 1.35, note: 'Naturalistic positive shift from the live call processor.' },
-  { label: 'Smile + strong', alpha: 1.8, note: 'Stronger positive shift for pilot testing.' },
-  { label: 'Smile - subtle', alpha: 0.55, note: 'Subtle frown/opposite-direction deformation.' },
-  { label: 'Smile - strong', alpha: -1.5, note: 'Stronger frown/opposite-direction deformation.' },
-  { label: 'Low confidence lighting', alpha: 1, threshold: 0.05, note: 'More sensitive face detection.' },
-  { label: 'Strict tracking', alpha: 1, threshold: 0.55, note: 'Rejects weaker detections.' }
-]
 
 const audioPresets: Array<{
   label: string
@@ -217,16 +204,6 @@ const buildSignalingUrl = (baseUrl: string): string => {
   return url.toString()
 }
 
-const buildCallSignalUrlFromDuckSoupUrl = (duckSoupUrl: string): string => {
-  try {
-    const url = new URL(duckSoupUrl)
-    url.port = '8765'
-    return url.toString().replace(/\/$/, '')
-  } catch {
-    return 'http://localhost:8765'
-  }
-}
-
 const selectedAudioFx = (controlState: ManipulationControls): string | undefined => {
   if (controlState.audioPreset === 'custom-pitch') {
     return `pitch pitch=${controlState.audioPitch}`
@@ -318,7 +295,10 @@ const latencyFromPeerConnection = async (peer: RTCPeerConnection): Promise<Laten
     }
   })
 
-  const rttValues = [rttMs, videoRttMs, audioRttMs].filter((value): value is number => value !== null)
+  const rttValues: number[] = []
+  for (const value of [rttMs, videoRttMs, audioRttMs]) {
+    if (typeof value === 'number') rttValues.push(value)
+  }
   const averageRtt =
     rttValues.length > 0
       ? Math.round(rttValues.reduce((total, value) => total + value, 0) / rttValues.length)
@@ -436,8 +416,7 @@ export default function App(): ReactElement {
   const cleanChunksRef = useRef<Blob[]>([])
   const alteredChunksRef = useRef<Blob[]>([])
 
-  const [computerRole, setComputerRole] = useState<ComputerRole>('mac-host')
-  const [callRole, setCallRole] = useState<CallRole>('participant')
+  const [callRole] = useState<CallRole>('participant')
   const [callState, setCallState] = useState<CallState>('idle')
   const [callPeers, setCallPeers] = useState<CallPeer[]>([])
   const [signalServer, setSignalServer] = useState<{ active: boolean; localUrl: string; lanUrl: string }>({
@@ -456,13 +435,6 @@ export default function App(): ReactElement {
   const [controlEvents, setControlEvents] = useState<ControlEvent[]>([])
   const [recordingSeconds, setRecordingSeconds] = useState(0)
   const [latency, setLatency] = useState<LatencyStats>(emptyLatency)
-  const [networkInfo, setNetworkInfo] = useState<LocalNetworkInfo>({ hostname: '', addresses: [] })
-  const [discoveredHosts, setDiscoveredHosts] = useState<DiscoveredDuckSoupHost[]>([])
-  const [isDiscovering, setIsDiscovering] = useState(false)
-  const [hostAdvertisement, setHostAdvertisement] = useState<{ active: boolean; detail: string; url?: string }>({
-    active: false,
-    detail: ''
-  })
 
   const statusLabel = useMemo(() => {
     const labels: Record<ConnectionState, string> = {
@@ -500,19 +472,6 @@ export default function App(): ReactElement {
   }, [])
 
   useEffect(() => {
-    window.researchApi
-      .getNetworkInfo()
-      .then(setNetworkInfo)
-      .catch(() => setNetworkInfo({ hostname: '', addresses: [] }))
-  }, [])
-
-  useEffect(() => {
-    return () => {
-      window.researchApi.stopDuckSoupHostAdvertisement().catch(() => undefined)
-    }
-  }, [])
-
-  useEffect(() => {
     controlsRef.current = controls
     if (remoteVideoRef.current) {
       remoteVideoRef.current.volume = Math.min(Math.max(controls.partnerVolume, 0), 2)
@@ -543,79 +502,10 @@ export default function App(): ReactElement {
     setForm((prev) => ({ ...prev, [field]: value }))
   }
 
-  const chooseRole = (role: ComputerRole): void => {
-    setComputerRole(role)
-    setForm((prev) => ({
-      ...prev,
-      participantId: role === 'mac-host' ? 'P001' : 'P002',
-      partnerId: role === 'mac-host' ? 'P002' : 'P001',
-      duckSoupUrl: role === 'mac-host' ? 'http://localhost:8100' : prev.duckSoupUrl
-    }))
-    setDuckSoupReady(false)
-    setConnectionState('idle')
-    addLog(role === 'mac-host' ? 'Role set to Mac/host as P001.' : 'Role set to Windows as P002.', 'info')
-  }
-
   const generateNewRoom = (): void => {
     const roomId = makeRoomId(form.dyadId)
     updateForm('roomId', roomId)
     addLog(`New Room ID created: ${roomId}`, 'success')
-  }
-
-  const useDiscoveredHost = (host: DiscoveredDuckSoupHost): void => {
-    setForm((prev) => ({
-      ...prev,
-      serverName: host.serverName,
-      duckSoupUrl: host.duckSoupUrl,
-      callSignalUrl: host.callSignalUrl,
-      roomId: host.roomId || prev.roomId
-    }))
-    setDuckSoupReady(false)
-    setConnectionState('idle')
-    addLog(`Using ${host.serverName}: DuckSoup ${host.duckSoupUrl}, call server ${host.callSignalUrl}.`, 'success')
-  }
-
-  const advertiseHost = async (): Promise<void> => {
-    chooseRole('mac-host')
-    const signal = await window.researchApi.startCallSignalServer(8765)
-    setSignalServer({ active: signal.ok, localUrl: signal.localUrl, lanUrl: signal.lanUrl })
-    updateForm('callSignalUrl', signal.localUrl)
-    const result = await window.researchApi.advertiseDuckSoupHost({
-      serverName: form.serverName,
-      duckSoupUrl: 'http://localhost:8100',
-      callSignalUrl: signal.localUrl,
-      roomId: form.roomId
-    })
-    setHostAdvertisement({ active: result.ok, detail: result.detail, url: result.url })
-    if (result.url) updateForm('duckSoupUrl', result.url)
-    addLog(
-      result.ok
-        ? `Mac/host is sharing this room. Windows should find ${signal.lanUrl} automatically.`
-        : result.detail,
-      result.ok ? 'success' : 'error'
-    )
-  }
-
-  const stopAdvertiseHost = async (): Promise<void> => {
-    await window.researchApi.stopDuckSoupHostAdvertisement()
-    setHostAdvertisement({ active: false, detail: 'Mac/host advertisement stopped.' })
-    addLog('Mac/host advertisement stopped.', 'info')
-  }
-
-  const findHost = async (): Promise<void> => {
-    setIsDiscovering(true)
-    try {
-      const hosts = await window.researchApi.discoverDuckSoupHosts()
-      setDiscoveredHosts(hosts)
-      if (hosts[0]) {
-        chooseRole('windows')
-        useDiscoveredHost(hosts[0])
-      } else {
-        addLog('No Mac/host found. Check that both laptops are on the same non-guest Wi-Fi and Windows network is Private.', 'warn')
-      }
-    } finally {
-      setIsDiscovering(false)
-    }
   }
 
   const callDisplayName = (): string => {
@@ -640,6 +530,40 @@ export default function App(): ReactElement {
       })
     })
   }
+
+  const broadcastLiveControl = useCallback(
+    (key: keyof ManipulationControls, value: ManipulationControls[keyof ManipulationControls]): void => {
+      if (!form.roomId.trim() || !form.callSignalUrl.trim() || !callEventsRef.current) return
+
+      fetch(`${signalBaseUrl()}/director-control`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomId: form.roomId,
+          from: callUserIdRef.current,
+          type: 'live-control',
+          role: callRole,
+          displayName: callDisplayName(),
+          payload: { key, value }
+        })
+      }).catch((error) =>
+        addLog(error instanceof Error ? error.message : 'Could not send live control to the other computer.', 'error')
+      )
+    },
+    [addLog, callRole, form.callSignalUrl, form.roomId]
+  )
+
+  const applyRemoteLiveControl = useCallback(
+    (payload: unknown, sender = 'the other computer'): void => {
+      if (!payload || typeof payload !== 'object') return
+      const update = payload as { key?: keyof ManipulationControls; value?: unknown }
+      if (!update.key || !(update.key in initialControls)) return
+
+      setControls((prev) => ({ ...prev, [update.key!]: update.value as never }))
+      addLog(`${sender} set ${String(update.key)} = ${String(update.value)}.`, 'info')
+    },
+    [addLog]
+  )
 
   const getOrCreateCallPeer = async (targetUserId: string): Promise<RTCPeerConnection> => {
     if (callPeerRef.current) return callPeerRef.current
@@ -736,7 +660,9 @@ export default function App(): ReactElement {
     }
 
     if (envelope.type === 'director-control') {
-      addLog('Director control update received.', 'info')
+      if (envelope.payload?.from !== callUserIdRef.current) {
+        applyRemoteLiveControl(envelope.payload?.payload, envelope.payload?.displayName || 'Other computer')
+      }
       return
     }
 
@@ -1017,6 +943,7 @@ export default function App(): ReactElement {
   ): void => {
     setControls((prev) => ({ ...prev, [key]: value }))
     appendControlEvent(String(key), value, false, notes || 'Applied to the live video-call processor.')
+    broadcastLiveControl(key, value)
     if (duckSoupProperty) {
       const sentToDuckSoup = sendDuckSoupControl(duckSoupProperty, value as number | boolean, notes)
       addLog(
@@ -1024,21 +951,6 @@ export default function App(): ReactElement {
         'info'
       )
     }
-  }
-
-  const applyPreset = (preset: (typeof conditionPresets)[number]): void => {
-    updateForm('condition', preset.label)
-    setControls((prev) => ({
-      ...prev,
-      smileAlpha: preset.alpha,
-      faceThreshold: preset.threshold ?? prev.faceThreshold
-    }))
-    appendControlEvent('conditionPreset', preset.label, false, preset.note)
-    if (playerRef.current) {
-      sendDuckSoupControl('alpha', preset.alpha, preset.note)
-      if (typeof preset.threshold === 'number') sendDuckSoupControl('face-thresh', preset.threshold, preset.note)
-    }
-    addLog(`Applied ${preset.label} to the live call processor.`, 'info')
   }
 
   const applyAudioPreset = (preset: (typeof audioPresets)[number]): void => {
@@ -1052,6 +964,9 @@ export default function App(): ReactElement {
     }))
 
     appendControlEvent('audioPreset', preset.label, false, 'Applied to outgoing live-call microphone audio. ' + preset.note)
+    broadcastLiveControl('audioPreset', preset.preset)
+    broadcastLiveControl('audioPitch', nextPitch)
+    broadcastLiveControl('audioGain', nextGain)
     if (preset.effectName && playerRef.current) {
       sendDuckSoupControl(preset.property, preset.value, preset.note, preset.effectName)
     }
@@ -1644,6 +1559,8 @@ export default function App(): ReactElement {
               onChange={(value) => {
                 setControls((prev) => ({ ...prev, audioPreset: 'custom-pitch', audioPitch: value }))
                 appendControlEvent('audioTone', value, false, 'Applied to outgoing live-call microphone audio.')
+                broadcastLiveControl('audioPreset', 'custom-pitch')
+                broadcastLiveControl('audioPitch', value)
                 if (playerRef.current) sendDuckSoupControl('pitch', value, 'Custom optional DuckSoup pitch audioFx control.', 'pitch')
                 addLog(`Outgoing voice tone = ${value.toFixed(2)} applied to the live call.`, 'info')
               }}
@@ -1659,6 +1576,8 @@ export default function App(): ReactElement {
               onChange={(value) => {
                 setControls((prev) => ({ ...prev, audioPreset: 'custom-volume', audioGain: value }))
                 appendControlEvent('audioGain', value, false, 'Applied to outgoing live-call microphone audio.')
+                broadcastLiveControl('audioPreset', 'custom-volume')
+                broadcastLiveControl('audioGain', value)
                 if (playerRef.current) sendDuckSoupControl('volume', value, 'Custom optional DuckSoup volume audioFx control.', 'volume')
                 addLog(`Outgoing voice gain = ${value.toFixed(2)} applied to the live call.`, 'info')
               }}
