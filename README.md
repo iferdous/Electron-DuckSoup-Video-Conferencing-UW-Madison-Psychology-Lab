@@ -1,124 +1,129 @@
 # DuckSoup Conference Lab
 
-Desktop app for running live psychology video sessions with participant video, controller-only face/voice controls, chat, recording, and study metadata.
+Desktop app for running live video-conference sessions for psychology studies.
 
-## What This App Does
+The app supports:
 
-- Creates a live video room for dyads, triads, or quads.
-- Lets one person join as the controller/RA.
-- Lets participants join without seeing the experiment controls.
-- Sends controller changes to participant streams during the call.
-- Records `.webm` files from participant stations.
-- Saves a session manifest and a CSV of live control changes.
+- participant and controller views
+- dyad, triad, and quad rooms
+- live video and audio between computers
+- controller-only face and voice controls
+- room chat
+- self-view hide/show
+- `.webm` recordings
+- session metadata and manipulation timing logs
 
-## Requirements
+## What You Need
 
-- Node.js and npm
-- Docker Desktop
-- The DuckSoup repo at:
+- Node.js
+- npm
+- Git
+- Docker Desktop, only if you are running the local DuckSoup/Mozza server
 
-```bash
-/Users/iferdous001/Documents/ducksoup-research
-```
-
-- This app at:
-
-```bash
-/Users/iferdous001/Desktop/Video Conferencing Software
-```
-
-## Start DuckSoup
-
-Open a terminal:
+## Get The App
 
 ```bash
-cd /Users/iferdous001/Documents/ducksoup-research/ducksoup-server
-docker compose up -d
-```
-
-Check that it is up:
-
-```bash
-curl http://localhost:8100/health
-```
-
-If that command does not respond, DuckSoup is not running.
-
-## Start The Electron App
-
-Open a second terminal:
-
-```bash
-cd "/Users/iferdous001/Desktop/Video Conferencing Software"
+git clone git@github.com:iferdous/Electron-DuckSoup-Video-Conferencing-UW-Madison-Psychology-Lab.git
+cd Electron-DuckSoup-Video-Conferencing-UW-Madison-Psychology-Lab
 npm install
+```
+
+If SSH is not set up on your computer, use the HTTPS clone URL from GitHub instead.
+
+## Start The App
+
+```bash
 npm run dev
 ```
 
-The app window should open automatically.
-
-If the dev runner does not open a window, use the manual fallback:
+If the window does not open, use:
 
 ```bash
 npm run build:manual
 npm run start:manual
 ```
 
-## Mac/Host Setup
+## Start The Local DuckSoup Server
 
-Use the Mac as the host for the call server.
+Only one computer needs to run this for a local lab test.
+
+```bash
+cd docker/ducksoup
+cp env.example .env
+docker compose up -d
+```
+
+Check it:
+
+```bash
+curl http://localhost:8100/health
+```
+
+Stop it:
+
+```bash
+cd docker/ducksoup
+docker compose down
+```
+
+## Run A Session
+
+Use one computer as the controller/host.
+
+On the controller computer:
 
 1. Open the app.
 2. Choose `Controller`.
 3. Choose `Dyad`, `Triad`, or `Quad`.
 4. Click `Start server here`.
-5. Copy the LAN server URL shown by the app. It will look like:
-
-```bash
-http://192.168.1.xxx:8765
-```
-
-6. Use the same Meeting ID on every computer.
+5. Copy the server URL shown in the app.
+6. Keep the Meeting ID visible.
 7. Click `Continue to room`.
 8. Click `Join room`.
-
-## Participant Computer Setup
 
 On each participant computer:
 
 1. Open the app.
 2. Choose `Participant`.
-3. Enter the same Meeting ID as the Mac/host.
-4. Enter the Mac/host server URL.
+3. Enter the same Meeting ID.
+4. Enter the controller/host server URL.
 5. Enter a display name and station ID.
 6. Click `Continue to room`.
 7. Click `Join room`.
 
-Participants should then appear in the room.
+Participants should appear in the room after they join.
 
 ## Recording
 
-Participant stations record their own local files.
+Participant stations save their own files.
 
-Each recording saves:
+Each recording creates:
 
 - `clean.webm`
 - `altered.webm`
 - `session_manifest.json`
 - `manipulation_events.csv`
 
-The app keeps `.webm` as the output format.
+The output format is `.webm`.
 
-## Notes
+## Important Notes
 
-- The controller owns the face and voice controls.
+- The controller is the only role that sees the face and voice controls.
 - Participants can hide self view without turning off the camera.
-- Chat works inside the room and can be sent to everyone, the control room, or one person.
+- Chat can go to everyone, the control room, or one person.
 - For a local lab test, all computers should be on the same network.
-- If a Windows participant cannot connect, make sure the Windows Wi-Fi profile is set to Private and that the Mac firewall allows incoming connections.
+- If Windows cannot connect, set the Windows Wi-Fi network profile to `Private`.
+- If macOS asks about incoming connections, allow the app on the local network.
 
-## Stop DuckSoup
+## Update The App
 
 ```bash
-cd /Users/iferdous001/Documents/ducksoup-research/ducksoup-server
-docker compose down
+git pull origin main
+npm install
+```
+
+Then start the app again with:
+
+```bash
+npm run dev
 ```
