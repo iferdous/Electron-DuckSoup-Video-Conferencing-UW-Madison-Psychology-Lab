@@ -1,56 +1,52 @@
 # DuckSoup Conference Lab
 
-Research-oriented video conferencing console for live affective manipulation studies.
+Desktop app for running live psychology video sessions with participant video, controller-only face/voice controls, chat, recording, and study metadata.
 
-This app is an Electron + React + TypeScript desktop application designed to sit on top of the DuckSoup/Mozza stack:
+## What This App Does
 
-```text
-Participant camera/mic
-→ DuckSoup WebRTC room
-→ GStreamer + Mozza media effects
-→ partner-facing altered stream
-→ local clean/altered recordings + manipulation CSV
-→ downstream PPS rating/survey app
+- Creates a live video room for dyads, triads, or quads.
+- Lets one person join as the controller/RA.
+- Lets participants join without seeing the experiment controls.
+- Sends controller changes to participant streams during the call.
+- Records `.webm` files from participant stations.
+- Saves a session manifest and a CSV of live control changes.
+
+## Requirements
+
+- Node.js and npm
+- Docker Desktop
+- The DuckSoup repo at:
+
+```bash
+/Users/iferdous001/Documents/ducksoup-research
 ```
 
-## What Works In This MVP
+- This app at:
 
-- Connects to a self-hosted DuckSoup server at `http://localhost:8100` or another LAN/server URL.
-- Loads DuckSoup's browser client script from the DuckSoup server.
-- Joins a named two-person DuckSoup room over WebRTC.
-- Hides participant self-view by default while retaining an optional diagnostic self check.
-- Shows LAN host IPs for two-computer testing.
-- Shows WebRTC latency, jitter, and packet-loss stats when DuckSoup stats are available.
-- Exposes live Mozza controls for:
-  - smile alpha
-  - face detection threshold
-  - landmark beta
-  - smoothing cutoff
-  - debug overlay
-- Exposes DuckSoup `audioFx` presets for basic pitch and gain changes.
-- Records:
-  - clean local webcam/mic stream
-  - altered returned DuckSoup/Mozza stream
-- Writes:
-  - clean `.webm`
-  - altered `.webm`
-  - `session_manifest.json`
-  - `manipulation_events.csv`
+```bash
+/Users/iferdous001/Desktop/Video Conferencing Software
+```
 
-## Why Electron / React / TypeScript
+## Start DuckSoup
 
-Electron gives us Chromium's WebRTC, `MediaRecorder`, and camera/microphone behavior with fewer platform surprises than a custom native shell. React + TypeScript keeps the research UI easy to maintain. Rust/Tauri remains a good fit for the PPS rating app, but this conferencing tool benefits from Electron's media support and the existing FES/DuckSoup app patterns.
-
-## Running Locally
-
-Start DuckSoup first:
+Open a terminal:
 
 ```bash
 cd /Users/iferdous001/Documents/ducksoup-research/ducksoup-server
 docker compose up -d
 ```
 
-Start this app:
+Check that it is up:
+
+```bash
+curl http://localhost:8100/health
+```
+
+If that command does not respond, DuckSoup is not running.
+
+## Start The Electron App
+
+Open a second terminal:
 
 ```bash
 cd "/Users/iferdous001/Desktop/Video Conferencing Software"
@@ -58,25 +54,71 @@ npm install
 npm run dev
 ```
 
-For two-laptop testing, see [docs/TWO_COMPUTER_TESTING.md](docs/TWO_COMPUTER_TESTING.md).
+The app window should open automatically.
 
-## Two-Computer Session Model
+If the dev runner does not open a window, use the manual fallback:
 
-For two participants, both stations should point to the same DuckSoup server and use the same Room ID. Each station should use a unique station/participant ID. The experimenter can choose which target user receives live Mozza control commands.
+```bash
+npm run build:manual
+npm run start:manual
+```
 
-If the two computers are not on the same machine, `localhost:8100` must be replaced with a reachable DuckSoup host URL, and `DUCKSOUP_ALLOWED_WS_ORIGINS` must allow the Electron renderer origin. A production deployment should also use HTTPS/WSS and a TURN server for difficult networks.
+## Mac/Host Setup
 
-## Current Constraints
+Use the Mac as the host for the call server.
 
-- Voice pitch and gain are wired as DuckSoup `audioFx` presets. The running DuckSoup image still needs the matching GStreamer elements available.
-- More advanced voice warmth, eye-contact redirection, gaze changes, and true synchrony delay still need dedicated DuckSoup/GStreamer pipeline work.
-- The clean and altered streams may have different latency because the altered stream travels through DuckSoup/WebRTC/GStreamer before returning.
-- Recordings stay as `.webm`. If PPS needs to load these files directly, PPS should accept `.webm`.
+1. Open the app.
+2. Choose `Controller`.
+3. Choose `Dyad`, `Triad`, or `Quad`.
+4. Click `Start server here`.
+5. Copy the LAN server URL shown by the app. It will look like:
 
-## Recommended Next Engineering Steps
+```bash
+http://192.168.1.xxx:8765
+```
 
-1. Validate the DuckSoup audio presets against the lab Docker image and document which GStreamer elements are installed.
-2. Add TURN configuration for two-computer sessions outside the same network.
-3. Add a true delay/synchrony buffer in the media pipeline, not just a logged design variable.
-4. Update PPS to accept `.webm` if DuckSoup recordings should be loaded directly.
-5. Add automated pre-session checks for camera, mic, DuckSoup, returned altered stream, recording support, and output folder writability.
+6. Use the same Meeting ID on every computer.
+7. Click `Continue to room`.
+8. Click `Join room`.
+
+## Participant Computer Setup
+
+On each participant computer:
+
+1. Open the app.
+2. Choose `Participant`.
+3. Enter the same Meeting ID as the Mac/host.
+4. Enter the Mac/host server URL.
+5. Enter a display name and station ID.
+6. Click `Continue to room`.
+7. Click `Join room`.
+
+Participants should then appear in the room.
+
+## Recording
+
+Participant stations record their own local files.
+
+Each recording saves:
+
+- `clean.webm`
+- `altered.webm`
+- `session_manifest.json`
+- `manipulation_events.csv`
+
+The app keeps `.webm` as the output format.
+
+## Notes
+
+- The controller owns the face and voice controls.
+- Participants can hide self view without turning off the camera.
+- Chat works inside the room and can be sent to everyone, the control room, or one person.
+- For a local lab test, all computers should be on the same network.
+- If a Windows participant cannot connect, make sure the Windows Wi-Fi profile is set to Private and that the Mac firewall allows incoming connections.
+
+## Stop DuckSoup
+
+```bash
+cd /Users/iferdous001/Documents/ducksoup-research/ducksoup-server
+docker compose down
+```

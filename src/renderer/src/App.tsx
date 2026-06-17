@@ -4,16 +4,20 @@ import type {
   CallPeer,
   CallRole,
   CallState,
-  ConnectionState,
+  ChatMessage,
+  ChatTarget,
   ControlEvent,
   LatencyStats,
   LogEvent,
   ManipulationControls,
   RecordingState,
-  SessionForm
+  SessionForm,
+  SessionFormat
 } from './types'
 
 const initialForm: SessionForm = {
+  role: 'participant',
+  sessionFormat: 'dyad',
   serverName: 'Mac DuckSoup Host',
   studyId: 'PPS2026',
   raId: '',
@@ -42,8 +46,6 @@ const initialControls: ManipulationControls = {
   synchronyDelayMs: 0
 }
 
-type DuckSoupPlayerHandle = Awaited<ReturnType<NonNullable<Window['DuckSoup']>['render']>>
-
 type SignalEnvelope = {
   type: string
   payload?: {
@@ -56,7 +58,7 @@ type SignalEnvelope = {
     role?: CallRole
     displayName?: string
     userId?: string
-  }
+  } & Partial<ChatMessage>
 }
 
 type LiveMediaProcessor = {
@@ -74,13 +76,31 @@ type LiveMediaProcessor = {
   audioHighShelf?: BiquadFilterNode
 }
 
+type RemoteTile = {
+  userId: string
+  displayName: string
+  role: CallRole
+  stream: MediaStream
+}
+
+const sessionCapacity: Record<SessionFormat, number> = {
+  dyad: 2,
+  triad: 3,
+  quad: 4
+}
+
+const sessionLabels: Record<SessionFormat, string> = {
+  dyad: 'Dyad',
+  triad: 'Triad',
+  quad: 'Quad'
+}
+
 const audioPresets: Array<{
   label: string
   preset: string
   effectName: 'pitch' | 'volume' | ''
   property: string
   value: number
-  audioFx: string
   note: string
 }> = [
   {
@@ -89,8 +109,7 @@ const audioPresets: Array<{
     effectName: '',
     property: '',
     value: 1,
-    audioFx: '',
-    note: 'No DuckSoup audio effect requested.'
+    note: 'No voice change.'
   },
   {
     label: 'Warmer voice',
@@ -98,8 +117,7 @@ const audioPresets: Array<{
     effectName: 'pitch',
     property: 'pitch',
     value: 0.92,
-    audioFx: 'pitch pitch=0.92',
-    note: 'DuckSoup audioFx preset using the pitch effect.'
+    note: 'Warmer/deeper outgoing voice tone.'
   },
   {
     label: 'Brighter voice',
@@ -107,8 +125,7 @@ const audioPresets: Array<{
     effectName: 'pitch',
     property: 'pitch',
     value: 1.08,
-    audioFx: 'pitch pitch=1.08',
-    note: 'DuckSoup audioFx preset using the pitch effect.'
+    note: 'Brighter outgoing voice tone.'
   },
   {
     label: 'Quieter voice',
@@ -116,8 +133,7 @@ const audioPresets: Array<{
     effectName: 'volume',
     property: 'volume',
     value: 0.75,
-    audioFx: 'volume volume=0.75',
-    note: 'DuckSoup audioFx preset using a GStreamer volume element.'
+    note: 'Lower outgoing microphone gain.'
   },
   {
     label: 'Louder voice',
@@ -125,8 +141,7 @@ const audioPresets: Array<{
     effectName: 'volume',
     property: 'volume',
     value: 1.25,
-    audioFx: 'volume volume=1.25',
-    note: 'DuckSoup audioFx preset using a GStreamer volume element.'
+    note: 'Higher outgoing microphone gain.'
   }
 ]
 
@@ -193,65 +208,8 @@ const controlEventsToCsv = (events: ControlEvent[]): string => {
   return [header.join(','), ...rows].join('\n') + '\n'
 }
 
-const buildDuckSoupScriptUrl = (baseUrl: string): string => {
-  const url = new URL('/assets/v1.93/js/ducksoup.js', baseUrl)
-  return url.toString()
-}
-
-const buildSignalingUrl = (baseUrl: string): string => {
-  const url = new URL('/ws', baseUrl)
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-  return url.toString()
-}
-
-const selectedAudioFx = (controlState: ManipulationControls): string | undefined => {
-  if (controlState.audioPreset === 'custom-pitch') {
-    return `pitch pitch=${controlState.audioPitch}`
-  }
-  if (controlState.audioPreset === 'custom-volume') {
-    return `volume volume=${controlState.audioGain}`
-  }
-  const match = audioPresets.find((item) => item.preset === controlState.audioPreset)
-  return match?.audioFx || undefined
-}
-
 const toMs = (value: unknown): number | null => {
   return typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 1000) : null
-}
-
-const readPacketsLost = (stats: Record<string, unknown> | undefined): number => {
-  return typeof stats?.packetsLost === 'number' ? stats.packetsLost : 0
-}
-
-const latencyFromStats = (payload: unknown): LatencyStats | null => {
-  if (!payload || typeof payload !== 'object') return null
-  const stats = payload as {
-    remoteInboundRTPVideo?: Record<string, unknown>
-    remoteInboundRTPAudio?: Record<string, unknown>
-    inboundRTPVideo?: Record<string, unknown>
-    inboundRTPAudio?: Record<string, unknown>
-  }
-  const videoRttMs = toMs(stats.remoteInboundRTPVideo?.roundTripTime)
-  const audioRttMs = toMs(stats.remoteInboundRTPAudio?.roundTripTime)
-  const jitterMs = toMs(stats.inboundRTPVideo?.jitter) ?? toMs(stats.inboundRTPAudio?.jitter)
-  const rttValues = [videoRttMs, audioRttMs].filter((value): value is number => value !== null)
-  const rttMs =
-    rttValues.length > 0
-      ? Math.round(rttValues.reduce((total, value) => total + value, 0) / rttValues.length)
-      : null
-
-  return {
-    rttMs,
-    jitterMs,
-    audioRttMs,
-    videoRttMs,
-    packetsLost:
-      readPacketsLost(stats.remoteInboundRTPVideo) +
-      readPacketsLost(stats.remoteInboundRTPAudio) +
-      readPacketsLost(stats.inboundRTPVideo) +
-      readPacketsLost(stats.inboundRTPAudio),
-    updatedAt: new Date().toLocaleTimeString()
-  }
 }
 
 const latencyFromPeerConnection = async (peer: RTCPeerConnection): Promise<LatencyStats | null> => {
@@ -295,10 +253,7 @@ const latencyFromPeerConnection = async (peer: RTCPeerConnection): Promise<Laten
     }
   })
 
-  const rttValues: number[] = []
-  for (const value of [rttMs, videoRttMs, audioRttMs]) {
-    if (typeof value === 'number') rttValues.push(value)
-  }
+  const rttValues = [rttMs, videoRttMs, audioRttMs].filter((value): value is number => value !== null)
   const averageRtt =
     rttValues.length > 0
       ? Math.round(rttValues.reduce((total, value) => total + value, 0) / rttValues.length)
@@ -396,29 +351,25 @@ const applySmileWarp = (
 
 export default function App(): ReactElement {
   const callLocalVideoRef = useRef<HTMLVideoElement>(null)
-  const callRemoteVideoRef = useRef<HTMLVideoElement>(null)
-  const remoteVideoRef = useRef<HTMLVideoElement>(null)
-  const localDiagnosticVideoRef = useRef<HTMLVideoElement>(null)
-  const callPeerRef = useRef<RTCPeerConnection | null>(null)
   const callEventsRef = useRef<EventSource | null>(null)
   const callLocalStreamRef = useRef<MediaStream | null>(null)
-  const callRemoteStreamRef = useRef<MediaStream | null>(null)
-  const callTargetRef = useRef<string>('')
   const callUserIdRef = useRef<string>(`station-${makeId()}`)
   const controlsRef = useRef<ManipulationControls>(initialControls)
   const liveMediaProcessorRef = useRef<LiveMediaProcessor | null>(null)
+  const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map())
+  const remoteStreamsRef = useRef<Map<string, RemoteTile>>(new Map())
   const cleanStreamRef = useRef<MediaStream | null>(null)
   const alteredStreamRef = useRef<MediaStream | null>(null)
-  const playerRef = useRef<DuckSoupPlayerHandle | null>(null)
   const recordingStartRef = useRef<number | null>(null)
   const cleanRecorderRef = useRef<MediaRecorder | null>(null)
   const alteredRecorderRef = useRef<MediaRecorder | null>(null)
   const cleanChunksRef = useRef<Blob[]>([])
   const alteredChunksRef = useRef<Blob[]>([])
 
-  const [callRole] = useState<CallRole>('participant')
+  const [setupComplete, setSetupComplete] = useState(false)
   const [callState, setCallState] = useState<CallState>('idle')
   const [callPeers, setCallPeers] = useState<CallPeer[]>([])
+  const [remoteTiles, setRemoteTiles] = useState<RemoteTile[]>([])
   const [signalServer, setSignalServer] = useState<{ active: boolean; localUrl: string; lanUrl: string }>({
     active: false,
     localUrl: '',
@@ -426,27 +377,21 @@ export default function App(): ReactElement {
   })
   const [form, setForm] = useState<SessionForm>(initialForm)
   const [controls, setControls] = useState<ManipulationControls>(initialControls)
-  const [connectionState, setConnectionState] = useState<ConnectionState>('idle')
   const [recordingState, setRecordingState] = useState<RecordingState>('idle')
   const [sessionDir, setSessionDir] = useState<string>('')
-  const [duckSoupReady, setDuckSoupReady] = useState(false)
-  const [showDiagnostics, setShowDiagnostics] = useState(false)
+  const [showSelfView, setShowSelfView] = useState(true)
   const [logs, setLogs] = useState<LogEvent[]>([])
   const [controlEvents, setControlEvents] = useState<ControlEvent[]>([])
   const [recordingSeconds, setRecordingSeconds] = useState(0)
   const [latency, setLatency] = useState<LatencyStats>(emptyLatency)
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const [chatText, setChatText] = useState('')
+  const [chatTarget, setChatTarget] = useState<ChatTarget>('room')
 
-  const statusLabel = useMemo(() => {
-    const labels: Record<ConnectionState, string> = {
-      idle: 'Not checked',
-      checking: 'Checking DuckSoup',
-      ready: 'Server reachable',
-      connecting: 'Joining room',
-      connected: 'Connected',
-      error: 'Needs attention'
-    }
-    return labels[connectionState]
-  }, [connectionState])
+  const isController = form.role === 'controller'
+  const expectedParticipants = sessionCapacity[form.sessionFormat]
+  const participantPeers = useMemo(() => callPeers.filter((peer) => peer.role === 'participant'), [callPeers])
+  const controllerPeers = useMemo(() => callPeers.filter((peer) => peer.role === 'controller'), [callPeers])
 
   const addLog = useCallback((message: string, level: LogEvent['level'] = 'info') => {
     setLogs((prev) =>
@@ -458,7 +403,7 @@ export default function App(): ReactElement {
           message
         },
         ...prev
-      ].slice(0, 80)
+      ].slice(0, 100)
     )
   }, [])
 
@@ -473,11 +418,8 @@ export default function App(): ReactElement {
 
   useEffect(() => {
     controlsRef.current = controls
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.volume = Math.min(Math.max(controls.partnerVolume, 0), 2)
-    }
-    if (callRemoteVideoRef.current) {
-      callRemoteVideoRef.current.volume = Math.min(Math.max(controls.partnerVolume, 0), 2)
+    for (const video of document.querySelectorAll<HTMLVideoElement>('video[data-remote-call-video="true"]')) {
+      video.volume = clamp(controls.partnerVolume, 0, 2)
     }
     applyAudioControlsToProcessor(liveMediaProcessorRef.current, controls)
   }, [controls])
@@ -486,7 +428,7 @@ export default function App(): ReactElement {
     if (!['waiting', 'connecting', 'connected'].includes(callState)) return undefined
 
     const interval = window.setInterval(() => {
-      const peer = callPeerRef.current
+      const peer = peerConnectionsRef.current.values().next().value as RTCPeerConnection | undefined
       if (!peer) return
       latencyFromPeerConnection(peer)
         .then((nextLatency) => {
@@ -498,38 +440,63 @@ export default function App(): ReactElement {
     return () => window.clearInterval(interval)
   }, [callState])
 
-  const updateForm = (field: keyof SessionForm, value: string): void => {
+  const updateForm = <K extends keyof SessionForm>(field: K, value: SessionForm[K]): void => {
     setForm((prev) => ({ ...prev, [field]: value }))
+  }
+
+  const signalBaseUrl = (): string => form.callSignalUrl.replace(/\/$/, '')
+
+  const callDisplayName = (): string => {
+    const fallback = isController ? 'Controller' : 'Participant'
+    return form.displayName.trim() || (isController && form.raId ? `Controller ${form.raId}` : fallback)
   }
 
   const generateNewRoom = (): void => {
     const roomId = makeRoomId(form.dyadId)
     updateForm('roomId', roomId)
-    addLog(`New Room ID created: ${roomId}`, 'success')
+    addLog(`New meeting ID created: ${roomId}`, 'success')
   }
 
-  const callDisplayName = (): string => {
-    if (callRole === 'director') return form.raId ? `Director ${form.raId}` : 'Director'
-    return form.displayName.trim() || 'Participant'
+  const startSignalServer = async (): Promise<void> => {
+    const result = await window.researchApi.startCallSignalServer(8765)
+    setSignalServer({ active: result.ok, localUrl: result.localUrl, lanUrl: result.lanUrl })
+    updateForm('callSignalUrl', result.localUrl)
+    addLog(`Call server running. Participants can use ${result.lanUrl}.`, 'success')
   }
 
-  const signalBaseUrl = (): string => form.callSignalUrl.replace(/\/$/, '')
+  const checkSignalServer = async (): Promise<void> => {
+    const result = await window.researchApi.checkCallSignalServer(form.callSignalUrl)
+    addLog(result.detail, result.ok ? 'success' : 'error')
+  }
 
-  const postSignal = async (type: string, payload?: unknown, to?: string): Promise<void> => {
-    await fetch(`${signalBaseUrl()}/signal`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+  const pickFolder = async (): Promise<void> => {
+    const folder = await window.researchApi.selectOutputFolder()
+    if (folder) {
+      updateForm('outputFolder', folder)
+      addLog(`Output folder selected: ${folder}`, 'success')
+    }
+  }
+
+  const appendControlEvent = useCallback(
+    (control: string, value: string | number | boolean, notes = '') => {
+      const event: ControlEvent = {
+        id: makeId(),
+        timestamp: new Date().toISOString(),
+        elapsedMs: recordingStartRef.current ? Date.now() - recordingStartRef.current : 0,
         roomId: form.roomId,
-        from: callUserIdRef.current,
-        to,
-        type,
-        payload,
-        role: callRole,
-        displayName: callDisplayName()
-      })
-    })
-  }
+        participantId: form.participantId,
+        partnerId: form.partnerId,
+        targetUserId: form.targetUserId || form.participantId,
+        condition: form.condition,
+        control,
+        value,
+        appliedToDuckSoup: false,
+        notes
+      }
+      setControlEvents((prev) => [...prev, event])
+    },
+    [form]
+  )
 
   const broadcastLiveControl = useCallback(
     (key: keyof ManipulationControls, value: ManipulationControls[keyof ManipulationControls]): void => {
@@ -542,57 +509,98 @@ export default function App(): ReactElement {
           roomId: form.roomId,
           from: callUserIdRef.current,
           type: 'live-control',
-          role: callRole,
+          role: form.role,
           displayName: callDisplayName(),
           payload: { key, value }
         })
       }).catch((error) =>
-        addLog(error instanceof Error ? error.message : 'Could not send live control to the other computer.', 'error')
+        addLog(error instanceof Error ? error.message : 'Could not send live control to the room.', 'error')
       )
     },
-    [addLog, callRole, form.callSignalUrl, form.roomId]
+    [addLog, form.callSignalUrl, form.role, form.roomId]
   )
 
   const applyRemoteLiveControl = useCallback(
-    (payload: unknown, sender = 'the other computer'): void => {
+    (payload: unknown, sender = 'Controller'): void => {
       if (!payload || typeof payload !== 'object') return
       const update = payload as { key?: keyof ManipulationControls; value?: unknown }
       if (!update.key || !(update.key in initialControls)) return
 
       setControls((prev) => ({ ...prev, [update.key!]: update.value as never }))
+      const loggedValue =
+        typeof update.value === 'string' || typeof update.value === 'number' || typeof update.value === 'boolean'
+          ? update.value
+          : String(update.value)
+      appendControlEvent(String(update.key), loggedValue, `Received from ${sender}.`)
       addLog(`${sender} set ${String(update.key)} = ${String(update.value)}.`, 'info')
     },
-    [addLog]
+    [addLog, appendControlEvent]
   )
 
-  const getOrCreateCallPeer = async (targetUserId: string): Promise<RTCPeerConnection> => {
-    if (callPeerRef.current) return callPeerRef.current
-    callTargetRef.current = targetUserId
+  const postSignal = async (type: string, payload?: unknown, to?: string): Promise<void> => {
+    await fetch(`${signalBaseUrl()}/signal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roomId: form.roomId,
+        from: callUserIdRef.current,
+        to,
+        type,
+        payload,
+        role: form.role,
+        displayName: callDisplayName()
+      })
+    })
+  }
+
+  const syncRemoteTiles = (): void => {
+    setRemoteTiles([...remoteStreamsRef.current.values()])
+  }
+
+  const getOrCreateCallPeer = (targetUserId: string, peerMeta?: Partial<CallPeer>): RTCPeerConnection => {
+    const existing = peerConnectionsRef.current.get(targetUserId)
+    if (existing) return existing
 
     const peer = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     })
+    peerConnectionsRef.current.set(targetUserId, peer)
 
     const remoteStream = new MediaStream()
-    callRemoteStreamRef.current = remoteStream
-    if (callRemoteVideoRef.current) callRemoteVideoRef.current.srcObject = remoteStream
-
-    callLocalStreamRef.current?.getTracks().forEach((track) => {
-      peer.addTrack(track, callLocalStreamRef.current!)
+    remoteStreamsRef.current.set(targetUserId, {
+      userId: targetUserId,
+      displayName: peerMeta?.displayName || targetUserId,
+      role: peerMeta?.role || 'participant',
+      stream: remoteStream
     })
+    syncRemoteTiles()
+
+    const localStream = callLocalStreamRef.current
+    if (localStream && localStream.getTracks().length > 0) {
+      localStream.getTracks().forEach((track) => {
+        peer.addTrack(track, localStream)
+      })
+    } else {
+      peer.addTransceiver('video', { direction: 'recvonly' })
+      peer.addTransceiver('audio', { direction: 'recvonly' })
+    }
 
     peer.ontrack = (event) => {
       event.streams[0]?.getTracks().forEach((track) => {
         if (!remoteStream.getTrackById(track.id)) remoteStream.addTrack(track)
       })
-      callRemoteVideoRef.current?.play().catch(() => undefined)
+      const current = remoteStreamsRef.current.get(targetUserId)
+      if (current) {
+        remoteStreamsRef.current.set(targetUserId, { ...current, stream: remoteStream })
+        syncRemoteTiles()
+      }
       setCallState('connected')
-      addLog(`Receiving live video from ${targetUserId}.`, 'success')
+      addLog(`Receiving live media from ${peerMeta?.displayName || targetUserId}.`, 'success')
     }
 
     peer.onicecandidate = (event) => {
       if (event.candidate) {
-        postSignal('candidate', event.candidate.toJSON(), callTargetRef.current).catch((error) =>
+        postSignal('candidate', event.candidate.toJSON(), targetUserId).catch((error) =>
           addLog(error instanceof Error ? error.message : 'Could not send ICE candidate.', 'error')
         )
       }
@@ -601,43 +609,50 @@ export default function App(): ReactElement {
     peer.onconnectionstatechange = () => {
       if (peer.connectionState === 'connected') setCallState('connected')
       if (['failed', 'disconnected', 'closed'].includes(peer.connectionState)) {
-        setCallState(peer.connectionState === 'closed' ? 'idle' : 'error')
-        addLog(`Live call connection ${peer.connectionState}.`, peer.connectionState === 'failed' ? 'error' : 'warn')
+        addLog(
+          `Connection with ${peerMeta?.displayName || targetUserId} is ${peer.connectionState}.`,
+          peer.connectionState === 'failed' ? 'error' : 'warn'
+        )
       }
     }
 
-    callPeerRef.current = peer
     return peer
   }
 
-  const makeCallOffer = async (targetUserId: string): Promise<void> => {
-    const peer = await getOrCreateCallPeer(targetUserId)
+  const makeCallOffer = async (targetPeer: CallPeer): Promise<void> => {
+    if (peerConnectionsRef.current.has(targetPeer.userId)) return
+    const peer = getOrCreateCallPeer(targetPeer.userId, targetPeer)
     setCallState('connecting')
     const offer = await peer.createOffer()
     await peer.setLocalDescription(offer)
-    await postSignal('offer', offer, targetUserId)
-    addLog(`Sent live call offer to ${targetUserId}.`, 'info')
+    await postSignal('offer', offer, targetPeer.userId)
+    addLog(`Sent call offer to ${targetPeer.displayName}.`, 'info')
   }
 
   const maybeOfferToPeer = (peer: CallPeer): void => {
-    if (callRole !== 'participant') return
-    if (peer.role !== 'participant') return
     if (peer.userId === callUserIdRef.current) return
-    if (callPeerRef.current) return
+    if (peerConnectionsRef.current.has(peer.userId)) return
     if (callUserIdRef.current.localeCompare(peer.userId) < 0) {
-      makeCallOffer(peer.userId).catch((error) =>
+      makeCallOffer(peer).catch((error) =>
         addLog(error instanceof Error ? error.message : 'Could not start live call offer.', 'error')
       )
     }
   }
 
+  const addChatMessage = (message: ChatMessage): void => {
+    setChatMessages((prev) => {
+      if (prev.some((item) => item.id === message.id)) return prev
+      return [...prev, message].slice(-200)
+    })
+  }
+
   const handleSignalEvent = async (event: MessageEvent<string>): Promise<void> => {
     const envelope = JSON.parse(event.data) as SignalEnvelope
+
     if (envelope.type === 'hello' || envelope.type === 'peer-list') {
       const peers = envelope.payload?.peers ?? []
       setCallPeers(peers)
-      peers.find((peer) => peer.userId !== callUserIdRef.current && peer.role === 'participant') &&
-        setCallState('connecting')
+      if (peers.some((peer) => peer.userId !== callUserIdRef.current)) setCallState('connecting')
       peers.forEach(maybeOfferToPeer)
       return
     }
@@ -647,21 +662,35 @@ export default function App(): ReactElement {
         const next = prev.filter((peer) => peer.userId !== envelope.payload!.peer!.userId)
         return [...next, envelope.payload!.peer!]
       })
-      addLog(`${envelope.payload.peer.displayName} joined the live call room.`, 'success')
+      addLog(`${envelope.payload.peer.displayName} joined the room.`, 'success')
       maybeOfferToPeer(envelope.payload.peer)
       return
     }
 
     if (envelope.type === 'peer-left') {
       const userId = envelope.payload?.userId || envelope.payload?.from || envelope.payload?.peer?.userId
-      if (userId) setCallPeers((prev) => prev.filter((peer) => peer.userId !== userId))
-      addLog('A live call peer left the room.', 'warn')
+      if (userId) {
+        peerConnectionsRef.current.get(userId)?.close()
+        peerConnectionsRef.current.delete(userId)
+        remoteStreamsRef.current.get(userId)?.stream.getTracks().forEach((track) => track.stop())
+        remoteStreamsRef.current.delete(userId)
+        syncRemoteTiles()
+        setCallPeers((prev) => prev.filter((peer) => peer.userId !== userId))
+      }
+      addLog('Someone left the room.', 'warn')
       return
     }
 
     if (envelope.type === 'director-control') {
       if (envelope.payload?.from !== callUserIdRef.current) {
-        applyRemoteLiveControl(envelope.payload?.payload, envelope.payload?.displayName || 'Other computer')
+        applyRemoteLiveControl(envelope.payload?.payload, envelope.payload?.displayName || 'Controller')
+      }
+      return
+    }
+
+    if (envelope.type === 'chat-message') {
+      if (envelope.payload?.id && envelope.payload.text && envelope.payload.from) {
+        addChatMessage(envelope.payload as ChatMessage)
       }
       return
     }
@@ -670,7 +699,8 @@ export default function App(): ReactElement {
     if (envelope.payload.to && envelope.payload.to !== callUserIdRef.current) return
 
     const from = envelope.payload.from
-    const peer = await getOrCreateCallPeer(from)
+    const peerMeta = callPeers.find((item) => item.userId === from)
+    const peer = getOrCreateCallPeer(from, peerMeta)
 
     if (envelope.payload.type === 'offer') {
       setCallState('connecting')
@@ -678,25 +708,13 @@ export default function App(): ReactElement {
       const answer = await peer.createAnswer()
       await peer.setLocalDescription(answer)
       await postSignal('answer', answer, from)
-      addLog(`Answered live call offer from ${from}.`, 'success')
+      addLog(`Answered call offer from ${peerMeta?.displayName || from}.`, 'success')
     } else if (envelope.payload.type === 'answer') {
       await peer.setRemoteDescription(envelope.payload.payload as RTCSessionDescriptionInit)
-      addLog(`Live call answer received from ${from}.`, 'success')
+      addLog(`Call answer received from ${peerMeta?.displayName || from}.`, 'success')
     } else if (envelope.payload.type === 'candidate') {
       await peer.addIceCandidate(envelope.payload.payload as RTCIceCandidateInit)
     }
-  }
-
-  const startSignalServer = async (): Promise<void> => {
-    const result = await window.researchApi.startCallSignalServer(8765)
-    setSignalServer({ active: result.ok, localUrl: result.localUrl, lanUrl: result.lanUrl })
-    updateForm('callSignalUrl', result.localUrl)
-    addLog(`Video call signal server running. Windows can use ${result.lanUrl}.`, 'success')
-  }
-
-  const checkSignalServer = async (): Promise<void> => {
-    const result = await window.researchApi.checkCallSignalServer(form.callSignalUrl)
-    addLog(result.detail, result.ok ? 'success' : 'error')
   }
 
   const cleanupLiveMediaProcessor = (): void => {
@@ -793,164 +811,81 @@ export default function App(): ReactElement {
 
   const joinLiveCall = async (): Promise<void> => {
     if (!form.callSignalUrl.trim() || !form.roomId.trim() || !callDisplayName().trim()) {
-      addLog('Server URL, Room ID, and Display name are required before joining the live call.', 'error')
+      addLog('Server URL, meeting ID, and display name are required before joining.', 'error')
       return
     }
 
     setCallState('starting')
     try {
-      if (callRole === 'participant') {
+      if (!isController) {
         const rawStream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
           audio: true
         })
         const processor = await createLiveMediaProcessor(rawStream)
+        cleanStreamRef.current = rawStream
+        alteredStreamRef.current = processor.processedStream
         callLocalStreamRef.current = processor.processedStream
         if (callLocalVideoRef.current) {
           callLocalVideoRef.current.srcObject = processor.processedStream
           await callLocalVideoRef.current.play().catch(() => undefined)
         }
-        addLog('Live camera/mic processor started. Face and voice controls now affect the outgoing call.', 'success')
+        addLog('Camera and mic started. Controller settings now affect your outgoing stream.', 'success')
       }
 
       const params = new URLSearchParams({
         roomId: form.roomId,
         userId: callUserIdRef.current,
-        role: callRole,
+        role: form.role,
         displayName: callDisplayName()
       })
       const events = new EventSource(`${signalBaseUrl()}/events?${params.toString()}`)
       callEventsRef.current = events
-      events.onmessage = (event) => {
-        handleSignalEvent(event).catch((error) =>
-          addLog(error instanceof Error ? error.message : 'Could not handle live call signal.', 'error')
+      events.onmessage = (message) => {
+        handleSignalEvent(message).catch((error) =>
+          addLog(error instanceof Error ? error.message : 'Could not handle room signal.', 'error')
         )
       }
       events.onerror = () => {
         setCallState('error')
-        addLog('Live call signal connection dropped. Check the signal server URL or tunnel.', 'error')
+        addLog('Room connection dropped. Check the server URL and make sure the host app is still open.', 'error')
       }
       setCallState('waiting')
-      addLog(`${callDisplayName()} joined live call room ${form.roomId}.`, 'success')
+      addLog(`${callDisplayName()} joined ${form.roomId}.`, 'success')
     } catch (error) {
       setCallState('error')
-      addLog(error instanceof Error ? error.message : 'Could not join live call.', 'error')
+      addLog(error instanceof Error ? error.message : 'Could not join the room.', 'error')
     }
   }
 
   const leaveLiveCall = (): void => {
     callEventsRef.current?.close()
-    callPeerRef.current?.close()
+    for (const peer of peerConnectionsRef.current.values()) peer.close()
+    for (const tile of remoteStreamsRef.current.values()) tile.stream.getTracks().forEach((track) => track.stop())
     cleanupLiveMediaProcessor()
-    callRemoteStreamRef.current?.getTracks().forEach((track) => track.stop())
     callEventsRef.current = null
-    callPeerRef.current = null
     callLocalStreamRef.current = null
-    callRemoteStreamRef.current = null
-    callTargetRef.current = ''
+    cleanStreamRef.current = null
+    alteredStreamRef.current = null
+    peerConnectionsRef.current.clear()
+    remoteStreamsRef.current.clear()
     if (callLocalVideoRef.current) callLocalVideoRef.current.srcObject = null
-    if (callRemoteVideoRef.current) callRemoteVideoRef.current.srcObject = null
+    setRemoteTiles([])
     setCallPeers([])
+    setLatency(emptyLatency)
     setCallState('idle')
-    addLog('Left the live call.', 'info')
+    addLog('Left the room.', 'info')
   }
-
-  const loadDuckSoupScript = useCallback(async () => {
-    if (window.DuckSoup) {
-      setDuckSoupReady(true)
-      return
-    }
-
-    const existing = document.querySelector<HTMLScriptElement>('script[data-ducksoup-client]')
-    if (existing) existing.remove()
-
-    await new Promise<void>((resolve, reject) => {
-      const script = document.createElement('script')
-      script.dataset.ducksoupClient = 'true'
-      script.src = buildDuckSoupScriptUrl(form.duckSoupUrl)
-      script.async = true
-      script.onload = () => resolve()
-      script.onerror = () => reject(new Error(`Could not load ${script.src}`))
-      document.head.appendChild(script)
-    })
-
-    if (!window.DuckSoup) {
-      throw new Error('DuckSoup script loaded, but window.DuckSoup was not registered.')
-    }
-    setDuckSoupReady(true)
-  }, [form.duckSoupUrl])
-
-  const checkDuckSoup = useCallback(async () => {
-    setConnectionState('checking')
-    setDuckSoupReady(false)
-    try {
-      const result = await window.researchApi.checkDuckSoup(form.duckSoupUrl)
-      if (!result.ok) {
-        setConnectionState('error')
-        addLog(result.detail, 'error')
-        return
-      }
-      await loadDuckSoupScript()
-      setConnectionState('ready')
-      addLog('DuckSoup server and client script are reachable.', 'success')
-    } catch (error) {
-      setConnectionState('error')
-      addLog(error instanceof Error ? error.message : 'DuckSoup check failed.', 'error')
-    }
-  }, [addLog, form.duckSoupUrl, loadDuckSoupScript])
-
-  const appendControlEvent = useCallback(
-    (control: string, value: string | number | boolean, appliedToDuckSoup: boolean, notes = '') => {
-      const event: ControlEvent = {
-        id: makeId(),
-        timestamp: new Date().toISOString(),
-        elapsedMs: recordingStartRef.current ? Date.now() - recordingStartRef.current : 0,
-        roomId: form.roomId,
-        participantId: form.participantId,
-        partnerId: form.partnerId,
-        targetUserId: form.targetUserId || form.participantId,
-        condition: form.condition,
-        control,
-        value,
-        appliedToDuckSoup,
-        notes
-      }
-      setControlEvents((prev) => [...prev, event])
-    },
-    [form]
-  )
-
-  const sendDuckSoupControl = useCallback(
-    (property: string, value: number | boolean, notes = '', effectName = 'mozza'): boolean => {
-      const normalizedValue = typeof value === 'boolean' ? (value ? 1 : 0) : value
-      const targetUser = form.targetUserId || form.participantId
-      if (playerRef.current) {
-        playerRef.current.controlFx(effectName, property, normalizedValue, undefined, targetUser)
-        appendControlEvent(`${effectName}.${property}`, value, true, notes)
-        addLog(`Applied ${effectName}.${property} = ${value} to ${targetUser || 'current user'}.`, 'info')
-        return true
-      }
-      return false
-    },
-    [addLog, appendControlEvent, form.participantId, form.targetUserId]
-  )
 
   const setControl = <K extends keyof ManipulationControls>(
     key: K,
     value: ManipulationControls[K],
-    duckSoupProperty?: string,
     notes?: string
   ): void => {
     setControls((prev) => ({ ...prev, [key]: value }))
-    appendControlEvent(String(key), value, false, notes || 'Applied to the live video-call processor.')
+    appendControlEvent(String(key), value, notes || 'Applied to participant live stream.')
     broadcastLiveControl(key, value)
-    if (duckSoupProperty) {
-      const sentToDuckSoup = sendDuckSoupControl(duckSoupProperty, value as number | boolean, notes)
-      addLog(
-        `${String(key)} = ${value} applied to the live call${sentToDuckSoup ? ' and optional DuckSoup path' : ''}.`,
-        'info'
-      )
-    }
+    addLog(`${String(key)} = ${value} sent to the room.`, 'info')
   }
 
   const applyAudioPreset = (preset: (typeof audioPresets)[number]): void => {
@@ -962,134 +897,43 @@ export default function App(): ReactElement {
       audioPitch: nextPitch,
       audioGain: nextGain
     }))
-
-    appendControlEvent('audioPreset', preset.label, false, 'Applied to outgoing live-call microphone audio. ' + preset.note)
+    appendControlEvent('audioPreset', preset.label, preset.note)
     broadcastLiveControl('audioPreset', preset.preset)
     broadcastLiveControl('audioPitch', nextPitch)
     broadcastLiveControl('audioGain', nextGain)
-    if (preset.effectName && playerRef.current) {
-      sendDuckSoupControl(preset.property, preset.value, preset.note, preset.effectName)
-    }
-    addLog(`${preset.label} applied to outgoing live-call audio.`, 'info')
+    addLog(`${preset.label} sent to participant streams.`, 'info')
   }
 
-  const connect = useCallback(async () => {
+  const sendChat = async (): Promise<void> => {
+    const text = chatText.trim()
+    if (!text || !form.roomId || !form.callSignalUrl) return
+
+    const message: ChatMessage = {
+      id: makeId(),
+      roomId: form.roomId,
+      from: callUserIdRef.current,
+      fromName: callDisplayName(),
+      fromRole: form.role,
+      text,
+      sentAt: new Date().toISOString()
+    }
+
+    if (chatTarget === 'controllers') message.targetRole = 'controller'
+    else if (chatTarget === 'participants') message.targetRole = 'participant'
+    else if (chatTarget !== 'room') message.to = chatTarget
+
+    setChatText('')
+
     try {
-      const stationId = form.participantId.trim()
-      const partnerId = form.partnerId.trim()
-      if (!stationId) {
-        setConnectionState('error')
-        addLog('Enter a unique This station ID before connecting, for example P001 or P002.', 'error')
-        return
-      }
-      if (partnerId && stationId === partnerId) {
-        setConnectionState('error')
-        addLog('This station ID and Partner ID must be different. DuckSoup rejects duplicate users in the same room.', 'error')
-        return
-      }
-
-      setConnectionState('connecting')
-      setLatency(emptyLatency)
-      await loadDuckSoupScript()
-
-      const cleanStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-        audio: true
+      const response = await fetch(`${signalBaseUrl()}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(message)
       })
-      cleanStreamRef.current = cleanStream
-      if (localDiagnosticVideoRef.current) {
-        localDiagnosticVideoRef.current.srcObject = cleanStream
-        await localDiagnosticVideoRef.current.play().catch(() => undefined)
-      }
-
-      const remoteStream = new MediaStream()
-      alteredStreamRef.current = remoteStream
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = remoteStream
-      }
-
-      const player = await window.DuckSoup!.render(
-        {
-          stats: true,
-          callback: (message) => {
-            if (message.kind === 'track') {
-              const event = message.payload as RTCTrackEvent
-              remoteStream.addTrack(event.track)
-              addLog(`Remote ${event.track.kind} track received.`, 'success')
-              remoteVideoRef.current?.play().catch(() => undefined)
-            } else if (message.kind === 'start') {
-              setConnectionState('connected')
-              addLog('DuckSoup room started.', 'success')
-            } else if (message.kind === 'joined') {
-              addLog('Joined DuckSoup room.', 'success')
-            } else if (message.kind === 'other_joined') {
-              addLog('Partner station joined the DuckSoup room.', 'success')
-            } else if (message.kind === 'other_left') {
-              addLog('Partner station left the DuckSoup room.', 'warn')
-            } else if (message.kind === 'closed' || message.kind === 'end') {
-              setConnectionState('ready')
-              addLog('DuckSoup connection closed. If this happened after about 15 seconds, the other laptop did not join the same room as a different station.', 'warn')
-            } else if (message.kind.startsWith('error')) {
-              setConnectionState('error')
-              const detail = String(message.payload ?? message.kind)
-              if (detail.toLowerCase().includes('duplicate') || message.kind.toLowerCase().includes('duplicate')) {
-                addLog('DuckSoup rejected the join as a duplicate user. Use different station IDs on the two laptops, such as P001 and P002.', 'error')
-              } else if (detail.toLowerCase().includes('aborted')) {
-                addLog('DuckSoup aborted the room because both laptops were not connected together in time. Use the same Room ID and different station IDs, then press Connect on both laptops within about 10 seconds.', 'error')
-              } else {
-                addLog(`${message.kind}: ${detail}`, 'error')
-              }
-            } else if (message.kind === 'stats') {
-              const nextLatency = latencyFromStats(message.payload)
-              if (nextLatency) setLatency(nextLatency)
-            }
-          }
-        },
-        {
-          signalingUrl: buildSignalingUrl(form.duckSoupUrl),
-          interactionName: form.roomId,
-          userId: stationId,
-          duration: 3600,
-          size: 2,
-          width: 1280,
-          height: 720,
-          framerate: 30,
-          videoFormat: 'H264',
-          recordingMode: 'forced',
-          namespace: 'uw_conference_lab',
-          gpu: false,
-          audioFx: selectedAudioFx(controls),
-          videoFx: `mozza alpha=${controls.smileAlpha} face-thresh=${controls.faceThreshold} beta=${controls.landmarkBeta} fc=${controls.smoothingCutoff} overlay=${controls.overlay ? 'true' : 'false'}`
-        }
-      )
-
-      playerRef.current = player
-      appendControlEvent('connect', form.roomId, true, 'DuckSoup WebRTC room joined.')
+      if (!response.ok) throw new Error(`Chat failed with HTTP ${response.status}`)
     } catch (error) {
-      setConnectionState('error')
-      addLog(error instanceof Error ? error.message : 'Connection failed.', 'error')
-    }
-  }, [addLog, appendControlEvent, controls, form, loadDuckSoupScript])
-
-  const disconnect = (): void => {
-    playerRef.current?.stop()
-    playerRef.current = null
-    cleanStreamRef.current?.getTracks().forEach((track) => track.stop())
-    alteredStreamRef.current?.getTracks().forEach((track) => track.stop())
-    cleanStreamRef.current = null
-    alteredStreamRef.current = null
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
-    if (localDiagnosticVideoRef.current) localDiagnosticVideoRef.current.srcObject = null
-    setLatency(emptyLatency)
-    setConnectionState(duckSoupReady ? 'ready' : 'idle')
-    addLog('Disconnected and released local media tracks.', 'info')
-  }
-
-  const pickFolder = async (): Promise<void> => {
-    const folder = await window.researchApi.selectOutputFolder()
-    if (folder) {
-      updateForm('outputFolder', folder)
-      addLog(`Output folder selected: ${folder}`, 'success')
+      addLog(error instanceof Error ? error.message : 'Could not send chat message.', 'error')
+      addChatMessage({ ...message, text: `[not sent] ${message.text}` })
     }
   }
 
@@ -1097,7 +941,7 @@ export default function App(): ReactElement {
     const cleanStream = cleanStreamRef.current
     const alteredStream = alteredStreamRef.current
     if (!cleanStream || !alteredStream || alteredStream.getTracks().length === 0) {
-      addLog('Need both clean local media and altered remote media before recording.', 'error')
+      addLog('Join as a participant before recording. The app records that station clean and altered streams.', 'error')
       return
     }
     if (!form.outputFolder) {
@@ -1124,10 +968,10 @@ export default function App(): ReactElement {
     recordingStartRef.current = Date.now()
     setRecordingSeconds(0)
     setRecordingState('recording')
-    appendControlEvent('recording', 'start', true, `Session directory: ${createdDir}`)
+    appendControlEvent('recording', 'start', `Session directory: ${createdDir}`)
     cleanRecorderRef.current.start(1000)
     alteredRecorderRef.current.start(1000)
-    addLog('Recording clean and altered streams.', 'success')
+    addLog('Recording clean and altered local streams.', 'success')
   }
 
   const saveRecordings = async (): Promise<void> => {
@@ -1156,8 +1000,8 @@ export default function App(): ReactElement {
       files: { cleanVideo: cleanPath, alteredVideo: alteredPath },
       notes: [
         'cleanVideo is the local unaltered webcam/microphone stream.',
-        'alteredVideo is the returned DuckSoup/Mozza stream seen by the station.',
-        'manipulation_events.csv contains live control changes with timestamps relative to recording start.'
+        'alteredVideo is the outgoing participant stream after live controller settings.',
+        'manipulation_events.csv contains live setting changes with timestamps relative to recording start.'
       ]
     }
 
@@ -1183,7 +1027,7 @@ export default function App(): ReactElement {
             condition: form.condition,
             control: 'recording',
             value: 'stop',
-            appliedToDuckSoup: true,
+            appliedToDuckSoup: false,
             notes: 'Recording stopped and files saved.'
           }
         ])
@@ -1206,169 +1050,193 @@ export default function App(): ReactElement {
     }, 250)
   }
 
+  const continueFromSetup = (): void => {
+    if (!form.roomId.trim()) {
+      addLog('Create or enter a meeting ID before continuing.', 'error')
+      return
+    }
+    if (!form.callSignalUrl.trim()) {
+      addLog('Enter the call server URL before continuing.', 'error')
+      return
+    }
+    setSetupComplete(true)
+  }
+
+  if (!setupComplete) {
+    return (
+      <div className="setup-shell">
+        <section className="setup-card">
+          <div className="setup-header">
+            <div>
+              <h1>DuckSoup Conference Lab</h1>
+              <p>Set up the study room before anyone joins the live call.</p>
+            </div>
+            <div className="setup-pill">{sessionLabels[form.sessionFormat]}</div>
+          </div>
+
+          <div className="setup-grid">
+            <section className="panel">
+              <div className="section-title accent">1. Choose Role</div>
+              <div className="role-switch">
+                <button
+                  className={form.role === 'participant' ? 'role-button active' : 'role-button'}
+                  onClick={() => updateForm('role', 'participant')}
+                >
+                  Participant
+                </button>
+                <button
+                  className={form.role === 'controller' ? 'role-button active' : 'role-button'}
+                  onClick={() => updateForm('role', 'controller')}
+                >
+                  Controller
+                </button>
+              </div>
+              <p className="plain-text">
+                Participants only see the call, chat, recording, and self-view controls. Controllers see the study controls and can change live face and voice settings.
+              </p>
+            </section>
+
+            <section className="panel">
+              <div className="section-title accent">2. Study Format</div>
+              <div className="format-switch">
+                {(['dyad', 'triad', 'quad'] as SessionFormat[]).map((format) => (
+                  <button
+                    key={format}
+                    className={form.sessionFormat === format ? 'role-button active' : 'role-button'}
+                    onClick={() => updateForm('sessionFormat', format)}
+                  >
+                    {sessionLabels[format]}
+                  </button>
+                ))}
+              </div>
+              <p className="plain-text">
+                Dyad expects 2 participants, triad expects 3, and quad expects 4. The controller can join without a camera.
+              </p>
+            </section>
+
+            <section className="panel">
+              <div className="section-title accent">3. Meeting</div>
+              <label>
+                Meeting ID
+                <div className="input-action-row">
+                  <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
+                  <button onClick={generateNewRoom}>New</button>
+                </div>
+              </label>
+              <label>
+                Call server URL
+                <input
+                  value={form.callSignalUrl}
+                  onChange={(event) => updateForm('callSignalUrl', event.target.value)}
+                  placeholder="Mac: http://localhost:8765, Windows: http://Mac-IP:8765"
+                />
+              </label>
+              {isController && (
+                <div className="button-row">
+                  <button onClick={startSignalServer}>Start server here</button>
+                  <button onClick={checkSignalServer}>Check</button>
+                </div>
+              )}
+              {signalServer.active && (
+                <div className="host-summary">
+                  <span>This computer is hosting the room</span>
+                  <strong>{signalServer.lanUrl}</strong>
+                </div>
+              )}
+            </section>
+
+            <section className="panel">
+              <div className="section-title accent">4. Session Details</div>
+              <div className="field-grid two">
+                <label>
+                  Display name
+                  <input value={form.displayName} onChange={(event) => updateForm('displayName', event.target.value)} />
+                </label>
+                <label>
+                  Study
+                  <input value={form.studyId} onChange={(event) => updateForm('studyId', event.target.value)} />
+                </label>
+                <label>
+                  RA
+                  <input value={form.raId} onChange={(event) => updateForm('raId', event.target.value)} />
+                </label>
+                <label>
+                  Dyad/session ID
+                  <input value={form.dyadId} onChange={(event) => updateForm('dyadId', event.target.value)} />
+                </label>
+                <label>
+                  This station ID
+                  <input value={form.participantId} onChange={(event) => updateForm('participantId', event.target.value)} />
+                </label>
+                <label>
+                  Partner/group ID
+                  <input value={form.partnerId} onChange={(event) => updateForm('partnerId', event.target.value)} />
+                </label>
+              </div>
+              <div className="folder-row">
+                <input value={form.outputFolder} readOnly placeholder="Choose output folder for recordings" />
+                <button className="browse-button" onClick={pickFolder}>
+                  Browse
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <div className="setup-actions">
+            <button className="primary setup-continue" onClick={continueFromSetup}>
+              Continue to room
+            </button>
+          </div>
+        </section>
+      </div>
+    )
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
         <div>
           <h1>DuckSoup Conference Lab</h1>
+          <div className="inline-status">
+            <span className={`status-dot status-${callState === 'connected' ? 'connected' : callState === 'error' ? 'error' : callState === 'idle' ? 'idle' : 'connecting'}`} />
+            {sessionLabels[form.sessionFormat]} room · {isController ? 'Controller' : 'Participant'} · {callState}
+          </div>
+        </div>
+        <div className="topbar-actions">
+          <button onClick={() => setSetupComplete(false)}>Session setup</button>
+          {callState === 'idle' || callState === 'error' ? (
+            <button className="primary" onClick={joinLiveCall}>
+              Join room
+            </button>
+          ) : (
+            <button className="danger" onClick={leaveLiveCall}>
+              Leave room
+            </button>
+          )}
         </div>
       </header>
 
-      <main className="workspace">
+      <main className={isController ? 'workspace controller-workspace' : 'workspace participant-workspace'}>
         <aside className="sidebar">
-          <section className="panel live-setup-panel">
-            <div className="section-title accent">Live Call Setup</div>
-            <label>
-              Server URL
-              <input
-                value={form.callSignalUrl}
-                onChange={(event) => updateForm('callSignalUrl', event.target.value)}
-                placeholder="Mac: http://localhost:8765 · Windows: http://Mac-IP:8765"
-              />
-            </label>
-            <label>
-              Display name
-              <input
-                value={form.displayName}
-                onChange={(event) => updateForm('displayName', event.target.value)}
-                placeholder="Your name"
-              />
-            </label>
-            <label>
-              Room ID
-              <div className="input-action-row">
-                <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
-                <button onClick={generateNewRoom}>New</button>
-              </div>
-            </label>
-            <div className="button-row">
-              <button onClick={startSignalServer}>Start server here</button>
-              <button onClick={checkSignalServer}>Check</button>
-            </div>
-            <div className="button-row">
-              {callState === 'idle' || callState === 'error' ? (
-                <button className="primary wide-button" onClick={joinLiveCall}>
-                  Join live call
-                </button>
-              ) : (
-                <button className="danger wide-button" onClick={leaveLiveCall}>
-                  Leave live call
-                </button>
-              )}
-            </div>
-            <div className="inline-status">
-              <span
-                className={`status-dot status-${
-                  callState === 'connected'
-                    ? 'connected'
-                    : callState === 'error'
-                      ? 'error'
-                      : callState === 'idle'
-                        ? 'idle'
-                        : 'connecting'
-                }`}
-              />
-              Live call: {callState}
-            </div>
-            {signalServer.active && (
-              <div className="host-summary">
-                <span>This computer is hosting the call server</span>
-                <strong>Other computer uses {signalServer.lanUrl}</strong>
-              </div>
-            )}
-            <div className="connection-tip">
-              For this test, only this box matters. Mac starts the server here. Windows types the Mac URL, uses the same Room ID, enters a display name, then joins.
-            </div>
-          </section>
-
           <section className="panel">
-            <div className="section-title">Optional DuckSoup / Mozza</div>
-            <p className="plain-text">
-              Skip this for the basic two-computer video test. This is only for the older Mozza altered-stream path.
-            </p>
-            <label>
-              DuckSoup server
-              <input value={form.duckSoupUrl} onChange={(event) => updateForm('duckSoupUrl', event.target.value)} />
-            </label>
-            <div className="button-row">
-              <button onClick={checkDuckSoup}>Check</button>
-              {connectionState === 'connected' ? (
-                <button className="danger" onClick={disconnect}>
-                  Disconnect
-                </button>
-              ) : (
-                <button className="primary" onClick={connect} disabled={!duckSoupReady && connectionState !== 'ready'}>
-                  Connect
-                </button>
-              )}
-            </div>
-            <div className="inline-status">
-              <span className={`status-dot status-${connectionState}`} />
-              DuckSoup: {statusLabel}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="section-title">Session Details</div>
-            <div className="field-grid two">
-              <label>
-                Study
-                <input value={form.studyId} onChange={(event) => updateForm('studyId', event.target.value)} />
-              </label>
-              <label>
-                RA
-                <input value={form.raId} onChange={(event) => updateForm('raId', event.target.value)} />
-              </label>
-              <label>
-                Dyad ID
-                <input value={form.dyadId} onChange={(event) => updateForm('dyadId', event.target.value)} />
-              </label>
-              <label>
-                This station ID
-                <input value={form.participantId} onChange={(event) => updateForm('participantId', event.target.value)} />
-              </label>
-              <label>
-                Partner ID
-                <input value={form.partnerId} onChange={(event) => updateForm('partnerId', event.target.value)} />
-              </label>
-              <label>
-                Target user
-                <input
-                  value={form.targetUserId}
-                  placeholder="default: this station"
-                  onChange={(event) => updateForm('targetUserId', event.target.value)}
-                />
-              </label>
-            </div>
-            <div className="folder-row">
-              <input value={form.outputFolder} readOnly placeholder="Choose output folder" />
-              <button className="browse-button" onClick={pickFolder} title="Select output folder">
-                Browse
-              </button>
-            </div>
-          </section>
-        </aside>
-
-        <section className="center-stage">
-          <section className="panel call-panel">
-            <div className="section-title accent">Live Video Conference</div>
-            <div className="call-summary-grid">
+            <div className="section-title accent">Room</div>
+            <div className="metric-list">
+              <div className="metric">
+                <span>Meeting ID</span>
+                <strong>{form.roomId}</strong>
+              </div>
               <div className="metric">
                 <span>Server</span>
                 <strong>{form.callSignalUrl}</strong>
               </div>
               <div className="metric">
-                <span>Room</span>
-                <strong>{form.roomId}</strong>
-              </div>
-              <div className="metric">
-                <span>You</span>
-                <strong>{callDisplayName()}</strong>
+                <span>Expected participants</span>
+                <strong>{participantPeers.length}/{expectedParticipants}</strong>
               </div>
             </div>
-            <div className="inline-status">
-              <span className={`status-dot status-${callState === 'connected' ? 'connected' : callState === 'error' ? 'error' : callState === 'idle' ? 'idle' : 'connecting'}`} />
-              Live call: {callState}
+            <div className="button-row">
+              <button onClick={checkSignalServer}>Check server</button>
+              {isController && <button onClick={startSignalServer}>Start server</button>}
             </div>
             <div className="participant-strip">
               {callPeers.length === 0 ? (
@@ -1381,83 +1249,100 @@ export default function App(): ReactElement {
                 ))
               )}
             </div>
-            <div className="video-grid call-video-grid">
-              <div className="video-panel">
-                <div className="video-label">Local camera · {callDisplayName()}</div>
-                <video ref={callLocalVideoRef} autoPlay muted playsInline className="video-surface" />
-                {callState === 'idle' && <div className="video-empty">Join the call to start your camera.</div>}
+          </section>
+
+          <section className="panel">
+            <div className="section-title">Recording</div>
+            <div className="button-row no-margin">
+              <button onClick={startRecording} disabled={recordingState !== 'idle' || isController} className="record">
+                Start recording
+              </button>
+              <button onClick={stopRecording} disabled={recordingState !== 'recording'} className="stop">
+                Stop
+              </button>
+            </div>
+            <div className="metric-list">
+              <div className="metric">
+                <span>Recording</span>
+                <strong>{recordingState === 'recording' ? `${recordingSeconds}s` : recordingState}</strong>
               </div>
-              <div className="video-panel">
-                <div className="video-label">Remote participant</div>
-                <video ref={callRemoteVideoRef} autoPlay playsInline className="video-surface" />
-                {callState !== 'connected' && <div className="video-empty">Waiting for another participant in the same room.</div>}
+              <div className="metric">
+                <span>Events logged</span>
+                <strong>{controlEvents.length}</strong>
+              </div>
+              <div className="metric">
+                <span>Folder</span>
+                <strong>{sessionDir || 'created when recording starts'}</strong>
+              </div>
+            </div>
+            <p className="plain-text compact-copy">
+              Recordings stay as .webm. Each participant station saves its own clean video, altered video, session file, and control timing CSV.
+            </p>
+          </section>
+
+          <section className="panel">
+            <div className="section-title">Session Details</div>
+            <div className="metric-list">
+              <div className="metric">
+                <span>Study</span>
+                <strong>{form.studyId}</strong>
+              </div>
+              <div className="metric">
+                <span>RA</span>
+                <strong>{form.raId || 'not set'}</strong>
+              </div>
+              <div className="metric">
+                <span>Station</span>
+                <strong>{form.participantId}</strong>
               </div>
             </div>
           </section>
+        </aside>
 
-          <div className="video-grid">
-            <div className="video-panel">
-              <div className="video-label">Partner view · altered stream participant sees</div>
-              <video ref={remoteVideoRef} autoPlay playsInline className="video-surface" />
-              {connectionState !== 'connected' && <div className="video-empty">Connect to a DuckSoup room to receive the partner stream.</div>}
-            </div>
-            <div className="video-panel diagnostic-panel">
-              <div className="video-label">Diagnostics · local clean capture</div>
-              <video
-                ref={localDiagnosticVideoRef}
-                autoPlay
-                muted
-                playsInline
-                className={showDiagnostics ? 'video-surface' : 'video-surface hidden-preview'}
-              />
-              {!showDiagnostics && <div className="video-empty">Self-view hidden for participant-facing sessions.</div>}
-              <button className="overlay-button" onClick={() => setShowDiagnostics((prev) => !prev)}>
-                {showDiagnostics ? 'Hide self check' : 'Show self check'}
-              </button>
-            </div>
-          </div>
+        <section className="center-stage">
+          <section className="panel call-panel">
+            <div className="section-title accent">Live Video Conference</div>
+            <div className={`conference-grid tiles-${Math.min(remoteTiles.length + (isController ? 0 : 1), 4)}`}>
+              {!isController && (
+                <div className="video-panel">
+                  <div className="video-label">Self view · {callDisplayName()}</div>
+                  <video
+                    ref={callLocalVideoRef}
+                    autoPlay
+                    muted
+                    playsInline
+                    className={showSelfView ? 'video-surface' : 'video-surface hidden-preview'}
+                  />
+                  {!showSelfView && <div className="video-empty">Self view is hidden. Camera and mic are still on.</div>}
+                  {callState === 'idle' && <div className="video-empty">Join the room to start your camera.</div>}
+                  <button className="overlay-button" onClick={() => setShowSelfView((prev) => !prev)}>
+                    {showSelfView ? 'Hide self view' : 'Show self view'}
+                  </button>
+                </div>
+              )}
 
-          <div className="operations-row">
-            <button onClick={startRecording} disabled={recordingState !== 'idle' || connectionState !== 'connected'} className="record">
-              Start recording
-            </button>
-            <button onClick={stopRecording} disabled={recordingState !== 'recording'} className="stop">
-              Stop
-            </button>
-            <div className="metric">
-              <span>Recording</span>
-              <strong>{recordingState === 'recording' ? `${recordingSeconds}s` : recordingState}</strong>
-            </div>
-            <div className="metric">
-              <span>Events logged</span>
-              <strong>{controlEvents.length}</strong>
-            </div>
-            <div className="metric">
-              <span>RTT</span>
-              <strong>{latency.rttMs === null ? 'waiting' : `${latency.rttMs} ms`}</strong>
-            </div>
-            <div className="metric">
-              <span>Jitter</span>
-              <strong>{latency.jitterMs === null ? 'waiting' : `${latency.jitterMs} ms`}</strong>
-            </div>
-            <div className="metric wide">
-              <span>Session folder</span>
-              <strong>{sessionDir || 'created on recording start'}</strong>
-            </div>
-          </div>
+              {remoteTiles.map((tile) => (
+                <RemoteVideoCard key={tile.userId} tile={tile} volume={controls.partnerVolume} />
+              ))}
 
-          <section className="panel">
-            <div className="section-title">Saved Files</div>
-            <p className="plain-text">
-              Each session saves two videos: the normal webcam video and the DuckSoup/Mozza altered video. It also saves small data files with the session details and the timing of any setting changes, so PPS can use the chosen video later.
-            </p>
+              {remoteTiles.length === 0 && (
+                <div className="video-panel">
+                  <div className="video-label">Waiting room</div>
+                  <div className="video-empty">
+                    {isController
+                      ? 'Join as controller, then participants will appear here as they enter the same meeting ID.'
+                      : 'Waiting for another participant or controller in this meeting ID.'}
+                  </div>
+                </div>
+              )}
+            </div>
           </section>
 
           <section className="panel log-panel">
             <div className="section-title">Event Log</div>
             <div className="log-list">
               {logs.length === 0 ? (
-                <p className="muted">No events yet. Start by checking DuckSoup.</p>
+                <p className="muted">No events yet. Join the room or check the server to start.</p>
               ) : (
                 logs.map((log) => (
                   <div key={log.id} className={`log-line ${log.level}`}>
@@ -1471,158 +1356,278 @@ export default function App(): ReactElement {
         </section>
 
         <aside className="controls">
-          <section className="panel">
-            <div className="section-title accent">Face Modulation</div>
-            <RangeControl
-              label="Smile alpha"
-              description="Controls the live smile/frown deformation sent to the other participant. 1.00 is neutral, higher pulls the lower face toward a smile, lower pushes toward a frown."
-              value={controls.smileAlpha}
-              min={-2}
-              max={5}
-              step={0.1}
-              markers={['Frown', 'Neutral', 'Smile']}
-              onChange={(value) => setControl('smileAlpha', value, 'alpha')}
-            />
-            <RangeControl
-              label="Detection threshold"
-              description="How strict the face effect should be before applying. Lower is more forgiving in poor lighting; higher is stricter and can reduce accidental warping."
-              value={controls.faceThreshold}
-              min={0}
-              max={1}
-              step={0.05}
-              markers={['Sensitive', 'Default', 'Strict']}
-              onChange={(value) => setControl('faceThreshold', value, 'face-thresh')}
-            />
-            <RangeControl
-              label="Landmark beta"
-              description="How quickly the facial warp follows movement. Lower feels steadier; higher reacts faster but can look more jumpy."
-              value={controls.landmarkBeta}
-              min={0}
-              max={1}
-              step={0.05}
-              markers={['Stable', 'Default', 'Fast motion']}
-              onChange={(value) => setControl('landmarkBeta', value, 'beta')}
-            />
-            <RangeControl
-              label="Smoothing cutoff"
-              description="How much temporal smoothing is applied to the face effect. Lower is smoother/slower; higher is more immediate."
-              value={controls.smoothingCutoff}
-              min={0}
-              max={20}
-              step={0.5}
-              markers={['Smooth', 'Default', 'Responsive']}
-              onChange={(value) => setControl('smoothingCutoff', value, 'fc')}
-            />
-            <label className="toggle-row">
-              <span>Debug overlay</span>
-              <input
-                type="checkbox"
-                checked={controls.overlay}
-                onChange={(event) => setControl('overlay', event.target.checked, 'overlay')}
-              />
-            </label>
-          </section>
+          {isController ? (
+            <>
+              <section className="panel">
+                <div className="section-title accent">Face Modulation</div>
+                <RangeControl
+                  label="Smile alpha"
+                  description="Controls the live smile/frown deformation sent to participant machines. 1.00 is neutral, higher moves toward a smile, lower moves toward a frown."
+                  value={controls.smileAlpha}
+                  min={-2}
+                  max={5}
+                  step={0.1}
+                  markers={['Frown', 'Neutral', 'Smile']}
+                  onChange={(value) => setControl('smileAlpha', value)}
+                />
+                <RangeControl
+                  label="Detection threshold"
+                  description="How strict the face effect should be before applying. Lower is more forgiving in poor lighting; higher can reduce accidental background warping."
+                  value={controls.faceThreshold}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  markers={['Sensitive', 'Default', 'Strict']}
+                  onChange={(value) => setControl('faceThreshold', value)}
+                />
+                <RangeControl
+                  label="Landmark beta"
+                  description="How quickly the face warp follows movement. Lower is steadier; higher reacts faster but can look jumpier."
+                  value={controls.landmarkBeta}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  markers={['Stable', 'Default', 'Fast']}
+                  onChange={(value) => setControl('landmarkBeta', value)}
+                />
+                <RangeControl
+                  label="Smoothing cutoff"
+                  description="How much smoothing is applied over time. Lower is smoother/slower; higher is more immediate."
+                  value={controls.smoothingCutoff}
+                  min={0}
+                  max={20}
+                  step={0.5}
+                  markers={['Smooth', 'Default', 'Responsive']}
+                  onChange={(value) => setControl('smoothingCutoff', value)}
+                />
+                <label className="toggle-row">
+                  <span>Debug overlay</span>
+                  <input
+                    type="checkbox"
+                    checked={controls.overlay}
+                    onChange={(event) => setControl('overlay', event.target.checked)}
+                  />
+                </label>
+              </section>
 
-          <section className="panel">
-            <div className="section-title">Voice / Synchrony</div>
-            <div className="preset-list compact">
-              {audioPresets.map((preset) => (
-                <button
-                  key={preset.preset}
-                  className={controls.audioPreset === preset.preset ? 'preset active' : 'preset'}
-                  onClick={() => applyAudioPreset(preset)}
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-            <RangeControl
-              label="Partner playback volume"
-              description="Changes how loud the other participant sounds on this computer only. It does not change what they hear."
-              value={controls.partnerVolume}
-              min={0}
-              max={2}
-              step={0.05}
-              markers={['Muted', 'Normal', 'Boosted']}
-              onChange={(value) =>
-                setControl('partnerVolume', value, undefined, 'Local playback monitor gain for the remote participant.')
-              }
-            />
-            <RangeControl
-              label="Outgoing voice tone"
-              description="Applies a live tone filter to your outgoing microphone. Lower sounds warmer/deeper, higher sounds brighter. This is a browser-side approximation, not the full GStreamer pitch plugin."
-              value={controls.audioPitch}
-              min={0.6}
-              max={1.4}
-              step={0.02}
-              markers={['Deeper', 'Neutral', 'Brighter']}
-              onChange={(value) => {
-                setControls((prev) => ({ ...prev, audioPreset: 'custom-pitch', audioPitch: value }))
-                appendControlEvent('audioTone', value, false, 'Applied to outgoing live-call microphone audio.')
-                broadcastLiveControl('audioPreset', 'custom-pitch')
-                broadcastLiveControl('audioPitch', value)
-                if (playerRef.current) sendDuckSoupControl('pitch', value, 'Custom optional DuckSoup pitch audioFx control.', 'pitch')
-                addLog(`Outgoing voice tone = ${value.toFixed(2)} applied to the live call.`, 'info')
-              }}
-            />
-            <RangeControl
-              label="Outgoing voice gain"
-              description="Changes how loud your microphone is for the other participant. This is the control to use for louder/quieter voice."
-              value={controls.audioGain}
-              min={0}
-              max={2}
-              step={0.05}
-              markers={['Muted', 'Neutral', 'Boosted']}
-              onChange={(value) => {
-                setControls((prev) => ({ ...prev, audioPreset: 'custom-volume', audioGain: value }))
-                appendControlEvent('audioGain', value, false, 'Applied to outgoing live-call microphone audio.')
-                broadcastLiveControl('audioPreset', 'custom-volume')
-                broadcastLiveControl('audioGain', value)
-                if (playerRef.current) sendDuckSoupControl('volume', value, 'Custom optional DuckSoup volume audioFx control.', 'volume')
-                addLog(`Outgoing voice gain = ${value.toFixed(2)} applied to the live call.`, 'info')
-              }}
-            />
-            <RangeControl
-              label="Voice delay (ms)"
-              description="Adds delay to your outgoing microphone audio before the other participant hears it. Use this to test voice synchrony/asynchrony."
-              value={controls.synchronyDelayMs}
-              min={0}
-              max={1200}
-              step={50}
-              markers={['Live', 'Lagged', 'Very delayed']}
-              onChange={(value) =>
-                setControl('synchronyDelayMs', value, undefined, 'Applied as a live outgoing microphone delay.')
-              }
-            />
-            <div className="constraint-note">
-              These controls now affect the working live call. The optional DuckSoup/Mozza path below can still receive the same values if it is connected.
-            </div>
-          </section>
+              <section className="panel">
+                <div className="section-title">Voice / Synchrony</div>
+                <div className="preset-list compact">
+                  {audioPresets.map((preset) => (
+                    <button
+                      key={preset.preset}
+                      className={controls.audioPreset === preset.preset ? 'preset active' : 'preset'}
+                      onClick={() => applyAudioPreset(preset)}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+                <RangeControl
+                  label="Partner playback volume"
+                  description="Changes how loud the other people sound on this computer only. It does not change what they hear."
+                  value={controls.partnerVolume}
+                  min={0}
+                  max={2}
+                  step={0.05}
+                  markers={['Muted', 'Normal', 'Boosted']}
+                  onChange={(value) => setControl('partnerVolume', value, 'Local playback volume only.')}
+                />
+                <RangeControl
+                  label="Outgoing voice tone"
+                  description="Changes participant outgoing microphone tone. Lower sounds warmer/deeper, higher sounds brighter."
+                  value={controls.audioPitch}
+                  min={0.6}
+                  max={1.4}
+                  step={0.02}
+                  markers={['Deeper', 'Neutral', 'Brighter']}
+                  onChange={(value) => {
+                    setControls((prev) => ({ ...prev, audioPreset: 'custom-pitch', audioPitch: value }))
+                    appendControlEvent('audioTone', value, 'Applied to outgoing participant microphone audio.')
+                    broadcastLiveControl('audioPreset', 'custom-pitch')
+                    broadcastLiveControl('audioPitch', value)
+                    addLog(`Outgoing voice tone = ${value.toFixed(2)} sent to participants.`, 'info')
+                  }}
+                />
+                <RangeControl
+                  label="Outgoing voice gain"
+                  description="Changes how loud participant microphones are for others. This is the louder/quieter voice control."
+                  value={controls.audioGain}
+                  min={0}
+                  max={2}
+                  step={0.05}
+                  markers={['Muted', 'Neutral', 'Boosted']}
+                  onChange={(value) => {
+                    setControls((prev) => ({ ...prev, audioPreset: 'custom-volume', audioGain: value }))
+                    appendControlEvent('audioGain', value, 'Applied to outgoing participant microphone audio.')
+                    broadcastLiveControl('audioPreset', 'custom-volume')
+                    broadcastLiveControl('audioGain', value)
+                    addLog(`Outgoing voice gain = ${value.toFixed(2)} sent to participants.`, 'info')
+                  }}
+                />
+                <RangeControl
+                  label="Voice delay (ms)"
+                  description="Adds delay to participant outgoing microphone audio before others hear it."
+                  value={controls.synchronyDelayMs}
+                  min={0}
+                  max={1200}
+                  step={50}
+                  markers={['Live', 'Lagged', 'Delayed']}
+                  onChange={(value) => setControl('synchronyDelayMs', value, 'Applied as a live outgoing microphone delay.')}
+                />
+              </section>
+            </>
+          ) : (
+            <section className="panel">
+              <div className="section-title accent">Participant View</div>
+              <p className="plain-text">
+                The controller manages face and voice settings. Keep this window open, use chat for issues, and record only when the study protocol tells you to.
+              </p>
+              <button className="wide-button" onClick={() => setShowSelfView((prev) => !prev)}>
+                {showSelfView ? 'Hide self view' : 'Show self view'}
+              </button>
+            </section>
+          )}
+
+          <ChatPanel
+            messages={chatMessages}
+            text={chatText}
+            target={chatTarget}
+            peers={callPeers}
+            isController={isController}
+            selfId={callUserIdRef.current}
+            onTextChange={setChatText}
+            onTargetChange={setChatTarget}
+            onSend={() => {
+              sendChat().catch((error) =>
+                addLog(error instanceof Error ? error.message : 'Could not send chat message.', 'error')
+              )
+            }}
+          />
 
           <section className="panel">
             <div className="section-title">Latency Viewer</div>
             <div className="analysis-list">
-              <div><strong>Round trip</strong><span>{latency.rttMs === null ? 'waiting' : `${latency.rttMs} ms`}</span></div>
-              <div><strong>Video RTT</strong><span>{latency.videoRttMs === null ? 'waiting' : `${latency.videoRttMs} ms`}</span></div>
-              <div><strong>Audio RTT</strong><span>{latency.audioRttMs === null ? 'waiting' : `${latency.audioRttMs} ms`}</span></div>
-              <div><strong>Jitter</strong><span>{latency.jitterMs === null ? 'waiting' : `${latency.jitterMs} ms`}</span></div>
-              <div><strong>Packets lost</strong><span>{latency.packetsLost}</span></div>
-              <div><strong>Updated</strong><span>{latency.updatedAt || 'waiting'}</span></div>
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="section-title">Analysis Hooks</div>
-            <div className="analysis-list">
-              <div><strong>Emotion inference</strong><span>adapter placeholder</span></div>
-              <div><strong>Smile intensity</strong><span>Mozza alpha log</span></div>
-              <div><strong>Synchrony</strong><span>delay/timing log</span></div>
-              <div><strong>Engagement</strong><span>future gaze/head pose</span></div>
+              <div>
+                <strong>Round trip</strong>
+                <span>{latency.rttMs === null ? 'waiting' : `${latency.rttMs} ms`}</span>
+              </div>
+              <div>
+                <strong>Video RTT</strong>
+                <span>{latency.videoRttMs === null ? 'waiting' : `${latency.videoRttMs} ms`}</span>
+              </div>
+              <div>
+                <strong>Audio RTT</strong>
+                <span>{latency.audioRttMs === null ? 'waiting' : `${latency.audioRttMs} ms`}</span>
+              </div>
+              <div>
+                <strong>Jitter</strong>
+                <span>{latency.jitterMs === null ? 'waiting' : `${latency.jitterMs} ms`}</span>
+              </div>
+              <div>
+                <strong>Packets lost</strong>
+                <span>{latency.packetsLost}</span>
+              </div>
+              <div>
+                <strong>Updated</strong>
+                <span>{latency.updatedAt || 'waiting'}</span>
+              </div>
             </div>
           </section>
         </aside>
       </main>
     </div>
+  )
+}
+
+function RemoteVideoCard({ tile, volume }: { tile: RemoteTile; volume: number }): ReactElement {
+  const videoRef = useRef<HTMLVideoElement>(null)
+
+  useEffect(() => {
+    if (!videoRef.current) return
+    videoRef.current.srcObject = tile.stream
+    videoRef.current.volume = clamp(volume, 0, 2)
+    videoRef.current.play().catch(() => undefined)
+  }, [tile.stream, volume])
+
+  return (
+    <div className="video-panel">
+      <div className="video-label">
+        {tile.displayName} · {tile.role}
+      </div>
+      <video ref={videoRef} data-remote-call-video="true" autoPlay playsInline className="video-surface" />
+      {tile.stream.getTracks().length === 0 && <div className="video-empty">Connected, waiting for video/audio.</div>}
+    </div>
+  )
+}
+
+function ChatPanel({
+  messages,
+  text,
+  target,
+  peers,
+  isController,
+  selfId,
+  onTextChange,
+  onTargetChange,
+  onSend
+}: {
+  messages: ChatMessage[]
+  text: string
+  target: ChatTarget
+  peers: CallPeer[]
+  isController: boolean
+  selfId: string
+  onTextChange: (value: string) => void
+  onTargetChange: (value: ChatTarget) => void
+  onSend: () => void
+}): ReactElement {
+  const visiblePeers = peers.filter((peer) => peer.userId !== selfId)
+
+  return (
+    <section className="panel chat-panel">
+      <div className="section-title">Room Chat</div>
+      <label>
+        Send to
+        <select value={target} onChange={(event) => onTargetChange(event.target.value)}>
+          <option value="room">Everyone</option>
+          {isController ? <option value="participants">All participants</option> : <option value="controllers">Control room</option>}
+          {visiblePeers.map((peer) => (
+            <option key={peer.userId} value={peer.userId}>
+              {peer.displayName}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="chat-list">
+        {messages.length === 0 ? (
+          <p className="muted">No chat messages yet.</p>
+        ) : (
+          messages.map((message) => (
+            <div key={message.id} className={message.from === selfId ? 'chat-message self' : 'chat-message'}>
+              <div>
+                <strong>{message.fromName}</strong>
+                <span>{new Date(message.sentAt).toLocaleTimeString()}</span>
+              </div>
+              <p>{message.text}</p>
+            </div>
+          ))
+        )}
+      </div>
+      <div className="chat-compose">
+        <input
+          value={text}
+          onChange={(event) => onTextChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') onSend()
+          }}
+          placeholder="Type a message"
+        />
+        <button className="primary" onClick={onSend}>
+          Send
+        </button>
+      </div>
+    </section>
   )
 }
 

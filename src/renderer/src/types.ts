@@ -1,10 +1,13 @@
 export type ConnectionState = 'idle' | 'checking' | 'ready' | 'connecting' | 'connected' | 'error'
 export type RecordingState = 'idle' | 'recording' | 'saving'
 export type ComputerRole = 'mac-host' | 'windows'
-export type CallRole = 'participant' | 'director'
+export type CallRole = 'participant' | 'controller'
 export type CallState = 'idle' | 'starting' | 'waiting' | 'connecting' | 'connected' | 'error'
+export type SessionFormat = 'dyad' | 'triad' | 'quad'
 
 export type SessionForm = {
+  role: CallRole
+  sessionFormat: SessionFormat
   serverName: string
   studyId: string
   raId: string
@@ -18,6 +21,20 @@ export type SessionForm = {
   callSignalUrl: string
   outputFolder: string
   condition: string
+}
+
+export type ChatTarget = 'room' | 'controllers' | 'participants' | string
+
+export type ChatMessage = {
+  id: string
+  roomId: string
+  from: string
+  fromName: string
+  fromRole: CallRole
+  text: string
+  sentAt: string
+  to?: string
+  targetRole?: CallRole
 }
 
 export type ManipulationControls = {

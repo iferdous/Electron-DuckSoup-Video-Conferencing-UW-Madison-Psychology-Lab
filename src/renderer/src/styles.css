@@ -27,7 +27,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -71,7 +72,8 @@ button.record {
   border-color: #14b8a6;
 }
 
-input {
+input,
+select {
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--line);
@@ -83,6 +85,11 @@ input {
 }
 
 input:focus {
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 2px rgb(56 189 248 / 0.15);
+}
+
+select:focus {
   border-color: var(--cyan);
   box-shadow: 0 0 0 2px rgb(56 189 248 / 0.15);
 }
@@ -116,6 +123,12 @@ label {
   margin: 0;
   font-size: 20px;
   letter-spacing: 0;
+}
+
+.topbar-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
 }
 
 .inline-status {
@@ -156,6 +169,14 @@ label {
   display: grid;
   grid-template-columns: 360px minmax(520px, 1fr) 340px;
   overflow: hidden;
+}
+
+.participant-workspace {
+  grid-template-columns: 330px minmax(520px, 1fr) 340px;
+}
+
+.controller-workspace {
+  grid-template-columns: 360px minmax(560px, 1fr) 360px;
 }
 
 .sidebar,
@@ -238,6 +259,13 @@ label {
 
 .compact-switch {
   margin-top: 0;
+}
+
+.format-switch {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
 .role-button {
@@ -334,6 +362,21 @@ label {
   gap: 16px;
 }
 
+.conference-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.conference-grid.tiles-1 {
+  grid-template-columns: minmax(420px, 1fr);
+}
+
+.conference-grid.tiles-3,
+.conference-grid.tiles-4 {
+  grid-template-columns: repeat(2, minmax(300px, 1fr));
+}
+
 .call-panel {
   margin-bottom: 0;
 }
@@ -366,6 +409,12 @@ label {
 
 .call-video-grid .video-surface {
   min-height: 300px;
+}
+
+.metric-list {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
 .participant-strip {
@@ -675,6 +724,135 @@ label {
   font-size: 12px;
 }
 
+.setup-shell {
+  min-height: 100vh;
+  background: var(--bg);
+  padding: 28px;
+  overflow-y: auto;
+}
+
+.setup-card {
+  max-width: 1160px;
+  margin: 0 auto;
+  border: 1px solid var(--line);
+  background: #0d1423;
+  border-radius: 8px;
+  padding: 22px;
+}
+
+.setup-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 18px;
+  margin-bottom: 18px;
+}
+
+.setup-header h1 {
+  margin: 0 0 8px;
+  font-size: 28px;
+}
+
+.setup-header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.setup-pill {
+  border: 1px solid rgb(56 189 248 / 0.45);
+  color: #bae6fd;
+  background: rgb(14 116 144 / 0.14);
+  border-radius: 999px;
+  padding: 8px 13px;
+  font-weight: 800;
+}
+
+.setup-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.setup-actions {
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 18px;
+}
+
+.setup-continue {
+  min-width: 180px;
+}
+
+.compact-copy {
+  margin-bottom: 0;
+}
+
+.chat-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.chat-list {
+  min-height: 180px;
+  max-height: 300px;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgb(2 6 23 / 0.35);
+  padding: 10px;
+}
+
+.chat-message {
+  border: 1px solid rgb(38 50 70 / 0.8);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 9px 10px;
+}
+
+.chat-message.self {
+  border-color: rgb(16 185 129 / 0.45);
+  background: rgb(6 78 59 / 0.24);
+}
+
+.chat-message div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 5px;
+}
+
+.chat-message strong {
+  font-size: 12px;
+  color: #c7d2e5;
+}
+
+.chat-message span {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.chat-message p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.chat-compose {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
 @media (max-width: 1320px) {
   .workspace {
     grid-template-columns: 330px minmax(500px, 1fr) 320px;
@@ -690,5 +868,15 @@ label {
 
   .operations-row {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .setup-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .conference-grid,
+  .conference-grid.tiles-3,
+  .conference-grid.tiles-4 {
+    grid-template-columns: 1fr;
   }
 }

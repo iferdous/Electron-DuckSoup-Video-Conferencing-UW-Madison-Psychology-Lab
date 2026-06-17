@@ -52,7 +52,7 @@ type DiscoveredHost = {
   seenAt: number
 }
 
-type CallRole = 'participant' | 'director'
+type CallRole = 'participant' | 'controller'
 
 type SignalClient = {
   id: string
@@ -72,6 +72,18 @@ type SignalMessage = {
   payload?: unknown
   role?: CallRole
   displayName?: string
+}
+
+type ChatMessage = {
+  id?: string
+  roomId: string
+  from: string
+  fromName: string
+  fromRole: CallRole
+  text: string
+  sentAt?: string
+  to?: string
+  targetRole?: CallRole
 }
 
 const DISCOVERY_GROUP = '239.255.42.99'
@@ -301,6 +313,17 @@ const broadcastSignalEvent = (
   }
 }
 
+const broadcastSignalEventWhere = (
+  roomId: string,
+  type: string,
+  payload: unknown,
+  predicate: (client: SignalClient) => boolean
+): void => {
+  for (const client of roomClients(roomId)) {
+    if (predicate(client)) sendSignalEvent(client, type, payload)
+  }
+}
+
 const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolean; localUrl: string; lanUrl: string }> => {
   if (callSignalServer) {
     const activePort = callSignalServerPort ?? port
@@ -332,10 +355,11 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
         if (request.method === 'GET' && url.pathname === '/events') {
           const roomId = url.searchParams.get('roomId')?.trim()
           const userId = url.searchParams.get('userId')?.trim()
-          const role = (url.searchParams.get('role') as CallRole | null) ?? 'participant'
+          const requestedRole = url.searchParams.get('role')
+          const role = requestedRole === 'director' ? 'controller' : ((requestedRole as CallRole | null) ?? 'participant')
           const displayName = url.searchParams.get('displayName')?.trim() || userId || 'Participant'
 
-          if (!roomId || !userId || !['participant', 'director'].includes(role)) {
+          if (!roomId || !userId || !['participant', 'controller'].includes(role)) {
             jsonResponse(response, 400, { ok: false, error: 'Missing roomId, userId, or role.' })
             return
           }
@@ -408,6 +432,38 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
             return
           }
           broadcastSignalEvent(message.roomId, 'director-control', message)
+          jsonResponse(response, 200, { ok: true })
+          return
+        }
+
+        if (request.method === 'POST' && url.pathname === '/chat') {
+          const message = (await readJsonBody(request)) as ChatMessage
+          const text = typeof message.text === 'string' ? message.text.trim() : ''
+          if (!message.roomId || !message.from || !text) {
+            jsonResponse(response, 400, { ok: false, error: 'Missing roomId, sender, or message text.' })
+            return
+          }
+
+          const payload: ChatMessage = {
+            id: message.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            roomId: message.roomId,
+            from: message.from,
+            fromName: message.fromName || 'Unknown',
+            fromRole: message.fromRole,
+            text,
+            sentAt: message.sentAt || new Date().toISOString(),
+            to: message.to,
+            targetRole: message.targetRole
+          }
+
+          if (payload.to) {
+            broadcastSignalEventWhere(payload.roomId, 'chat-message', payload, (client) => client.userId === payload.to || client.userId === payload.from)
+          } else if (payload.targetRole) {
+            broadcastSignalEventWhere(payload.roomId, 'chat-message', payload, (client) => client.role === payload.targetRole || client.userId === payload.from)
+          } else {
+            broadcastSignalEvent(payload.roomId, 'chat-message', payload)
+          }
+
           jsonResponse(response, 200, { ok: true })
           return
         }
@@ -497,7 +553,6 @@ function createWindow(): void {
 
   if (is.dev && process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
-    mainWindow.webContents.openDevTools({ mode: 'detach' })
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
