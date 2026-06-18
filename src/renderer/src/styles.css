@@ -67,6 +67,11 @@ button.stop {
   border-color: #be3148;
 }
 
+button.leave-button {
+  min-width: 128px;
+  font-weight: 800;
+}
+
 button.record {
   background: #0f766e;
   border-color: #14b8a6;
@@ -443,6 +448,17 @@ label {
   width: 100%;
 }
 
+.room-action-stack {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.room-action-stack .wide-button {
+  min-height: 42px;
+  font-weight: 800;
+}
+
 .video-panel {
   position: relative;
   min-height: 360px;
@@ -575,6 +591,7 @@ label {
   overflow-y: auto;
   display: grid;
   gap: 7px;
+  padding-right: 4px;
 }
 
 .log-line {
@@ -582,11 +599,23 @@ label {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.4;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }
 
-.log-line span {
+.log-line .log-time {
   color: #64748b;
-  margin-right: 8px;
+  white-space: nowrap;
+}
+
+.log-line .log-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .log-line.success {
@@ -786,6 +815,40 @@ label {
 
 .setup-continue {
   min-width: 180px;
+}
+
+.room-status-card {
+  border: 1px solid rgb(56 189 248 / 0.35);
+  background: rgb(8 47 73 / 0.28);
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 12px;
+}
+
+.room-status-card div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.room-status-card span {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  font-weight: 800;
+}
+
+.room-status-card strong {
+  color: #bae6fd;
+}
+
+.room-status-card p {
+  color: #d7e3f4;
+  margin: 8px 0 0;
+  line-height: 1.45;
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .compact-copy {

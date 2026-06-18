@@ -61,6 +61,13 @@ type SignalEnvelope = {
   } & Partial<ChatMessage>
 }
 
+type RoomPresence = {
+  ok: boolean
+  roomId: string
+  peers: CallPeer[]
+  checkedAt: string
+}
+
 type LiveMediaProcessor = {
   rawStream: MediaStream
   processedStream: MediaStream
@@ -357,9 +364,12 @@ export default function App(): ReactElement {
   const controlsRef = useRef<ManipulationControls>(initialControls)
   const liveMediaProcessorRef = useRef<LiveMediaProcessor | null>(null)
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map())
+  const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map())
   const remoteStreamsRef = useRef<Map<string, RemoteTile>>(new Map())
   const cleanStreamRef = useRef<MediaStream | null>(null)
   const alteredStreamRef = useRef<MediaStream | null>(null)
+  const eventSourceErrorAtRef = useRef(0)
+  const clickAudioContextRef = useRef<AudioContext | null>(null)
   const recordingStartRef = useRef<number | null>(null)
   const cleanRecorderRef = useRef<MediaRecorder | null>(null)
   const alteredRecorderRef = useRef<MediaRecorder | null>(null)
@@ -375,6 +385,7 @@ export default function App(): ReactElement {
     localUrl: '',
     lanUrl: ''
   })
+  const [roomPresence, setRoomPresence] = useState<RoomPresence | null>(null)
   const [form, setForm] = useState<SessionForm>(initialForm)
   const [controls, setControls] = useState<ManipulationControls>(initialControls)
   const [recordingState, setRecordingState] = useState<RecordingState>('idle')
@@ -392,6 +403,7 @@ export default function App(): ReactElement {
   const expectedParticipants = sessionCapacity[form.sessionFormat]
   const participantPeers = useMemo(() => callPeers.filter((peer) => peer.role === 'participant'), [callPeers])
   const controllerPeers = useMemo(() => callPeers.filter((peer) => peer.role === 'controller'), [callPeers])
+  const visibleRoomPeers = callState === 'idle' || callState === 'error' ? roomPresence?.peers ?? [] : callPeers
 
   const addLog = useCallback((message: string, level: LogEvent['level'] = 'info') => {
     setLogs((prev) =>
@@ -406,6 +418,40 @@ export default function App(): ReactElement {
       ].slice(0, 100)
     )
   }, [])
+
+  const playButtonClick = useCallback(() => {
+    const AudioContextConstructor =
+      window.AudioContext ||
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!AudioContextConstructor) return
+
+    const audioContext = clickAudioContextRef.current ?? new AudioContextConstructor()
+    clickAudioContextRef.current = audioContext
+    if (audioContext.state === 'suspended') audioContext.resume().catch(() => undefined)
+
+    const oscillator = audioContext.createOscillator()
+    const gain = audioContext.createGain()
+    oscillator.type = 'sine'
+    oscillator.frequency.setValueAtTime(520, audioContext.currentTime)
+    gain.gain.setValueAtTime(0.0001, audioContext.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.035, audioContext.currentTime + 0.01)
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.07)
+    oscillator.connect(gain)
+    gain.connect(audioContext.destination)
+    oscillator.start()
+    oscillator.stop(audioContext.currentTime + 0.08)
+  }, [])
+
+  useEffect(() => {
+    const handleClick = (event: MouseEvent): void => {
+      const target = event.target instanceof Element ? event.target.closest('button') : null
+      if (!(target instanceof HTMLButtonElement) || target.disabled) return
+      playButtonClick()
+    }
+
+    document.addEventListener('click', handleClick, true)
+    return () => document.removeEventListener('click', handleClick, true)
+  }, [playButtonClick])
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -457,17 +503,66 @@ export default function App(): ReactElement {
     addLog(`New meeting ID created: ${roomId}`, 'success')
   }
 
-  const startSignalServer = async (): Promise<void> => {
+  const startSignalServer = async (): Promise<{ ok: boolean; localUrl: string; lanUrl: string }> => {
     const result = await window.researchApi.startCallSignalServer(8765)
     setSignalServer({ active: result.ok, localUrl: result.localUrl, lanUrl: result.lanUrl })
     updateForm('callSignalUrl', result.localUrl)
     addLog(`Call server running. Participants can use ${result.lanUrl}.`, 'success')
+    return result
   }
 
   const checkSignalServer = async (): Promise<void> => {
     const result = await window.researchApi.checkCallSignalServer(form.callSignalUrl)
     addLog(result.detail, result.ok ? 'success' : 'error')
   }
+
+  const checkRoomStatus = useCallback(
+    async (quiet = false): Promise<boolean> => {
+      if (!form.callSignalUrl.trim() || !form.roomId.trim()) {
+        if (!quiet) addLog('Enter a call server URL and meeting ID before checking the room.', 'error')
+        return false
+      }
+
+      try {
+        const url = new URL('/room', signalBaseUrl())
+        url.searchParams.set('roomId', form.roomId.trim())
+        const response = await fetch(url)
+        if (!response.ok) throw new Error(`Room check failed with HTTP ${response.status}`)
+        const status = (await response.json()) as RoomPresence
+        setRoomPresence(status)
+        if (!quiet) {
+          addLog(
+            `${status.peers.length} ${status.peers.length === 1 ? 'person is' : 'people are'} currently in ${status.roomId}.`,
+            'success'
+          )
+        }
+        return true
+      } catch (error) {
+        setRoomPresence(null)
+        if (!quiet) {
+          addLog(
+            error instanceof Error
+              ? error.message
+              : 'Room server is not reachable. Check the host URL before joining.',
+            'error'
+          )
+        }
+        return false
+      }
+    },
+    [addLog, form.callSignalUrl, form.roomId]
+  )
+
+  useEffect(() => {
+    if (!setupComplete || !form.callSignalUrl.trim() || !form.roomId.trim()) return undefined
+
+    checkRoomStatus(true).catch(() => undefined)
+    const interval = window.setInterval(() => {
+      checkRoomStatus(true).catch(() => undefined)
+    }, 4000)
+
+    return () => window.clearInterval(interval)
+  }, [checkRoomStatus, form.callSignalUrl, form.roomId, setupComplete])
 
   const pickFolder = async (): Promise<void> => {
     const folder = await window.researchApi.selectOutputFolder()
@@ -557,6 +652,16 @@ export default function App(): ReactElement {
     setRemoteTiles([...remoteStreamsRef.current.values()])
   }
 
+  const flushPendingIceCandidates = async (userId: string, peer: RTCPeerConnection): Promise<void> => {
+    const pending = pendingIceCandidatesRef.current.get(userId)
+    if (!pending || pending.length === 0) return
+
+    pendingIceCandidatesRef.current.delete(userId)
+    for (const candidate of pending) {
+      await peer.addIceCandidate(candidate)
+    }
+  }
+
   const getOrCreateCallPeer = (targetUserId: string, peerMeta?: Partial<CallPeer>): RTCPeerConnection => {
     const existing = peerConnectionsRef.current.get(targetUserId)
     if (existing) return existing
@@ -613,6 +718,11 @@ export default function App(): ReactElement {
           `Connection with ${peerMeta?.displayName || targetUserId} is ${peer.connectionState}.`,
           peer.connectionState === 'failed' ? 'error' : 'warn'
         )
+        if (peer.connectionState === 'failed' || peer.connectionState === 'closed') {
+          remoteStreamsRef.current.delete(targetUserId)
+          syncRemoteTiles()
+          setCallState('waiting')
+        }
       }
     }
 
@@ -705,15 +815,24 @@ export default function App(): ReactElement {
     if (envelope.payload.type === 'offer') {
       setCallState('connecting')
       await peer.setRemoteDescription(envelope.payload.payload as RTCSessionDescriptionInit)
+      await flushPendingIceCandidates(from, peer)
       const answer = await peer.createAnswer()
       await peer.setLocalDescription(answer)
       await postSignal('answer', answer, from)
       addLog(`Answered call offer from ${peerMeta?.displayName || from}.`, 'success')
     } else if (envelope.payload.type === 'answer') {
       await peer.setRemoteDescription(envelope.payload.payload as RTCSessionDescriptionInit)
+      await flushPendingIceCandidates(from, peer)
       addLog(`Call answer received from ${peerMeta?.displayName || from}.`, 'success')
     } else if (envelope.payload.type === 'candidate') {
-      await peer.addIceCandidate(envelope.payload.payload as RTCIceCandidateInit)
+      const candidate = envelope.payload.payload as RTCIceCandidateInit
+      if (peer.remoteDescription) {
+        await peer.addIceCandidate(candidate)
+      } else {
+        const pending = pendingIceCandidatesRef.current.get(from) ?? []
+        pending.push(candidate)
+        pendingIceCandidatesRef.current.set(from, pending)
+      }
     }
   }
 
@@ -817,6 +936,11 @@ export default function App(): ReactElement {
 
     setCallState('starting')
     try {
+      const roomReachable = await checkRoomStatus(true)
+      if (!roomReachable) {
+        throw new Error('Room server is not reachable. Check the server URL before joining.')
+      }
+
       if (!isController) {
         const rawStream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
@@ -841,14 +965,29 @@ export default function App(): ReactElement {
       })
       const events = new EventSource(`${signalBaseUrl()}/events?${params.toString()}`)
       callEventsRef.current = events
+      events.onopen = () => {
+        if (eventSourceErrorAtRef.current > 0) addLog('Room connection restored.', 'success')
+        eventSourceErrorAtRef.current = 0
+        setCallState((prev) => (prev === 'starting' || prev === 'error' ? 'waiting' : prev))
+      }
       events.onmessage = (message) => {
         handleSignalEvent(message).catch((error) =>
           addLog(error instanceof Error ? error.message : 'Could not handle room signal.', 'error')
         )
       }
       events.onerror = () => {
-        setCallState('error')
-        addLog('Room connection dropped. Check the server URL and make sure the host app is still open.', 'error')
+        const now = Date.now()
+        if (events.readyState === EventSource.CLOSED) {
+          setCallState('error')
+          addLog('Room connection closed. Check the server URL and make sure the host app is still open.', 'error')
+          return
+        }
+
+        setCallState('connecting')
+        if (now - eventSourceErrorAtRef.current > 6000) {
+          addLog('Room connection is retrying. Keep the host app open and stay on the same meeting ID.', 'warn')
+          eventSourceErrorAtRef.current = now
+        }
       }
       setCallState('waiting')
       addLog(`${callDisplayName()} joined ${form.roomId}.`, 'success')
@@ -859,7 +998,26 @@ export default function App(): ReactElement {
   }
 
   const leaveLiveCall = (): void => {
-    callEventsRef.current?.close()
+    if (form.callSignalUrl.trim() && form.roomId.trim()) {
+      fetch(`${signalBaseUrl()}/leave`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
+        body: JSON.stringify({
+          roomId: form.roomId,
+          from: callUserIdRef.current,
+          role: form.role,
+          displayName: callDisplayName()
+        })
+      }).catch(() => undefined)
+    }
+
+    if (callEventsRef.current) {
+      callEventsRef.current.onopen = null
+      callEventsRef.current.onmessage = null
+      callEventsRef.current.onerror = null
+      callEventsRef.current.close()
+    }
     for (const peer of peerConnectionsRef.current.values()) peer.close()
     for (const tile of remoteStreamsRef.current.values()) tile.stream.getTracks().forEach((track) => track.stop())
     cleanupLiveMediaProcessor()
@@ -868,6 +1026,7 @@ export default function App(): ReactElement {
     cleanStreamRef.current = null
     alteredStreamRef.current = null
     peerConnectionsRef.current.clear()
+    pendingIceCandidatesRef.current.clear()
     remoteStreamsRef.current.clear()
     if (callLocalVideoRef.current) callLocalVideoRef.current.srcObject = null
     setRemoteTiles([])
@@ -875,6 +1034,16 @@ export default function App(): ReactElement {
     setLatency(emptyLatency)
     setCallState('idle')
     addLog('Left the room.', 'info')
+  }
+
+  const returnToSetup = (): void => {
+    if (recordingState === 'recording') {
+      addLog('Stop the recording before returning to setup.', 'error')
+      return
+    }
+    if (callState !== 'idle') leaveLiveCall()
+    setSetupComplete(false)
+    addLog('Returned to setup.', 'info')
   }
 
   const setControl = <K extends keyof ManipulationControls>(
@@ -1050,7 +1219,7 @@ export default function App(): ReactElement {
     }, 250)
   }
 
-  const continueFromSetup = (): void => {
+  const continueFromSetup = async (): Promise<void> => {
     if (!form.roomId.trim()) {
       addLog('Create or enter a meeting ID before continuing.', 'error')
       return
@@ -1059,6 +1228,15 @@ export default function App(): ReactElement {
       addLog('Enter the call server URL before continuing.', 'error')
       return
     }
+
+    if (isController) {
+      const result = await startSignalServer()
+      if (!result.ok) return
+    } else {
+      const reachable = await checkRoomStatus(false)
+      if (!reachable) return
+    }
+
     setSetupComplete(true)
   }
 
@@ -1134,13 +1312,29 @@ export default function App(): ReactElement {
               {isController && (
                 <div className="button-row">
                   <button onClick={startSignalServer}>Start server here</button>
-                  <button onClick={checkSignalServer}>Check</button>
                 </div>
               )}
+              <div className="button-row">
+                <button onClick={() => checkSignalServer()}>Check server</button>
+                <button onClick={() => checkRoomStatus(false)}>Check room</button>
+              </div>
               {signalServer.active && (
                 <div className="host-summary">
                   <span>This computer is hosting the room</span>
                   <strong>{signalServer.lanUrl}</strong>
+                </div>
+              )}
+              {roomPresence && (
+                <div className="room-status-card">
+                  <div>
+                    <span>Room status</span>
+                    <strong>{roomPresence.peers.length} in room</strong>
+                  </div>
+                  <p>
+                    {roomPresence.peers.length === 0
+                      ? 'The server is reachable. No one has joined this meeting ID yet.'
+                      : roomPresence.peers.map((peer) => `${peer.displayName} (${peer.role})`).join(', ')}
+                  </p>
                 </div>
               )}
             </section>
@@ -1183,7 +1377,7 @@ export default function App(): ReactElement {
           </div>
 
           <div className="setup-actions">
-            <button className="primary setup-continue" onClick={continueFromSetup}>
+            <button className="primary setup-continue" onClick={() => continueFromSetup()}>
               Continue to room
             </button>
           </div>
@@ -1203,13 +1397,13 @@ export default function App(): ReactElement {
           </div>
         </div>
         <div className="topbar-actions">
-          <button onClick={() => setSetupComplete(false)}>Session setup</button>
+          <button onClick={returnToSetup}>Back to setup</button>
           {callState === 'idle' || callState === 'error' ? (
             <button className="primary" onClick={joinLiveCall}>
               Join room
             </button>
           ) : (
-            <button className="danger" onClick={leaveLiveCall}>
+            <button className="danger leave-button" onClick={leaveLiveCall}>
               Leave room
             </button>
           )}
@@ -1236,13 +1430,28 @@ export default function App(): ReactElement {
             </div>
             <div className="button-row">
               <button onClick={checkSignalServer}>Check server</button>
+              <button onClick={() => checkRoomStatus(false)}>Check room</button>
               {isController && <button onClick={startSignalServer}>Start server</button>}
             </div>
+            <div className="room-action-stack">
+              {callState === 'idle' || callState === 'error' ? (
+                <button className="primary wide-button" onClick={joinLiveCall}>
+                  Join this room
+                </button>
+              ) : (
+                <button className="danger wide-button" onClick={leaveLiveCall}>
+                  Leave this room
+                </button>
+              )}
+              <button className="wide-button" onClick={returnToSetup}>
+                Back to setup
+              </button>
+            </div>
             <div className="participant-strip">
-              {callPeers.length === 0 ? (
+              {visibleRoomPeers.length === 0 ? (
                 <span>No one else is in this room yet.</span>
               ) : (
-                callPeers.map((peer) => (
+                visibleRoomPeers.map((peer) => (
                   <span key={`${peer.userId}-${peer.role}`}>
                     {peer.displayName} · {peer.role}
                   </span>
@@ -1346,8 +1555,8 @@ export default function App(): ReactElement {
               ) : (
                 logs.map((log) => (
                   <div key={log.id} className={`log-line ${log.level}`}>
-                    <span>{log.timestamp}</span>
-                    {log.message}
+                    <span className="log-time">{log.timestamp}</span>
+                    <span className="log-message">{log.message}</span>
                   </div>
                 ))
               )}

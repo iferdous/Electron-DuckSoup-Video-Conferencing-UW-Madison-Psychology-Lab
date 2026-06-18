@@ -62,6 +62,7 @@ type SignalClient = {
   displayName: string
   response: ServerResponse
   joinedAt: number
+  heartbeat?: NodeJS.Timeout
 }
 
 type SignalMessage = {
@@ -299,6 +300,23 @@ const peerPayload = (client: SignalClient): Omit<SignalClient, 'id' | 'response'
   joinedAt: client.joinedAt
 })
 
+const removeSignalClient = (client: SignalClient, notify = true, closeResponse = false): void => {
+  const removed = signalClients.delete(client.id)
+  if (!removed) return
+
+  if (client.heartbeat) clearInterval(client.heartbeat)
+  if (closeResponse && !client.response.destroyed) client.response.end()
+
+  if (notify) {
+    broadcastSignalEvent(client.roomId, 'peer-left', {
+      userId: client.userId,
+      displayName: client.displayName,
+      role: client.role
+    })
+    broadcastSignalEvent(client.roomId, 'peer-list', { peers: roomPeers(client.roomId) })
+  }
+}
+
 const broadcastSignalEvent = (
   roomId: string,
   type: string,
@@ -352,6 +370,22 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
           return
         }
 
+        if (request.method === 'GET' && url.pathname === '/room') {
+          const roomId = url.searchParams.get('roomId')?.trim()
+          if (!roomId) {
+            jsonResponse(response, 400, { ok: false, error: 'Missing roomId.' })
+            return
+          }
+
+          jsonResponse(response, 200, {
+            ok: true,
+            roomId,
+            peers: roomPeers(roomId),
+            checkedAt: new Date().toISOString()
+          })
+          return
+        }
+
         if (request.method === 'GET' && url.pathname === '/events') {
           const roomId = url.searchParams.get('roomId')?.trim()
           const userId = url.searchParams.get('userId')?.trim()
@@ -374,8 +408,7 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
 
           for (const existing of roomClients(roomId)) {
             if (existing.userId === userId) {
-              existing.response.end()
-              signalClients.delete(existing.id)
+              removeSignalClient(existing, false, true)
             }
           }
 
@@ -389,15 +422,35 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
             joinedAt: Date.now()
           }
           signalClients.set(client.id, client)
+          client.heartbeat = setInterval(() => {
+            if (response.destroyed) {
+              removeSignalClient(client, true)
+              return
+            }
+            response.write(': keepalive\n\n')
+          }, 10000)
           sendSignalEvent(client, 'hello', { peer: peerPayload(client), peers: roomPeers(roomId) })
           broadcastSignalEvent(roomId, 'peer-joined', { peer: peerPayload(client) }, client.id)
           broadcastSignalEvent(roomId, 'peer-list', { peers: roomPeers(roomId) })
 
           request.on('close', () => {
-            signalClients.delete(client.id)
-            broadcastSignalEvent(roomId, 'peer-left', { userId, displayName, role }, client.id)
-            broadcastSignalEvent(roomId, 'peer-list', { peers: roomPeers(roomId) })
+            removeSignalClient(client, true)
           })
+          return
+        }
+
+        if (request.method === 'POST' && url.pathname === '/leave') {
+          const message = (await readJsonBody(request)) as Partial<SignalMessage>
+          if (!message.roomId || !message.from) {
+            jsonResponse(response, 400, { ok: false, error: 'Missing roomId or from.' })
+            return
+          }
+
+          for (const client of roomClients(message.roomId)) {
+            if (client.userId === message.from) removeSignalClient(client, true, true)
+          }
+
+          jsonResponse(response, 200, { ok: true })
           return
         }
 
