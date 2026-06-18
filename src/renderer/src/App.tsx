@@ -176,6 +176,16 @@ const makeRoomId = (dyadId: string): string => `pps-${slugify(dyadId, 'room')}-$
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value))
 
+const browserVolume = (value: number): number => clamp(Number.isFinite(value) ? value : 1, 0, 1)
+
+const applyMediaElementVolume = (video: HTMLVideoElement, value: number): void => {
+  try {
+    video.volume = browserVolume(value)
+  } catch {
+    video.volume = 1
+  }
+}
+
 const csvEscape = (value: unknown): string => {
   const text = value == null ? '' : String(value)
   return /[",\n\r]/.test(text) ? `"${text.replace(/\r?\n|\r/g, ' ').replace(/"/g, '""')}"` : text
@@ -465,7 +475,7 @@ export default function App(): ReactElement {
   useEffect(() => {
     controlsRef.current = controls
     for (const video of document.querySelectorAll<HTMLVideoElement>('video[data-remote-call-video="true"]')) {
-      video.volume = clamp(controls.partnerVolume, 0, 2)
+      applyMediaElementVolume(video, controls.partnerVolume)
     }
     applyAudioControlsToProcessor(liveMediaProcessorRef.current, controls)
   }, [controls])
@@ -620,6 +630,7 @@ export default function App(): ReactElement {
       if (!payload || typeof payload !== 'object') return
       const update = payload as { key?: keyof ManipulationControls; value?: unknown }
       if (!update.key || !(update.key in initialControls)) return
+      if (update.key === 'partnerVolume') return
 
       setControls((prev) => ({ ...prev, [update.key!]: update.value as never }))
       const loggedValue =
@@ -1051,6 +1062,13 @@ export default function App(): ReactElement {
     value: ManipulationControls[K],
     notes?: string
   ): void => {
+    if (key === 'partnerVolume') {
+      setControls((prev) => ({ ...prev, partnerVolume: browserVolume(Number(value)) }))
+      appendControlEvent('partnerVolume', browserVolume(Number(value)), notes || 'Changed playback volume on this computer only.')
+      addLog(`partnerVolume = ${browserVolume(Number(value)).toFixed(2)} applied on this computer only.`, 'info')
+      return
+    }
+
     setControls((prev) => ({ ...prev, [key]: value }))
     appendControlEvent(String(key), value, notes || 'Applied to participant live stream.')
     broadcastLiveControl(key, value)
@@ -1634,12 +1652,12 @@ export default function App(): ReactElement {
                 </div>
                 <RangeControl
                   label="Partner playback volume"
-                  description="Changes how loud the other people sound on this computer only. It does not change what they hear."
+                  description="Changes how loud the other people sound on this computer only. It does not change what they hear and is not sent across the room."
                   value={controls.partnerVolume}
                   min={0}
-                  max={2}
+                  max={1}
                   step={0.05}
-                  markers={['Muted', 'Normal', 'Boosted']}
+                  markers={['Muted', 'Half', 'Full']}
                   onChange={(value) => setControl('partnerVolume', value, 'Local playback volume only.')}
                 />
                 <RangeControl
@@ -1755,7 +1773,7 @@ function RemoteVideoCard({ tile, volume }: { tile: RemoteTile; volume: number })
   useEffect(() => {
     if (!videoRef.current) return
     videoRef.current.srcObject = tile.stream
-    videoRef.current.volume = clamp(volume, 0, 2)
+    applyMediaElementVolume(videoRef.current, volume)
     videoRef.current.play().catch(() => undefined)
   }, [tile.stream, volume])
 
@@ -1865,8 +1883,11 @@ function RangeControl({
         <span className="label-with-info">
           {label}
           {description && (
-            <span className="info-dot" title={description} aria-label={description}>
+            <span className="info-dot" title={description} aria-label={description} tabIndex={0}>
               i
+              <span className="info-tooltip" role="tooltip">
+                {description}
+              </span>
             </span>
           )}
         </span>

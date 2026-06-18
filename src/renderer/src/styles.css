@@ -634,6 +634,7 @@ label {
   display: grid;
   gap: 8px;
   margin-bottom: 20px;
+  overflow: visible;
 }
 
 .range-header {
@@ -650,9 +651,11 @@ label {
   align-items: center;
   gap: 7px;
   min-width: 0;
+  overflow: visible;
 }
 
 .info-dot {
+  position: relative;
   width: 16px;
   height: 16px;
   border: 1px solid #5d697e;
@@ -665,6 +668,60 @@ label {
   line-height: 1;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   cursor: help;
+}
+
+.info-dot:focus {
+  outline: 2px solid rgb(56 189 248 / 0.45);
+  outline-offset: 2px;
+}
+
+.info-tooltip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  z-index: 30;
+  width: min(300px, 70vw);
+  transform: translateX(-50%) translateY(4px);
+  border: 1px solid rgb(125 211 252 / 0.38);
+  border-radius: 8px;
+  background: #020617;
+  color: #d7e3f4;
+  box-shadow: 0 14px 34px rgb(0 0 0 / 0.35);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.45;
+  letter-spacing: 0;
+  opacity: 0;
+  padding: 10px 12px;
+  pointer-events: none;
+  text-transform: none;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+  visibility: hidden;
+}
+
+.info-tooltip::after {
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 10px;
+  height: 10px;
+  border-right: 1px solid rgb(125 211 252 / 0.38);
+  border-bottom: 1px solid rgb(125 211 252 / 0.38);
+  background: #020617;
+  content: '';
+  transform: translate(-50%, -5px) rotate(45deg);
+}
+
+.info-dot:hover .info-tooltip,
+.info-dot:focus .info-tooltip,
+.info-dot:focus-visible .info-tooltip {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  visibility: visible;
 }
 
 .range-header strong {
