@@ -15,6 +15,8 @@ import type {
   SessionFormat
 } from './types'
 
+const hostedSignalUrl = 'https://nelf-call-signaling.onrender.com'
+
 const initialForm: SessionForm = {
   role: 'participant',
   sessionFormat: 'dyad',
@@ -28,7 +30,7 @@ const initialForm: SessionForm = {
   roomId: `nelf-room-${Date.now()}`,
   targetUserId: '',
   duckSoupUrl: 'http://localhost:8100',
-  callSignalUrl: 'http://localhost:8765',
+  callSignalUrl: hostedSignalUrl,
   outputFolder: '',
   condition: 'Neutral / Sham'
 }
@@ -182,6 +184,33 @@ const makeRoomId = (dyadId: string): string => `nelf-${slugify(dyadId, 'room')}-
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value))
 
 const browserVolume = (value: number): number => clamp(Number.isFinite(value) ? value : 1, 0, 1)
+
+const isLocalSignalUrl = (value: string): boolean => {
+  try {
+    const url = new URL(value)
+    return ['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname)
+  } catch {
+    return false
+  }
+}
+
+const parseSessionLink = (value: string): Partial<SessionForm> & { callSignalUrl: string; roomId: string } => {
+  const url = new URL(value.trim())
+  const roomId = url.searchParams.get('roomId')?.trim()
+  if (!roomId) throw new Error('Session link is missing a Meeting ID.')
+
+  const nextFormat = url.searchParams.get('format') as SessionFormat | null
+  const parsed: Partial<SessionForm> & { callSignalUrl: string; roomId: string } = {
+    callSignalUrl: url.origin,
+    roomId
+  }
+  const studyId = url.searchParams.get('studyId')?.trim()
+  const dyadId = url.searchParams.get('dyadId')?.trim()
+  if (studyId) parsed.studyId = studyId
+  if (dyadId) parsed.dyadId = dyadId
+  if (nextFormat && nextFormat in sessionCapacity) parsed.sessionFormat = nextFormat
+  return parsed
+}
 
 const applyMediaElementVolume = (video: HTMLVideoElement, value: number): void => {
   try {
@@ -415,6 +444,8 @@ export default function App(): ReactElement {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatText, setChatText] = useState('')
   const [chatTarget, setChatTarget] = useState<ChatTarget>('room')
+  const [sessionLinkInput, setSessionLinkInput] = useState('')
+  const [showAdvancedConnection, setShowAdvancedConnection] = useState(false)
   const [experimenterLoginOpen, setExperimenterLoginOpen] = useState(false)
   const [experimenterCredentials, setExperimenterCredentials] = useState({ username: '', password: '' })
   const [experimenterLoginError, setExperimenterLoginError] = useState('')
@@ -428,6 +459,19 @@ export default function App(): ReactElement {
     [activeRoomPeers, isController]
   )
   const simpleLatencyMs = latency.rttMs ?? latency.videoRttMs ?? latency.audioRttMs
+  const sessionLink = useMemo(() => {
+    let url: URL
+    try {
+      url = new URL('/join', form.callSignalUrl || hostedSignalUrl)
+    } catch {
+      url = new URL('/join', hostedSignalUrl)
+    }
+    url.searchParams.set('roomId', form.roomId)
+    url.searchParams.set('studyId', form.studyId)
+    url.searchParams.set('format', form.sessionFormat)
+    if (form.dyadId.trim()) url.searchParams.set('dyadId', form.dyadId.trim())
+    return url.toString()
+  }, [form.callSignalUrl, form.dyadId, form.roomId, form.sessionFormat, form.studyId])
 
   const addLog = useCallback((message: string, level: LogEvent['level'] = 'info') => {
     setLogs((prev) =>
@@ -557,6 +601,30 @@ export default function App(): ReactElement {
     addLog(`New meeting ID created: ${roomId}`, 'success')
   }
 
+  const applySessionLink = (value: string): boolean => {
+    const trimmed = value.trim()
+    if (!trimmed) return false
+
+    try {
+      const parsed = parseSessionLink(trimmed)
+      setForm((prev) => ({ ...prev, ...parsed }))
+      addLog('Session link loaded. You can continue to the room.', 'success')
+      return true
+    } catch (error) {
+      addLog(error instanceof Error ? error.message : 'Could not read that session link.', 'error')
+      return false
+    }
+  }
+
+  const copySessionLink = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(sessionLink)
+      addLog('Participant session link copied.', 'success')
+    } catch {
+      addLog('Could not copy automatically. Select and copy the session link manually.', 'warn')
+    }
+  }
+
   const startSignalServer = async (): Promise<{ ok: boolean; localUrl: string; lanUrl: string }> => {
     const result = await window.researchApi.startCallSignalServer(8765)
     setSignalServer({ active: result.ok, localUrl: result.localUrl, lanUrl: result.lanUrl })
@@ -571,15 +639,18 @@ export default function App(): ReactElement {
   }
 
   const checkRoomStatus = useCallback(
-    async (quiet = false): Promise<boolean> => {
-      if (!form.callSignalUrl.trim() || !form.roomId.trim()) {
+    async (quiet = false, overrides?: { roomId?: string; callSignalUrl?: string }): Promise<boolean> => {
+      const roomId = overrides?.roomId ?? form.roomId
+      const callSignalUrl = overrides?.callSignalUrl ?? form.callSignalUrl
+
+      if (!callSignalUrl.trim() || !roomId.trim()) {
         if (!quiet) addLog('Enter a call server URL and meeting ID before checking the room.', 'error')
         return false
       }
 
       try {
-        const url = new URL('/room', signalBaseUrl())
-        url.searchParams.set('roomId', form.roomId.trim())
+        const url = new URL('/room', callSignalUrl.replace(/\/$/, ''))
+        url.searchParams.set('roomId', roomId.trim())
         const response = await fetch(url)
         if (!response.ok) throw new Error(`Room check failed with HTTP ${response.status}`)
         const status = (await response.json()) as RoomPresence
@@ -1301,20 +1372,35 @@ export default function App(): ReactElement {
   }
 
   const continueFromSetup = async (): Promise<void> => {
-    if (!form.roomId.trim()) {
+    let nextRoomId = form.roomId
+    let nextSignalUrl = form.callSignalUrl
+
+    if (!isController && sessionLinkInput.trim()) {
+      try {
+        const parsed = parseSessionLink(sessionLinkInput)
+        nextRoomId = parsed.roomId
+        nextSignalUrl = parsed.callSignalUrl
+        setForm((prev) => ({ ...prev, ...parsed }))
+      } catch (error) {
+        addLog(error instanceof Error ? error.message : 'Could not read that session link.', 'error')
+        return
+      }
+    }
+
+    if (!nextRoomId.trim()) {
       addLog('Create or enter a meeting ID before continuing.', 'error')
       return
     }
-    if (!form.callSignalUrl.trim()) {
-      addLog('Enter the call server URL before continuing.', 'error')
+    if (!nextSignalUrl.trim()) {
+      addLog('Enter a session link before continuing.', 'error')
       return
     }
 
-    if (isController) {
+    if (isController && isLocalSignalUrl(nextSignalUrl)) {
       const result = await startSignalServer()
       if (!result.ok) return
     } else {
-      const reachable = await checkRoomStatus(false)
+      const reachable = await checkRoomStatus(false, { roomId: nextRoomId, callSignalUrl: nextSignalUrl })
       if (!reachable) return
     }
 
@@ -1429,6 +1515,36 @@ export default function App(): ReactElement {
 
             <section className="panel">
               <div className="section-title accent">Meeting</div>
+              {isController ? (
+                <div className="share-card">
+                  <span>Participant session link</span>
+                  <input value={sessionLink} readOnly />
+                  <div className="button-row no-margin">
+                    <button className="primary" onClick={() => copySessionLink()}>
+                      Copy link
+                    </button>
+                    <button onClick={() => checkSignalServer()}>Check hosted server</button>
+                  </div>
+                </div>
+              ) : (
+                <label>
+                  Session link
+                  <div className="input-action-row">
+                    <input
+                      value={sessionLinkInput}
+                      onChange={(event) => setSessionLinkInput(event.target.value)}
+                      onBlur={() => {
+                        if (sessionLinkInput.trim()) applySessionLink(sessionLinkInput)
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') applySessionLink(sessionLinkInput)
+                      }}
+                      placeholder="Paste the link from the experimenter"
+                    />
+                    <button onClick={() => applySessionLink(sessionLinkInput)}>Use</button>
+                  </div>
+                </label>
+              )}
               <label>
                 Meeting ID
                 {isController ? (
@@ -1440,27 +1556,37 @@ export default function App(): ReactElement {
                   <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
                 )}
               </label>
-              <label>
-                Call server URL
-                <input
-                  value={form.callSignalUrl}
-                  onChange={(event) => updateForm('callSignalUrl', event.target.value)}
-                  placeholder="Mac: http://localhost:8765, Windows: http://Mac-IP:8765"
-                />
-              </label>
-              {isController && (
-                <div className="button-row">
-                  <button onClick={startSignalServer}>Start call server</button>
-                </div>
-              )}
-              <div className="button-row">
-                <button onClick={() => checkSignalServer()}>Check server</button>
-                <button onClick={() => checkRoomStatus(false)}>Check room</button>
+              <div className="host-summary">
+                <span>Hosted call server</span>
+                <strong>{form.callSignalUrl}</strong>
               </div>
-              {signalServer.active && (
-                <div className="host-summary">
-                  <span>This computer is hosting the room</span>
-                  <strong>{signalServer.lanUrl}</strong>
+              <div className="button-row">
+                <button onClick={() => checkRoomStatus(false)}>Check room</button>
+                <button onClick={() => setShowAdvancedConnection((prev) => !prev)}>
+                  {showAdvancedConnection ? 'Hide advanced' : 'Advanced'}
+                </button>
+              </div>
+              {showAdvancedConnection && (
+                <div className="advanced-connection">
+                  <label>
+                    Signal server URL
+                    <input
+                      value={form.callSignalUrl}
+                      onChange={(event) => updateForm('callSignalUrl', event.target.value)}
+                      placeholder={hostedSignalUrl}
+                    />
+                  </label>
+                  {isController && isLocalSignalUrl(form.callSignalUrl) && (
+                    <div className="button-row no-margin">
+                      <button onClick={startSignalServer}>Start local server</button>
+                    </div>
+                  )}
+                  {signalServer.active && (
+                    <div className="host-summary">
+                      <span>This computer is hosting the room</span>
+                      <strong>{signalServer.lanUrl}</strong>
+                    </div>
+                  )}
                 </div>
               )}
               {roomPresence && (
@@ -1569,8 +1695,8 @@ export default function App(): ReactElement {
                 <strong>{form.roomId}</strong>
               </div>
               <div className="metric">
-                <span>Server</span>
-                <strong>{form.callSignalUrl}</strong>
+                <span>Connection</span>
+                <strong>{isLocalSignalUrl(form.callSignalUrl) ? form.callSignalUrl : 'Hosted room link'}</strong>
               </div>
               <div className="metric">
                 <span>Expected participants</span>
@@ -1580,7 +1706,8 @@ export default function App(): ReactElement {
             <div className="button-row">
               <button onClick={checkSignalServer}>Check server</button>
               <button onClick={() => checkRoomStatus(false)}>Check room</button>
-              {isController && <button onClick={startSignalServer}>Start server</button>}
+              {isController && <button onClick={() => copySessionLink()}>Copy link</button>}
+              {isController && isLocalSignalUrl(form.callSignalUrl) && <button onClick={startSignalServer}>Start server</button>}
             </div>
             <div className="room-action-stack">
               {callState === 'idle' || callState === 'error' ? (

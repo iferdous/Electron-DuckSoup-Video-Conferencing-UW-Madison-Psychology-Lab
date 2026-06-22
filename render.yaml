@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: nelf-call-signaling
+    runtime: node
+    plan: free
+    region: ohio
+    branch: main
+    buildCommand: npm ci
+    startCommand: npm run signal:start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SERVICE_NAME
+        value: Niedenthal Emotions Lab Signaling

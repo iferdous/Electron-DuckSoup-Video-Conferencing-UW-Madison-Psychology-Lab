@@ -337,6 +337,35 @@ label {
   overflow-wrap: anywhere;
 }
 
+.share-card,
+.advanced-connection {
+  border: 1px solid rgb(56 189 248 / 0.35);
+  border-radius: 8px;
+  background: rgb(8 47 73 / 0.22);
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px;
+}
+
+.share-card > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.share-card input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.advanced-connection {
+  border-color: rgb(141 152 173 / 0.28);
+  background: rgb(21 29 45 / 0.42);
+  margin-top: 12px;
+}
+
 .discovery-list {
   display: grid;
   gap: 8px;

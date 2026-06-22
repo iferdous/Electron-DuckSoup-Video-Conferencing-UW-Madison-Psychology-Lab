@@ -2,7 +2,7 @@
 
 Desktop app for running live emotion-study video sessions.
 
-The app supports participant rooms, an Experimenter-only control view, dyad/triad/quad meeting sizes, live chat, self-view hide/show, simple latency display, `.webm` recordings, and session timing logs.
+The app supports participant rooms, an Experimenter-only control view, dyad/triad/quad meeting sizes, hosted room links, live chat, self-view hide/show, simple latency display, `.webm` recordings, and session timing logs.
 
 ## Install
 
@@ -14,7 +14,7 @@ cd <repo-folder>
 npm install
 ```
 
-## Start The App
+## Start The Desktop App
 
 ```bash
 npm run dev
@@ -27,9 +27,42 @@ npm run build:manual
 npm run start:manual
 ```
 
-## Start The Local Media Server
+## Hosted Call Server
 
-Only the host computer needs to run this.
+The app is set up to use the hosted signaling server:
+
+```text
+https://nelf-call-signaling.onrender.com
+```
+
+This server coordinates rooms, chat, and WebRTC connection messages. It does not record video and does not replace the local media/effects server.
+
+To deploy or redeploy the hosted signaling server on Render, use the Blueprint in `render.yaml`.
+
+## Run A Lab Session
+
+On the Experimenter computer:
+
+1. Open the app.
+2. Click `Experimenter login`.
+3. Login with `admin` / `admin`.
+4. Choose `Dyad`, `Triad`, or `Quad`.
+5. Click `Copy link`.
+6. Send that session link to participants.
+7. Click `Continue to room`, then `Join room`.
+
+On each participant computer:
+
+1. Open the app.
+2. Paste the session link from the Experimenter.
+3. Enter the participant session details.
+4. Click `Continue to room`, then `Join room`.
+
+Participants should see each other after they join the same session link. The Experimenter can stay in the room for chat and study controls without appearing as a video participant.
+
+## Local Media / Effects Server
+
+Only start this when the local media/effects path is needed.
 
 ```bash
 npm run media:up
@@ -42,37 +75,17 @@ To stop it:
 npm run media:down
 ```
 
-## Run A Lab Session
+This Docker server runs on the computer that starts it. The hosted Render signaling server is separate.
 
-Use one computer as the host. In our testing this is usually the Mac.
+## Local Signaling Test
 
-On the host computer:
+If Render is unavailable and you need a local-only fallback:
 
-1. Open the app.
-2. Click `Experimenter login`.
-3. Login with `admin` / `admin`.
-4. Choose `Dyad`, `Triad`, or `Quad`.
-5. Click `Start call server`.
-6. Give participants the Meeting ID and the host server URL shown in the app.
-7. Click `Continue to room`, then `Join room`.
+```bash
+npm run signal:dev
+```
 
-On each participant computer:
-
-1. Open the app.
-2. Enter the same Meeting ID.
-3. Enter the host server URL.
-4. Enter the participant session details.
-5. Click `Continue to room`, then `Join room`.
-
-Participants should see each other after they join the same Meeting ID. The Experimenter can stay in the room for chat and study controls without appearing as a video participant.
-
-## Notes For Two Computers
-
-- On the host computer, `localhost` is okay because the server is running there.
-- On another computer, do not use `localhost`; use the host computer URL shown in the app.
-- Both computers should be on the same network for local testing.
-- If Windows cannot connect, set the Wi-Fi network profile to `Private`.
-- If macOS asks about incoming connections, allow the app on the local network.
+Then use `http://localhost:8765` on the same computer, or the host computer LAN URL from another computer. This is only for troubleshooting.
 
 ## Recording
 
