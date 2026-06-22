@@ -1,12 +1,15 @@
 {
-  "name": "uw-ducksoup-conference-lab",
+  "name": "uw-emotions-lab-conference",
   "version": "0.1.0",
-  "description": "Research video conferencing console for DuckSoup/Mozza emotion manipulation studies.",
+  "description": "Research video conferencing console for live emotion study sessions.",
   "main": "./out/main/index.js",
   "author": "UW-Madison Niedenthal Emotions Lab",
   "scripts": {
     "dev": "electron-vite dev",
     "start": "electron-vite preview",
+    "media:up": "cd docker/ducksoup && cp -n env.example .env && docker compose up -d",
+    "media:down": "cd docker/ducksoup && docker compose down",
+    "media:status": "docker ps --format \"table {{.Names}}\\t{{.Status}}\\t{{.Ports}}\"",
     "build:manual": "esbuild ./src/renderer/src/main.tsx --bundle --platform=browser --format=esm --jsx=automatic --outfile=out/renderer/assets/index-manual.js --loader:.css=css --asset-names=assets/[name]-[hash] && esbuild src/main/index.ts --bundle --platform=node --format=cjs --outfile=out/main/index.js --external:electron --external:@electron-toolkit/utils && esbuild src/preload/index.ts --bundle --platform=node --format=cjs --outfile=out/preload/index.js --external:electron --external:@electron-toolkit/preload",
     "start:manual": "electron .",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",

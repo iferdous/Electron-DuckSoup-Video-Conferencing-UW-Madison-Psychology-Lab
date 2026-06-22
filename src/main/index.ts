@@ -93,7 +93,6 @@ const DEFAULT_SIGNAL_PORT = 8765
 
 let advertisementSocket: Socket | null = null
 let advertisementTimer: NodeJS.Timeout | null = null
-let mainWindowRef: BrowserWindow | null = null
 let callSignalServer: Server | null = null
 let callSignalServerPort: number | null = null
 const signalClients = new Map<string, SignalClient>()
@@ -195,7 +194,7 @@ const startAdvertisement = (payload: HostAdvertisement): Promise<{ ok: boolean; 
         socket.setMulticastLoopback(true)
         sendPacket()
         advertisementTimer = setInterval(sendPacket, 1000)
-        finish({ ok: true, detail: `Advertising DuckSoup ${duckSoupUrl} and call server ${callSignalUrl}.`, url: duckSoupUrl })
+        finish({ ok: true, detail: `Advertising local media server ${duckSoupUrl} and call server ${callSignalUrl}.`, url: duckSoupUrl })
       } catch (error) {
         stopAdvertisement()
         finish({ ok: false, detail: error instanceof Error ? error.message : 'Could not advertise host.' })
@@ -557,7 +556,7 @@ function createWindow(): void {
     minWidth: 1180,
     minHeight: 760,
     show: true,
-    title: 'DuckSoup Conference Lab',
+    title: 'Niedenthal Emotions Lab',
     backgroundColor: '#0b1020',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -565,12 +564,6 @@ function createWindow(): void {
       sandbox: false
     }
   })
-  mainWindowRef = mainWindow
-
-  mainWindow.on('closed', () => {
-    mainWindowRef = null
-  })
-
   mainWindow.on('ready-to-show', () => {
     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
     mainWindow.setBounds({ x: 60, y: 80, width: 1440, height: 920 })
@@ -617,7 +610,7 @@ app.whenReady().then(() => {
     app.dock?.show()
   }
 
-  electronApp.setAppUserModelId('edu.wisc.niedenthal.ducksoupconference')
+  electronApp.setAppUserModelId('edu.wisc.niedenthal.emotionslab')
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -639,7 +632,8 @@ app.whenReady().then(() => {
       timestampSegment()
     ].join('_')
 
-    const sessionDir = join(metadata.outputFolder, folderName)
+    const outputRoot = metadata.outputFolder || join(app.getPath('documents'), 'Niedenthal Emotions Lab Sessions')
+    const sessionDir = join(outputRoot, folderName)
     await mkdir(sessionDir, { recursive: true })
     await mkdir(join(sessionDir, 'video'), { recursive: true })
     await mkdir(join(sessionDir, 'data'), { recursive: true })
@@ -673,14 +667,14 @@ app.whenReady().then(() => {
         ok: reachable,
         status: response.status,
         detail: reachable
-          ? 'DuckSoup server is reachable.'
+          ? 'Local media server is reachable.'
           : `HTTP ${response.status}`
       }
     } catch (error) {
       return {
         ok: false,
         status: 0,
-        detail: error instanceof Error ? error.message : 'DuckSoup is not reachable.'
+        detail: error instanceof Error ? error.message : 'Local media server is not reachable.'
       }
     }
   })

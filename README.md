@@ -1,34 +1,18 @@
-# DuckSoup Conference Lab
+# Niedenthal Emotions Lab
 
-Desktop app for running live video-conference sessions for psychology studies.
+Desktop app for running live emotion-study video sessions.
 
-The app supports:
+The app supports participant rooms, an Experimenter-only control view, dyad/triad/quad meeting sizes, live chat, self-view hide/show, simple latency display, `.webm` recordings, and session timing logs.
 
-- participant and controller views
-- dyad, triad, and quad rooms
-- live video and audio between computers
-- controller-only face and voice controls
-- room chat
-- self-view hide/show
-- `.webm` recordings
-- session metadata and manipulation timing logs
+## Install
 
-## What You Need
-
-- Node.js
-- npm
-- Git
-- Docker Desktop, only if you are running the local DuckSoup/Mozza server
-
-## Get The App
+You need Node.js, npm, Git, and Docker Desktop if you plan to run the local media/effects server.
 
 ```bash
-git clone git@github.com:iferdous/Electron-DuckSoup-Video-Conferencing-UW-Madison-Psychology-Lab.git
-cd Electron-DuckSoup-Video-Conferencing-UW-Madison-Psychology-Lab
+git clone <repo-url>
+cd <repo-folder>
 npm install
 ```
-
-If SSH is not set up on your computer, use the HTTPS clone URL from GitHub instead.
 
 ## Start The App
 
@@ -36,94 +20,77 @@ If SSH is not set up on your computer, use the HTTPS clone URL from GitHub inste
 npm run dev
 ```
 
-If the window does not open, use:
+If the Electron window does not open, run:
 
 ```bash
 npm run build:manual
 npm run start:manual
 ```
 
-## Start The Local DuckSoup Server
+## Start The Local Media Server
 
-Only one computer needs to run this for a local lab test.
-
-```bash
-cd docker/ducksoup
-cp env.example .env
-docker compose up -d
-```
-
-Check it:
+Only the host computer needs to run this.
 
 ```bash
-curl http://localhost:8100/health
+npm run media:up
+npm run media:status
 ```
 
-Stop it:
+To stop it:
 
 ```bash
-cd docker/ducksoup
-docker compose down
+npm run media:down
 ```
 
-## Run A Session
+## Run A Lab Session
 
-Use one computer as the controller/host.
+Use one computer as the host. In our testing this is usually the Mac.
 
-On the controller computer:
+On the host computer:
 
 1. Open the app.
-2. Choose `Controller`.
-3. Choose `Dyad`, `Triad`, or `Quad`.
-4. Click `Start server here`.
-5. Copy the server URL shown in the app.
-6. Keep the Meeting ID visible.
-7. Click `Continue to room`.
-8. Click `Join room`.
+2. Click `Experimenter login`.
+3. Login with `admin` / `admin`.
+4. Choose `Dyad`, `Triad`, or `Quad`.
+5. Click `Start call server`.
+6. Give participants the Meeting ID and the host server URL shown in the app.
+7. Click `Continue to room`, then `Join room`.
 
 On each participant computer:
 
 1. Open the app.
-2. Choose `Participant`.
-3. Enter the same Meeting ID.
-4. Enter the controller/host server URL.
-5. Enter a display name and station ID.
-6. Click `Continue to room`.
-7. Click `Join room`.
+2. Enter the same Meeting ID.
+3. Enter the host server URL.
+4. Enter the participant session details.
+5. Click `Continue to room`, then `Join room`.
 
-Participants should appear in the room after they join.
+Participants should see each other after they join the same Meeting ID. The Experimenter can stay in the room for chat and study controls without appearing as a video participant.
+
+## Notes For Two Computers
+
+- On the host computer, `localhost` is okay because the server is running there.
+- On another computer, do not use `localhost`; use the host computer URL shown in the app.
+- Both computers should be on the same network for local testing.
+- If Windows cannot connect, set the Wi-Fi network profile to `Private`.
+- If macOS asks about incoming connections, allow the app on the local network.
 
 ## Recording
 
-Participant stations save their own files.
+Recordings are saved as `.webm`.
 
-Each recording creates:
+Each saved session can include:
 
 - `clean.webm`
 - `altered.webm`
 - `session_manifest.json`
 - `manipulation_events.csv`
 
-The output format is `.webm`.
-
-## Important Notes
-
-- The controller is the only role that sees the face and voice controls.
-- Participants can hide self view without turning off the camera.
-- Chat can go to everyone, the control room, or one person.
-- For a local lab test, all computers should be on the same network.
-- If Windows cannot connect, set the Windows Wi-Fi network profile to `Private`.
-- If macOS asks about incoming connections, allow the app on the local network.
+If no output folder is selected, the app saves sessions to the default lab sessions folder in Documents.
 
 ## Update The App
 
 ```bash
 git pull origin main
 npm install
-```
-
-Then start the app again with:
-
-```bash
 npm run dev
 ```

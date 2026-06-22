@@ -1,5 +1,5 @@
-appId: edu.wisc.niedenthal.ducksoupconference
-productName: DuckSoup Conference Lab
+appId: edu.wisc.niedenthal.emotionslab
+productName: Niedenthal Emotions Lab
 directories:
   buildResources: build
 files:
@@ -16,4 +16,3 @@ win:
 linux:
   target:
     - AppImage
-

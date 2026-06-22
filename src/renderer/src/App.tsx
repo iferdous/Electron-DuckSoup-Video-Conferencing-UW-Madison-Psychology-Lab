@@ -18,14 +18,14 @@ import type {
 const initialForm: SessionForm = {
   role: 'participant',
   sessionFormat: 'dyad',
-  serverName: 'Mac DuckSoup Host',
-  studyId: 'PPS2026',
+  serverName: 'Emotions Lab Host',
+  studyId: 'NELF2026',
   raId: '',
   dyadId: '',
   displayName: 'Participant',
   participantId: 'P001',
   partnerId: 'P002',
-  roomId: `pps-room-${Date.now()}`,
+  roomId: `nelf-room-${Date.now()}`,
   targetUserId: '',
   duckSoupUrl: 'http://localhost:8100',
   callSignalUrl: 'http://localhost:8765',
@@ -102,6 +102,11 @@ const sessionLabels: Record<SessionFormat, string> = {
   quad: 'Quad'
 }
 
+const appTitle = 'Niedenthal Emotions Lab'
+const appSubtitle = 'Live emotion study session'
+
+const roleLabel = (role: CallRole): string => (role === 'controller' ? 'Experimenter' : 'Participant')
+
 const audioPresets: Array<{
   label: string
   preset: string
@@ -172,7 +177,7 @@ const slugify = (value: string, fallback: string): string => {
   return slug || fallback
 }
 
-const makeRoomId = (dyadId: string): string => `pps-${slugify(dyadId, 'room')}-${Date.now().toString(36)}`
+const makeRoomId = (dyadId: string): string => `nelf-${slugify(dyadId, 'room')}-${Date.now().toString(36)}`
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value))
 
@@ -270,7 +275,9 @@ const latencyFromPeerConnection = async (peer: RTCPeerConnection): Promise<Laten
     }
   })
 
-  const rttValues = [rttMs, videoRttMs, audioRttMs].filter((value): value is number => value !== null)
+  const rttValues = ([rttMs, videoRttMs, audioRttMs] as Array<number | null>).filter(
+    (value): value is number => value !== null
+  )
   const averageRtt =
     rttValues.length > 0
       ? Math.round(rttValues.reduce((total, value) => total + value, 0) / rttValues.length)
@@ -408,12 +415,19 @@ export default function App(): ReactElement {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatText, setChatText] = useState('')
   const [chatTarget, setChatTarget] = useState<ChatTarget>('room')
+  const [experimenterLoginOpen, setExperimenterLoginOpen] = useState(false)
+  const [experimenterCredentials, setExperimenterCredentials] = useState({ username: '', password: '' })
+  const [experimenterLoginError, setExperimenterLoginError] = useState('')
 
   const isController = form.role === 'controller'
   const expectedParticipants = sessionCapacity[form.sessionFormat]
   const participantPeers = useMemo(() => callPeers.filter((peer) => peer.role === 'participant'), [callPeers])
-  const controllerPeers = useMemo(() => callPeers.filter((peer) => peer.role === 'controller'), [callPeers])
-  const visibleRoomPeers = callState === 'idle' || callState === 'error' ? roomPresence?.peers ?? [] : callPeers
+  const activeRoomPeers = callState === 'idle' || callState === 'error' ? roomPresence?.peers ?? [] : callPeers
+  const visibleRoomPeers = useMemo(
+    () => (isController ? activeRoomPeers : activeRoomPeers.filter((peer) => peer.role !== 'controller')),
+    [activeRoomPeers, isController]
+  )
+  const simpleLatencyMs = latency.rttMs ?? latency.videoRttMs ?? latency.audioRttMs
 
   const addLog = useCallback((message: string, level: LogEvent['level'] = 'info') => {
     setLogs((prev) =>
@@ -503,8 +517,38 @@ export default function App(): ReactElement {
   const signalBaseUrl = (): string => form.callSignalUrl.replace(/\/$/, '')
 
   const callDisplayName = (): string => {
-    const fallback = isController ? 'Controller' : 'Participant'
-    return form.displayName.trim() || (isController && form.raId ? `Controller ${form.raId}` : fallback)
+    const fallback = isController ? 'Experimenter' : 'Participant'
+    return form.displayName.trim() || (isController && form.raId ? `Experimenter ${form.raId}` : fallback)
+  }
+
+  const submitExperimenterLogin = (): void => {
+    const username = experimenterCredentials.username.trim()
+    const password = experimenterCredentials.password
+    if (username !== 'admin' || password !== 'admin') {
+      setExperimenterLoginError('Use the lab experimenter credentials to continue.')
+      return
+    }
+
+    setForm((prev) => ({
+      ...prev,
+      role: 'controller',
+      displayName: prev.displayName === 'Participant' ? 'Experimenter' : prev.displayName
+    }))
+    setExperimenterLoginOpen(false)
+    setExperimenterCredentials({ username: '', password: '' })
+    setExperimenterLoginError('')
+    addLog('Experimenter mode unlocked.', 'success')
+  }
+
+  const returnToParticipantMode = (): void => {
+    setForm((prev) => ({
+      ...prev,
+      role: 'participant',
+      displayName: prev.displayName === 'Experimenter' ? 'Participant' : prev.displayName
+    }))
+    setExperimenterLoginOpen(false)
+    setExperimenterLoginError('')
+    addLog('Returned to participant setup.', 'info')
   }
 
   const generateNewRoom = (): void => {
@@ -626,7 +670,7 @@ export default function App(): ReactElement {
   )
 
   const applyRemoteLiveControl = useCallback(
-    (payload: unknown, sender = 'Controller'): void => {
+    (payload: unknown, sender = 'Experimenter'): void => {
       if (!payload || typeof payload !== 'object') return
       const update = payload as { key?: keyof ManipulationControls; value?: unknown }
       if (!update.key || !(update.key in initialControls)) return
@@ -683,13 +727,17 @@ export default function App(): ReactElement {
     peerConnectionsRef.current.set(targetUserId, peer)
 
     const remoteStream = new MediaStream()
-    remoteStreamsRef.current.set(targetUserId, {
-      userId: targetUserId,
-      displayName: peerMeta?.displayName || targetUserId,
-      role: peerMeta?.role || 'participant',
-      stream: remoteStream
-    })
-    syncRemoteTiles()
+    const remoteRole = peerMeta?.role || 'participant'
+    const shouldShowRemoteTile = remoteRole !== 'controller'
+    if (shouldShowRemoteTile) {
+      remoteStreamsRef.current.set(targetUserId, {
+        userId: targetUserId,
+        displayName: peerMeta?.displayName || targetUserId,
+        role: remoteRole,
+        stream: remoteStream
+      })
+      syncRemoteTiles()
+    }
 
     const localStream = callLocalStreamRef.current
     if (localStream && localStream.getTracks().length > 0) {
@@ -752,6 +800,14 @@ export default function App(): ReactElement {
 
   const maybeOfferToPeer = (peer: CallPeer): void => {
     if (peer.userId === callUserIdRef.current) return
+    if (isController) {
+      if (peer.role !== 'participant') return
+      makeCallOffer(peer).catch((error) =>
+        addLog(error instanceof Error ? error.message : 'Could not start live call offer.', 'error')
+      )
+      return
+    }
+    if (peer.role === 'controller') return
     if (peerConnectionsRef.current.has(peer.userId)) return
     if (callUserIdRef.current.localeCompare(peer.userId) < 0) {
       makeCallOffer(peer).catch((error) =>
@@ -772,9 +828,10 @@ export default function App(): ReactElement {
 
     if (envelope.type === 'hello' || envelope.type === 'peer-list') {
       const peers = envelope.payload?.peers ?? []
+      const mediaPeers = peers.filter((peer) => peer.userId !== callUserIdRef.current && peer.role === 'participant')
       setCallPeers(peers)
-      if (peers.some((peer) => peer.userId !== callUserIdRef.current)) setCallState('connecting')
-      peers.forEach(maybeOfferToPeer)
+      if (mediaPeers.length > 0) setCallState('connecting')
+      mediaPeers.forEach(maybeOfferToPeer)
       return
     }
 
@@ -804,7 +861,7 @@ export default function App(): ReactElement {
 
     if (envelope.type === 'director-control') {
       if (envelope.payload?.from !== callUserIdRef.current) {
-        applyRemoteLiveControl(envelope.payload?.payload, envelope.payload?.displayName || 'Controller')
+        applyRemoteLiveControl(envelope.payload?.payload, envelope.payload?.displayName || 'Experimenter')
       }
       return
     }
@@ -820,7 +877,14 @@ export default function App(): ReactElement {
     if (envelope.payload.to && envelope.payload.to !== callUserIdRef.current) return
 
     const from = envelope.payload.from
-    const peerMeta = callPeers.find((item) => item.userId === from)
+    const peerMeta =
+      callPeers.find((item) => item.userId === from) ??
+      ({
+        userId: from,
+        displayName: envelope.payload.displayName || from,
+        role: envelope.payload.role ?? 'participant',
+        joinedAt: Date.now()
+      } as CallPeer)
     const peer = getOrCreateCallPeer(from, peerMeta)
 
     if (envelope.payload.type === 'offer') {
@@ -965,7 +1029,7 @@ export default function App(): ReactElement {
           callLocalVideoRef.current.srcObject = processor.processedStream
           await callLocalVideoRef.current.play().catch(() => undefined)
         }
-        addLog('Camera and mic started. Controller settings now affect your outgoing stream.', 'success')
+        addLog('Camera and mic started. Experimenter settings now affect your outgoing stream.', 'success')
       }
 
       const params = new URLSearchParams({
@@ -1132,8 +1196,7 @@ export default function App(): ReactElement {
       return
     }
     if (!form.outputFolder) {
-      addLog('Select an output folder before recording.', 'error')
-      return
+      addLog('No output folder selected. Saving to the default Emotions Lab sessions folder.', 'info')
     }
 
     const { sessionDir: createdDir } = await window.researchApi.createSessionDirectory(form)
@@ -1187,7 +1250,7 @@ export default function App(): ReactElement {
       files: { cleanVideo: cleanPath, alteredVideo: alteredPath },
       notes: [
         'cleanVideo is the local unaltered webcam/microphone stream.',
-        'alteredVideo is the outgoing participant stream after live controller settings.',
+        'alteredVideo is the outgoing participant stream after live experimenter settings.',
         'manipulation_events.csv contains live setting changes with timestamps relative to recording start.'
       ]
     }
@@ -1264,60 +1327,118 @@ export default function App(): ReactElement {
         <section className="setup-card">
           <div className="setup-header">
             <div>
-              <h1>DuckSoup Conference Lab</h1>
-              <p>Set up the study room before anyone joins the live call.</p>
+              <h1>{appTitle}</h1>
+              <p>{appSubtitle}</p>
             </div>
-            <div className="setup-pill">{sessionLabels[form.sessionFormat]}</div>
+            <div className="setup-header-actions">
+              <div className="setup-pill">
+                {isController ? `Experimenter · ${sessionLabels[form.sessionFormat]}` : 'Participant'}
+              </div>
+              {isController ? (
+                <button onClick={returnToParticipantMode}>Exit experimenter mode</button>
+              ) : (
+                <button onClick={() => setExperimenterLoginOpen(true)}>Experimenter login</button>
+              )}
+            </div>
           </div>
 
+          {experimenterLoginOpen && (
+            <div className="login-panel" role="dialog" aria-label="Experimenter login">
+              <div>
+                <div className="section-title accent">Experimenter Login</div>
+                <p className="plain-text compact-copy">Use the experimenter account to set the study format and room controls.</p>
+              </div>
+              <div className="field-grid two">
+                <label>
+                  Username
+                  <input
+                    value={experimenterCredentials.username}
+                    onChange={(event) =>
+                      setExperimenterCredentials((prev) => ({ ...prev, username: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  Password
+                  <input
+                    type="password"
+                    value={experimenterCredentials.password}
+                    onChange={(event) =>
+                      setExperimenterCredentials((prev) => ({ ...prev, password: event.target.value }))
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') submitExperimenterLogin()
+                    }}
+                  />
+                </label>
+              </div>
+              {experimenterLoginError && <p className="login-error">{experimenterLoginError}</p>}
+              <div className="button-row no-margin">
+                <button className="primary" onClick={submitExperimenterLogin}>
+                  Login
+                </button>
+                <button
+                  onClick={() => {
+                    setExperimenterLoginOpen(false)
+                    setExperimenterLoginError('')
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="setup-grid">
-            <section className="panel">
-              <div className="section-title accent">1. Choose Role</div>
-              <div className="role-switch">
-                <button
-                  className={form.role === 'participant' ? 'role-button active' : 'role-button'}
-                  onClick={() => updateForm('role', 'participant')}
-                >
-                  Participant
-                </button>
-                <button
-                  className={form.role === 'controller' ? 'role-button active' : 'role-button'}
-                  onClick={() => updateForm('role', 'controller')}
-                >
-                  Controller
-                </button>
-              </div>
-              <p className="plain-text">
-                Participants only see the call, chat, recording, and self-view controls. Controllers see the study controls and can change live face and voice settings.
-              </p>
-            </section>
+            {isController ? (
+              <section className="panel">
+                <div className="section-title accent">Study Setup</div>
+                <div className="format-switch">
+                  {(['dyad', 'triad', 'quad'] as SessionFormat[]).map((format) => (
+                    <button
+                      key={format}
+                      className={form.sessionFormat === format ? 'role-button active' : 'role-button'}
+                      onClick={() => updateForm('sessionFormat', format)}
+                    >
+                      {sessionLabels[format]}
+                    </button>
+                  ))}
+                </div>
+                <p className="plain-text">
+                  Choose the group size here. Participants will only enter the session details and meeting information you give them.
+                </p>
+              </section>
+            ) : (
+              <section className="panel">
+                <div className="section-title accent">Participant Session</div>
+                <p className="plain-text">
+                  Enter the details from the experimenter. You do not need to choose a role or study format.
+                </p>
+                <div className="metric-list no-bottom">
+                  <div className="metric">
+                    <span>Role</span>
+                    <strong>Participant</strong>
+                  </div>
+                  <div className="metric">
+                    <span>Study</span>
+                    <strong>{form.studyId}</strong>
+                  </div>
+                </div>
+              </section>
+            )}
 
             <section className="panel">
-              <div className="section-title accent">2. Study Format</div>
-              <div className="format-switch">
-                {(['dyad', 'triad', 'quad'] as SessionFormat[]).map((format) => (
-                  <button
-                    key={format}
-                    className={form.sessionFormat === format ? 'role-button active' : 'role-button'}
-                    onClick={() => updateForm('sessionFormat', format)}
-                  >
-                    {sessionLabels[format]}
-                  </button>
-                ))}
-              </div>
-              <p className="plain-text">
-                Dyad expects 2 participants, triad expects 3, and quad expects 4. The controller can join without a camera.
-              </p>
-            </section>
-
-            <section className="panel">
-              <div className="section-title accent">3. Meeting</div>
+              <div className="section-title accent">Meeting</div>
               <label>
                 Meeting ID
-                <div className="input-action-row">
+                {isController ? (
+                  <div className="input-action-row">
+                    <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
+                    <button onClick={generateNewRoom}>New</button>
+                  </div>
+                ) : (
                   <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
-                  <button onClick={generateNewRoom}>New</button>
-                </div>
+                )}
               </label>
               <label>
                 Call server URL
@@ -1329,7 +1450,7 @@ export default function App(): ReactElement {
               </label>
               {isController && (
                 <div className="button-row">
-                  <button onClick={startSignalServer}>Start server here</button>
+                  <button onClick={startSignalServer}>Start call server</button>
                 </div>
               )}
               <div className="button-row">
@@ -1351,14 +1472,14 @@ export default function App(): ReactElement {
                   <p>
                     {roomPresence.peers.length === 0
                       ? 'The server is reachable. No one has joined this meeting ID yet.'
-                      : roomPresence.peers.map((peer) => `${peer.displayName} (${peer.role})`).join(', ')}
+                      : roomPresence.peers.map((peer) => `${peer.displayName} (${roleLabel(peer.role)})`).join(', ')}
                   </p>
                 </div>
               )}
             </section>
 
-            <section className="panel">
-              <div className="section-title accent">4. Session Details</div>
+            <section className="panel setup-wide">
+              <div className="section-title accent">Session Details</div>
               <div className="field-grid two">
                 <label>
                   Display name
@@ -1368,10 +1489,12 @@ export default function App(): ReactElement {
                   Study
                   <input value={form.studyId} onChange={(event) => updateForm('studyId', event.target.value)} />
                 </label>
-                <label>
-                  RA
-                  <input value={form.raId} onChange={(event) => updateForm('raId', event.target.value)} />
-                </label>
+                {isController && (
+                  <label>
+                    RA
+                    <input value={form.raId} onChange={(event) => updateForm('raId', event.target.value)} />
+                  </label>
+                )}
                 <label>
                   Dyad/session ID
                   <input value={form.dyadId} onChange={(event) => updateForm('dyadId', event.target.value)} />
@@ -1385,12 +1508,14 @@ export default function App(): ReactElement {
                   <input value={form.partnerId} onChange={(event) => updateForm('partnerId', event.target.value)} />
                 </label>
               </div>
-              <div className="folder-row">
-                <input value={form.outputFolder} readOnly placeholder="Choose output folder for recordings" />
-                <button className="browse-button" onClick={pickFolder}>
-                  Browse
-                </button>
-              </div>
+              {isController && (
+                <div className="folder-row">
+                  <input value={form.outputFolder} readOnly placeholder="Choose output folder for recordings" />
+                  <button className="browse-button" onClick={pickFolder}>
+                    Browse
+                  </button>
+                </div>
+              )}
             </section>
           </div>
 
@@ -1408,13 +1533,19 @@ export default function App(): ReactElement {
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <h1>DuckSoup Conference Lab</h1>
+          <h1>{appTitle}</h1>
           <div className="inline-status">
             <span className={`status-dot status-${callState === 'connected' ? 'connected' : callState === 'error' ? 'error' : callState === 'idle' ? 'idle' : 'connecting'}`} />
-            {sessionLabels[form.sessionFormat]} room · {isController ? 'Controller' : 'Participant'} · {callState}
+            {sessionLabels[form.sessionFormat]} room · {roleLabel(form.role)} · {callState}
           </div>
         </div>
         <div className="topbar-actions">
+          {!isController && (
+            <div className={`latency-pill ${simpleLatencyMs === null ? 'waiting' : ''}`}>
+              <span>Latency</span>
+              <strong>{simpleLatencyMs === null ? 'waiting' : `${simpleLatencyMs} ms`}</strong>
+            </div>
+          )}
           <button onClick={returnToSetup}>Back to setup</button>
           {callState === 'idle' || callState === 'error' ? (
             <button className="primary" onClick={joinLiveCall}>
@@ -1471,7 +1602,7 @@ export default function App(): ReactElement {
               ) : (
                 visibleRoomPeers.map((peer) => (
                   <span key={`${peer.userId}-${peer.role}`}>
-                    {peer.displayName} · {peer.role}
+                    {peer.displayName} · {roleLabel(peer.role)}
                   </span>
                 ))
               )}
@@ -1557,8 +1688,8 @@ export default function App(): ReactElement {
                   <div className="video-label">Waiting room</div>
                   <div className="video-empty">
                     {isController
-                      ? 'Join as controller, then participants will appear here as they enter the same meeting ID.'
-                      : 'Waiting for another participant or controller in this meeting ID.'}
+                      ? 'Join as experimenter to keep chat and controls available while participants enter the same meeting ID.'
+                      : 'Waiting for another participant in this meeting ID.'}
                   </div>
                 </div>
               )}
@@ -1708,7 +1839,7 @@ export default function App(): ReactElement {
             <section className="panel">
               <div className="section-title accent">Participant View</div>
               <p className="plain-text">
-                The controller manages face and voice settings. Keep this window open, use chat for issues, and record only when the study protocol tells you to.
+                The experimenter manages the study settings. Keep this window open and use chat if anything is not working.
               </p>
               <button className="wide-button" onClick={() => setShowSelfView((prev) => !prev)}>
                 {showSelfView ? 'Hide self view' : 'Show self view'}
@@ -1732,35 +1863,37 @@ export default function App(): ReactElement {
             }}
           />
 
-          <section className="panel">
-            <div className="section-title">Latency Viewer</div>
-            <div className="analysis-list">
-              <div>
-                <strong>Round trip</strong>
-                <span>{latency.rttMs === null ? 'waiting' : `${latency.rttMs} ms`}</span>
+          {isController && (
+            <section className="panel">
+              <div className="section-title">Latency Viewer</div>
+              <div className="analysis-list">
+                <div>
+                  <strong>Round trip</strong>
+                  <span>{latency.rttMs === null ? 'waiting' : `${latency.rttMs} ms`}</span>
+                </div>
+                <div>
+                  <strong>Video RTT</strong>
+                  <span>{latency.videoRttMs === null ? 'waiting' : `${latency.videoRttMs} ms`}</span>
+                </div>
+                <div>
+                  <strong>Audio RTT</strong>
+                  <span>{latency.audioRttMs === null ? 'waiting' : `${latency.audioRttMs} ms`}</span>
+                </div>
+                <div>
+                  <strong>Jitter</strong>
+                  <span>{latency.jitterMs === null ? 'waiting' : `${latency.jitterMs} ms`}</span>
+                </div>
+                <div>
+                  <strong>Packets lost</strong>
+                  <span>{latency.packetsLost}</span>
+                </div>
+                <div>
+                  <strong>Updated</strong>
+                  <span>{latency.updatedAt || 'waiting'}</span>
+                </div>
               </div>
-              <div>
-                <strong>Video RTT</strong>
-                <span>{latency.videoRttMs === null ? 'waiting' : `${latency.videoRttMs} ms`}</span>
-              </div>
-              <div>
-                <strong>Audio RTT</strong>
-                <span>{latency.audioRttMs === null ? 'waiting' : `${latency.audioRttMs} ms`}</span>
-              </div>
-              <div>
-                <strong>Jitter</strong>
-                <span>{latency.jitterMs === null ? 'waiting' : `${latency.jitterMs} ms`}</span>
-              </div>
-              <div>
-                <strong>Packets lost</strong>
-                <span>{latency.packetsLost}</span>
-              </div>
-              <div>
-                <strong>Updated</strong>
-                <span>{latency.updatedAt || 'waiting'}</span>
-              </div>
-            </div>
-          </section>
+            </section>
+          )}
         </aside>
       </main>
     </div>
@@ -1780,7 +1913,7 @@ function RemoteVideoCard({ tile, volume }: { tile: RemoteTile; volume: number })
   return (
     <div className="video-panel">
       <div className="video-label">
-        {tile.displayName} · {tile.role}
+        {tile.displayName} · {roleLabel(tile.role)}
       </div>
       <video ref={videoRef} data-remote-call-video="true" autoPlay playsInline className="video-surface" />
       {tile.stream.getTracks().length === 0 && <div className="video-empty">Connected, waiting for video/audio.</div>}
@@ -1818,7 +1951,7 @@ function ChatPanel({
         Send to
         <select value={target} onChange={(event) => onTargetChange(event.target.value)}>
           <option value="room">Everyone</option>
-          {isController ? <option value="participants">All participants</option> : <option value="controllers">Control room</option>}
+          {isController ? <option value="participants">All participants</option> : <option value="controllers">Experimenter</option>}
           {visiblePeers.map((peer) => (
             <option key={peer.userId} value={peer.userId}>
               {peer.displayName}
