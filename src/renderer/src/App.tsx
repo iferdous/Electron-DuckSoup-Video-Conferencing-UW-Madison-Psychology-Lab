@@ -1738,6 +1738,16 @@ export default function App(): ReactElement {
 
     return (
       <div className="setup-shell">
+        <button
+          className="welcome-back-button"
+          onClick={() => {
+            setExperimenterLoginOpen(false)
+            setExperimenterLoginError('')
+            setWelcomeComplete(false)
+          }}
+        >
+          ‹ Back
+        </button>
         <section className="setup-card">
           <div className="setup-header">
             <div>

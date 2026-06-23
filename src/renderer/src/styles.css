@@ -1213,12 +1213,30 @@ label {
 }
 
 .setup-shell {
+  position: relative;
   min-height: 100vh;
   background:
     radial-gradient(circle at 50% 18%, rgb(0 83 33 / 0.18), transparent 34%),
     var(--bg);
-  padding: 24px;
+  padding: 68px 24px 24px;
   overflow-y: auto;
+}
+
+.welcome-back-button {
+  position: absolute;
+  left: 24px;
+  top: 22px;
+  min-height: 36px;
+  border-color: rgb(79 219 200 / 0.28);
+  background: rgb(15 21 19 / 0.76);
+  color: #b8ffd0;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.24);
+  backdrop-filter: blur(4px);
+}
+
+.welcome-back-button:hover:not(:disabled) {
+  border-color: rgb(42 255 128 / 0.58);
+  background: rgb(0 83 33 / 0.28);
 }
 
 .setup-card {
