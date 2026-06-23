@@ -1177,6 +1177,9 @@ export default function App(): ReactElement {
     if (callLocalVideoRef.current) callLocalVideoRef.current.srcObject = null
     setRemoteTiles([])
     setCallPeers([])
+    setChatMessages([])
+    setChatText('')
+    setChatTarget('room')
     setLatency(emptyLatency)
     setCallState('idle')
     addLog('Left the room.', 'info')
@@ -1408,6 +1411,86 @@ export default function App(): ReactElement {
   }
 
   if (!setupComplete) {
+    if (experimenterLoginOpen && !isController) {
+      return (
+        <div className="portal-login-shell">
+          <header className="portal-login-header">
+            <div>
+              <h1>{appTitle}</h1>
+              <p>{appSubtitle}</p>
+            </div>
+            <button
+              onClick={() => {
+                setExperimenterLoginOpen(false)
+                setExperimenterLoginError('')
+              }}
+            >
+              Switch to participant view
+            </button>
+          </header>
+
+          <main className="portal-login-main">
+            <section className="portal-login-card" role="dialog" aria-label="Experimenter login">
+              <div className="portal-login-card-header">
+                <div className="portal-icon">NEL</div>
+                <h2>Experimenter Portal</h2>
+                <p>Secure access required</p>
+              </div>
+
+              <div className="portal-login-form">
+                <label>
+                  Username / Researcher ID
+                  <input
+                    value={experimenterCredentials.username}
+                    onChange={(event) =>
+                      setExperimenterCredentials((prev) => ({ ...prev, username: event.target.value }))
+                    }
+                    placeholder="Enter your ID"
+                    autoFocus
+                  />
+                </label>
+                <label>
+                  Password
+                  <input
+                    type="password"
+                    value={experimenterCredentials.password}
+                    onChange={(event) =>
+                      setExperimenterCredentials((prev) => ({ ...prev, password: event.target.value }))
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') submitExperimenterLogin()
+                    }}
+                    placeholder="admin"
+                  />
+                </label>
+
+                <div className="system-status-card">
+                  <span className="status-dot status-connected" />
+                  <span>System status: online and secure</span>
+                </div>
+
+                {experimenterLoginError && <p className="login-error">{experimenterLoginError}</p>}
+
+                <div className="button-row no-margin">
+                  <button
+                    onClick={() => {
+                      setExperimenterLoginOpen(false)
+                      setExperimenterLoginError('')
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button className="primary" onClick={submitExperimenterLogin}>
+                    Login
+                  </button>
+                </div>
+              </div>
+            </section>
+          </main>
+        </div>
+      )
+    }
+
     return (
       <div className="setup-shell">
         <section className="setup-card">
