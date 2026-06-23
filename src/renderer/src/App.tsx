@@ -70,14 +70,39 @@ type RoomPresence = {
   checkedAt: string
 }
 
+type FaceBox = {
+  x: number
+  y: number
+  width: number
+  height: number
+  score: number
+  source: 'native' | 'fallback'
+}
+
+type BrowserFaceDetector = {
+  detect: (source: CanvasImageSource) => Promise<Array<{ boundingBox: DOMRectReadOnly }>>
+}
+
+type BrowserFaceDetectorConstructor = new (options?: { fastMode?: boolean; maxDetectedFaces?: number }) => BrowserFaceDetector
+
 type LiveMediaProcessor = {
   rawStream: MediaStream
   processedStream: MediaStream
   rawVideo: HTMLVideoElement
   canvas: HTMLCanvasElement
   ctx: CanvasRenderingContext2D
+  warpCanvas: HTMLCanvasElement
+  warpCtx: CanvasRenderingContext2D
+  detectorCanvas: HTMLCanvasElement
+  detectorCtx: CanvasRenderingContext2D
   animationId: number
   currentSmileAlpha: number
+  faceDetector?: BrowserFaceDetector
+  detectedFaceBox?: FaceBox
+  smoothedFaceBox?: FaceBox
+  facePresence: number
+  detectingFace: boolean
+  lastFaceDetectionAt: number
   audioContext?: AudioContext
   audioDelay?: DelayNode
   audioGain?: GainNode
@@ -346,58 +371,266 @@ const applyAudioControlsToProcessor = (
   processor.audioHighShelf?.gain.setTargetAtTime(brighterAmount * 14 - warmerAmount * 5, now, 0.05)
 }
 
+const makeFaceDetector = (): BrowserFaceDetector | undefined => {
+  const Detector = (window as typeof window & { FaceDetector?: BrowserFaceDetectorConstructor }).FaceDetector
+  if (!Detector) return undefined
+
+  try {
+    return new Detector({ fastMode: true, maxDetectedFaces: 1 })
+  } catch {
+    return undefined
+  }
+}
+
+const normalizeFaceBox = (
+  box: { x: number; y: number; width: number; height: number },
+  width: number,
+  height: number,
+  score: number,
+  source: FaceBox['source']
+): FaceBox | null => {
+  const x = clamp(box.x, 0, width)
+  const y = clamp(box.y, 0, height)
+  const boxWidth = clamp(box.width, 0, width - x)
+  const boxHeight = clamp(box.height, 0, height - y)
+
+  if (boxWidth < width * 0.1 || boxHeight < height * 0.12) return null
+  if (boxWidth > width * 0.92 || boxHeight > height * 0.92) return null
+  if (y > height * 0.72) return null
+
+  return { x, y, width: boxWidth, height: boxHeight, score, source }
+}
+
+const isLikelySkinPixel = (r: number, g: number, b: number): boolean => {
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b
+  const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b
+  const chromaSkin = cb >= 74 && cb <= 142 && cr >= 132 && cr <= 190
+  const rgbSkin =
+    r > 35 &&
+    g > 25 &&
+    b > 18 &&
+    max - min > 8 &&
+    r >= g * 0.78 &&
+    r >= b * 0.72 &&
+    g >= b * 0.55
+  return chromaSkin && rgbSkin
+}
+
+const detectFaceFallback = (processor: LiveMediaProcessor, width: number, height: number): FaceBox | null => {
+  const sampleWidth = 160
+  const sampleHeight = Math.max(90, Math.round(sampleWidth * (height / width)))
+  if (processor.detectorCanvas.width !== sampleWidth || processor.detectorCanvas.height !== sampleHeight) {
+    processor.detectorCanvas.width = sampleWidth
+    processor.detectorCanvas.height = sampleHeight
+  }
+
+  processor.detectorCtx.drawImage(processor.rawVideo, 0, 0, sampleWidth, sampleHeight)
+  const data = processor.detectorCtx.getImageData(0, 0, sampleWidth, sampleHeight).data
+  const cropTop = Math.round(sampleHeight * 0.04)
+  const cropBottom = Math.round(sampleHeight * 0.84)
+  let minX = sampleWidth
+  let minY = sampleHeight
+  let maxX = 0
+  let maxY = 0
+  let skinCount = 0
+
+  for (let y = cropTop; y < cropBottom; y += 1) {
+    for (let x = 0; x < sampleWidth; x += 1) {
+      const index = (y * sampleWidth + x) * 4
+      if (!isLikelySkinPixel(data[index], data[index + 1], data[index + 2])) continue
+
+      const centerWeight = 1 - Math.min(1, Math.abs(x / sampleWidth - 0.5) * 1.25)
+      if (centerWeight < 0.2) continue
+
+      skinCount += 1
+      minX = Math.min(minX, x)
+      minY = Math.min(minY, y)
+      maxX = Math.max(maxX, x)
+      maxY = Math.max(maxY, y)
+    }
+  }
+
+  const skinArea = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1))
+  const density = skinCount / skinArea
+  if (skinCount < sampleWidth * sampleHeight * 0.012 || density < 0.12) return null
+
+  const scaleX = width / sampleWidth
+  const scaleY = height / sampleHeight
+  const rawX = minX * scaleX
+  const rawY = minY * scaleY
+  const rawWidth = (maxX - minX + 1) * scaleX
+  const rawHeight = (maxY - minY + 1) * scaleY
+  const expandedWidth = rawWidth * 1.34
+  const expandedHeight = Math.max(rawHeight * 1.55, expandedWidth * 1.08)
+  const expandedX = rawX + rawWidth / 2 - expandedWidth / 2
+  const expandedY = rawY + rawHeight / 2 - expandedHeight * 0.46
+
+  return normalizeFaceBox(
+    {
+      x: expandedX,
+      y: expandedY,
+      width: expandedWidth,
+      height: expandedHeight
+    },
+    width,
+    height,
+    clamp(density, 0, 1),
+    'fallback'
+  )
+}
+
+const smoothFaceBox = (current: FaceBox | undefined, next: FaceBox, beta: number): FaceBox => {
+  if (!current) return next
+  const amount = clamp(0.12 + beta * 0.5, 0.12, 0.55)
+  return {
+    ...next,
+    x: current.x + (next.x - current.x) * amount,
+    y: current.y + (next.y - current.y) * amount,
+    width: current.width + (next.width - current.width) * amount,
+    height: current.height + (next.height - current.height) * amount,
+    score: current.score + (next.score - current.score) * amount
+  }
+}
+
+const updateFaceTracking = (processor: LiveMediaProcessor, width: number, height: number, controlState: ManipulationControls): void => {
+  const now = performance.now()
+  const interval = Math.round(90 + controlState.faceThreshold * 130)
+
+  if (!processor.detectingFace && now - processor.lastFaceDetectionAt > interval) {
+    processor.detectingFace = true
+    processor.lastFaceDetectionAt = now
+
+    const finish = (face: FaceBox | null): void => {
+      if (face && face.score >= 0.08 + controlState.faceThreshold * 0.12) {
+        processor.detectedFaceBox = face
+        processor.smoothedFaceBox = smoothFaceBox(processor.smoothedFaceBox, face, controlState.landmarkBeta)
+        processor.facePresence += (1 - processor.facePresence) * 0.32
+      } else {
+        processor.detectedFaceBox = undefined
+      }
+      processor.detectingFace = false
+    }
+
+    if (processor.faceDetector) {
+      processor.faceDetector
+        .detect(processor.rawVideo)
+        .then((faces) => {
+          const face = faces
+            .map((item) => item.boundingBox)
+            .map((box) => normalizeFaceBox(box, width, height, 1, 'native'))
+            .filter((item): item is FaceBox => item !== null)
+            .sort((a, b) => b.width * b.height - a.width * a.height)[0]
+          finish(face ?? detectFaceFallback(processor, width, height))
+        })
+        .catch(() => finish(detectFaceFallback(processor, width, height)))
+    } else {
+      finish(detectFaceFallback(processor, width, height))
+    }
+  }
+
+  if (!processor.detectedFaceBox) {
+    processor.facePresence += (0 - processor.facePresence) * 0.22
+    if (processor.facePresence < 0.04) {
+      processor.smoothedFaceBox = undefined
+      processor.currentSmileAlpha += (0 - processor.currentSmileAlpha) * 0.24
+    }
+  }
+}
+
 const applySmileWarp = (
   processor: LiveMediaProcessor,
   width: number,
   height: number,
   controlState: ManipulationControls
 ): void => {
+  updateFaceTracking(processor, width, height, controlState)
+
   const targetAlpha = controlState.smileAlpha - 1
   const smoothing = clamp(0.03 + controlState.landmarkBeta * 0.25 + controlState.smoothingCutoff / 80, 0.03, 0.45)
   processor.currentSmileAlpha += (targetAlpha - processor.currentSmileAlpha) * smoothing
 
-  const strength = clamp(processor.currentSmileAlpha, -2.5, 4) * (1 - controlState.faceThreshold * 0.25)
-  if (Math.abs(strength) < 0.02 && !controlState.overlay) return
+  const face = processor.smoothedFaceBox
+  const presence = clamp(processor.facePresence, 0, 1)
+  const strength = clamp(processor.currentSmileAlpha, -2.5, 3.2) * presence
+  if ((!face || presence < 0.2 || Math.abs(strength) < 0.018) && !controlState.overlay) return
 
-  const regionWidth = width * 0.5
-  const regionHeight = height * 0.2
-  const regionX = (width - regionWidth) / 2
-  const regionY = height * 0.54
-  const step = Math.max(3, Math.round(width / 260))
-  const maxOffset = clamp(Math.abs(strength) * height * 0.035, 0, height * 0.1)
+  if (!face) return
+
+  const regionWidth = clamp(face.width * 0.62, width * 0.08, width * 0.44)
+  const regionHeight = clamp(face.height * 0.24, height * 0.045, height * 0.18)
+  const regionX = clamp(face.x + face.width * 0.5 - regionWidth / 2, 0, width - regionWidth)
+  const regionY = clamp(face.y + face.height * 0.56, 0, height - regionHeight)
+  const step = Math.max(2, Math.round(regionWidth / 80))
+  const maxOffset = clamp(Math.abs(strength) * face.height * 0.024, 0, face.height * 0.065)
   const direction = strength >= 0 ? -1 : 1
 
+  const patchWidth = Math.max(1, Math.round(regionWidth))
+  const patchHeight = Math.max(1, Math.round(regionHeight))
+  if (processor.warpCanvas.width !== patchWidth || processor.warpCanvas.height !== patchHeight) {
+    processor.warpCanvas.width = patchWidth
+    processor.warpCanvas.height = patchHeight
+  }
+
+  processor.warpCtx.clearRect(0, 0, patchWidth, patchHeight)
   for (let x = 0; x < regionWidth; x += step) {
     const normalizedX = (x / regionWidth - 0.5) * 2
-    const edgeWeight = Math.pow(Math.abs(normalizedX), 1.8)
-    const centerWeight = 1 - Math.abs(normalizedX)
-    const smileCurve = direction * maxOffset * edgeWeight + -direction * maxOffset * 0.18 * centerWeight
-    const sx = regionX + x
-    const sw = Math.min(step + 1, regionWidth - x)
-    processor.ctx.drawImage(
+    const cornerWeight = Math.pow(Math.abs(normalizedX), 1.9)
+    const centerWeight = Math.max(0, 1 - Math.abs(normalizedX))
+    const cheekBlend = Math.pow(Math.max(0, 1 - Math.abs(normalizedX) * 0.55), 2)
+    const smileCurve = direction * maxOffset * cornerWeight + -direction * maxOffset * 0.12 * centerWeight
+    const verticalFeather = 1 - Math.abs((x / regionWidth - 0.5) * 0.35)
+    const dy = smileCurve * verticalFeather
+    const sx = Math.round(regionX + x)
+    const sw = Math.max(1, Math.min(step + 1, patchWidth - Math.round(x)))
+    processor.warpCtx.globalAlpha = 0.68 + cheekBlend * 0.22
+    processor.warpCtx.drawImage(
       processor.rawVideo,
       sx,
       regionY,
       sw,
       regionHeight,
-      sx,
-      regionY + smileCurve,
+      Math.round(x),
+      dy,
       sw,
       regionHeight
     )
   }
+  processor.warpCtx.globalAlpha = 1
+  processor.warpCtx.save()
+  processor.warpCtx.globalCompositeOperation = 'destination-in'
+  processor.warpCtx.translate(patchWidth / 2, patchHeight / 2)
+  processor.warpCtx.scale(patchWidth / 2, patchHeight / 2)
+  const mask = processor.warpCtx.createRadialGradient(0, 0, 0.42, 0, 0, 1)
+  mask.addColorStop(0, 'rgba(255,255,255,1)')
+  mask.addColorStop(0.72, 'rgba(255,255,255,0.88)')
+  mask.addColorStop(1, 'rgba(255,255,255,0)')
+  processor.warpCtx.fillStyle = mask
+  processor.warpCtx.beginPath()
+  processor.warpCtx.arc(0, 0, 1, 0, Math.PI * 2)
+  processor.warpCtx.fill()
+  processor.warpCtx.restore()
+  processor.ctx.drawImage(processor.warpCanvas, regionX, regionY)
 
   if (controlState.overlay) {
     processor.ctx.save()
-    processor.ctx.strokeStyle = Math.abs(strength) > 0.02 ? '#22d3ee' : '#f59e0b'
+    processor.ctx.strokeStyle = presence > 0.2 ? '#2aff80' : '#ffb4ab'
     processor.ctx.lineWidth = Math.max(2, width / 360)
     processor.ctx.setLineDash([8, 6])
-    processor.ctx.strokeRect(regionX, regionY, regionWidth, regionHeight)
-    processor.ctx.fillStyle = 'rgba(2, 6, 23, 0.72)'
-    processor.ctx.fillRect(regionX, regionY - 28, Math.min(360, regionWidth), 24)
-    processor.ctx.fillStyle = '#bae6fd'
+    processor.ctx.strokeRect(face.x, face.y, face.width, face.height)
+    processor.ctx.beginPath()
+    processor.ctx.ellipse(regionX + regionWidth / 2, regionY + regionHeight / 2, regionWidth / 2, regionHeight / 2, 0, 0, Math.PI * 2)
+    processor.ctx.stroke()
+    processor.ctx.fillStyle = 'rgba(5, 8, 7, 0.78)'
+    processor.ctx.fillRect(face.x, Math.max(0, face.y - 30), Math.min(420, face.width + 56), 24)
+    processor.ctx.fillStyle = presence > 0.2 ? '#b8ffd0' : '#ffdad6'
     processor.ctx.font = `${Math.max(12, Math.round(width / 80))}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`
-    processor.ctx.fillText(`smile alpha ${controlState.smileAlpha.toFixed(2)}`, regionX + 8, regionY - 10)
+    processor.ctx.fillText(
+      `face ${face.source} ${(presence * 100).toFixed(0)}% · smile alpha ${controlState.smileAlpha.toFixed(2)}`,
+      face.x + 8,
+      Math.max(16, face.y - 12)
+    )
     processor.ctx.restore()
   }
 }
@@ -1005,6 +1238,11 @@ export default function App(): ReactElement {
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')
     if (!ctx) throw new Error('Could not create live video processor.')
+    const warpCanvas = document.createElement('canvas')
+    const warpCtx = warpCanvas.getContext('2d')
+    const detectorCanvas = document.createElement('canvas')
+    const detectorCtx = detectorCanvas.getContext('2d', { willReadFrequently: true })
+    if (!warpCtx || !detectorCtx) throw new Error('Could not create face tracking processor.')
 
     const processedStream = new MediaStream()
     const canvasStream = canvas.captureStream(30)
@@ -1016,8 +1254,16 @@ export default function App(): ReactElement {
       rawVideo,
       canvas,
       ctx,
+      warpCanvas,
+      warpCtx,
+      detectorCanvas,
+      detectorCtx,
       animationId: 0,
-      currentSmileAlpha: 0
+      currentSmileAlpha: 0,
+      faceDetector: makeFaceDetector(),
+      facePresence: 0,
+      detectingFace: false,
+      lastFaceDetectionAt: 0
     }
 
     const audioTracks = rawStream.getAudioTracks()
