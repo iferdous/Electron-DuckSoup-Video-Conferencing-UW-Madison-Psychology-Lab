@@ -2402,8 +2402,8 @@ function WelcomeScreen({ onStart }: { onStart: () => void }): ReactElement {
 
     const draw = (time: number): void => {
       const pointer = pointerRef.current
-      pointer.x += (pointer.targetX - pointer.x) * 0.13
-      pointer.y += (pointer.targetY - pointer.y) * 0.13
+      pointer.x += (pointer.targetX - pointer.x) * 0.34
+      pointer.y += (pointer.targetY - pointer.y) * 0.34
 
       ctx.clearRect(0, 0, width, height)
       const gradient = ctx.createRadialGradient(width * 0.5, height * 0.42, 0, width * 0.5, height * 0.42, width * 0.72)
@@ -2413,17 +2413,17 @@ function WelcomeScreen({ onStart }: { onStart: () => void }): ReactElement {
       ctx.fillStyle = gradient
       ctx.fillRect(0, 0, width, height)
 
-      const spacing = 20
+      const spacing = 18
       const pulse = Math.sin(time / 900) * 0.18 + 0.82
       for (let y = 16; y < height; y += spacing) {
         for (let x = 16; x < width; x += spacing) {
           const dx = x - pointer.x
           const dy = y - pointer.y
           const distance = Math.sqrt(dx * dx + dy * dy)
-          const influence = Math.max(0, 1 - distance / 190)
+          const influence = Math.max(0, 1 - distance / 230)
           const wave = Math.sin((x + y + time * 0.035) * 0.045) * 0.12
           const alpha = 0.12 + influence * 0.72 + wave * 0.05
-          const radius = 1 + influence * 2.35
+          const radius = 0.9 + influence * 2.65
           ctx.beginPath()
           ctx.fillStyle = `rgba(79, 219, 200, ${Math.min(0.88, alpha * pulse)})`
           ctx.shadowBlur = influence * 18
@@ -2467,7 +2467,6 @@ function WelcomeScreen({ onStart }: { onStart: () => void }): ReactElement {
       <canvas ref={canvasRef} className="welcome-dots" aria-hidden="true" />
       <section className="welcome-frame">
         <div className="welcome-content">
-          <div className="welcome-eyebrow">Affective Intelligence Portal</div>
           <h1>
             <span>Niedenthal</span>
             <em>Emotions Lab</em>

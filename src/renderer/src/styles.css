@@ -181,7 +181,7 @@ label {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  padding: 34px;
+  padding: 44px;
 }
 
 .welcome-dots {
@@ -195,22 +195,22 @@ label {
 .welcome-frame {
   position: relative;
   z-index: 1;
-  width: min(1180px, 100%);
-  min-height: min(860px, calc(100vh - 68px));
-  border: 1px solid rgb(79 219 200 / 0.22);
-  border-radius: 22px;
+  width: min(960px, 100%);
+  min-height: min(660px, calc(100vh - 88px));
+  border: 1px solid rgb(79 219 200 / 0.18);
+  border-radius: 18px;
   background:
-    radial-gradient(circle at 12% 16%, rgb(42 255 128 / 0.1), transparent 28%),
-    radial-gradient(circle at 50% 48%, rgb(79 219 200 / 0.08), transparent 34%),
-    rgb(1 8 13 / 0.64);
+    radial-gradient(circle at 22% 22%, rgb(42 255 128 / 0.09), transparent 32%),
+    radial-gradient(circle at 54% 48%, rgb(79 219 200 / 0.06), transparent 38%),
+    linear-gradient(145deg, rgb(2 18 16 / 0.78), rgb(1 8 13 / 0.7) 58%, rgb(2 8 12 / 0.82));
   box-shadow:
     inset 0 0 0 1px rgb(255 255 255 / 0.035),
-    0 28px 90px rgb(0 0 0 / 0.55);
+    0 22px 70px rgb(0 0 0 / 0.48);
   backdrop-filter: blur(2px);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 48px;
+  padding: 42px;
 }
 
 .welcome-frame::before {
@@ -228,26 +228,15 @@ label {
 .welcome-content {
   position: relative;
   z-index: 2;
-  max-width: 900px;
+  max-width: 760px;
   text-align: center;
   display: grid;
   justify-items: center;
 }
 
-.welcome-eyebrow {
-  color: #d7e6ef;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.72em;
-  margin-bottom: 42px;
-  opacity: 0.9;
-  text-transform: uppercase;
-}
-
 .welcome-content h1 {
   display: grid;
-  gap: 2px;
+  gap: 8px;
   margin: 0;
   line-height: 0.88;
   letter-spacing: -0.04em;
@@ -255,7 +244,7 @@ label {
 
 .welcome-content h1 span {
   color: #e9f3ff;
-  font-size: clamp(76px, 9.8vw, 136px);
+  font-size: clamp(58px, 7.4vw, 96px);
   font-weight: 950;
   text-shadow:
     0 2px 0 rgb(0 0 0 / 0.5),
@@ -264,7 +253,7 @@ label {
 
 .welcome-content h1 em {
   color: #2aff80;
-  font-size: clamp(70px, 9.4vw, 124px);
+  font-size: clamp(54px, 7vw, 88px);
   font-style: italic;
   font-weight: 550;
   text-shadow:
@@ -275,13 +264,13 @@ label {
 .welcome-content p {
   color: rgb(212 228 250 / 0.68);
   font-size: 16px;
-  margin: 44px 0 0;
-  max-width: 680px;
+  margin: 34px 0 0;
+  max-width: 640px;
 }
 
 .welcome-start {
-  min-width: 260px;
-  min-height: 64px;
+  min-width: 238px;
+  min-height: 58px;
   border: 1px solid rgb(42 255 128 / 0.8);
   border-radius: 999px;
   background: linear-gradient(135deg, #2aff80, #17d875);
@@ -292,7 +281,7 @@ label {
   font-size: 12px;
   font-weight: 950;
   letter-spacing: 0.08em;
-  margin-top: 190px;
+  margin-top: 128px;
   padding: 0 30px;
   text-transform: uppercase;
 }
