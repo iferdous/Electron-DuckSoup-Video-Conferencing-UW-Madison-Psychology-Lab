@@ -656,6 +656,7 @@ export default function App(): ReactElement {
   const alteredChunksRef = useRef<Blob[]>([])
 
   const [setupComplete, setSetupComplete] = useState(false)
+  const [welcomeComplete, setWelcomeComplete] = useState(false)
   const [callState, setCallState] = useState<CallState>('idle')
   const [callPeers, setCallPeers] = useState<CallPeer[]>([])
   const [remoteTiles, setRemoteTiles] = useState<RemoteTile[]>([])
@@ -1656,6 +1657,10 @@ export default function App(): ReactElement {
     setSetupComplete(true)
   }
 
+  if (!welcomeComplete) {
+    return <WelcomeScreen onStart={() => setWelcomeComplete(true)} />
+  }
+
   if (!setupComplete) {
     if (experimenterLoginOpen && !isController) {
       return (
@@ -2368,6 +2373,113 @@ function RemoteVideoCard({ tile, volume }: { tile: RemoteTile; volume: number })
       <video ref={videoRef} data-remote-call-video="true" autoPlay playsInline className="video-surface" />
       {tile.stream.getTracks().length === 0 && <div className="video-empty">Connected, waiting for video/audio.</div>}
     </div>
+  )
+}
+
+function WelcomeScreen({ onStart }: { onStart: () => void }): ReactElement {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const pointerRef = useRef({ x: -9999, y: -9999, targetX: -9999, targetY: -9999 })
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext('2d')
+    if (!canvas || !ctx) return undefined
+
+    let animationId = 0
+    let width = 0
+    let height = 0
+    let pixelRatio = 1
+
+    const resize = (): void => {
+      const rect = canvas.getBoundingClientRect()
+      pixelRatio = Math.min(window.devicePixelRatio || 1, 2)
+      width = rect.width
+      height = rect.height
+      canvas.width = Math.max(1, Math.floor(width * pixelRatio))
+      canvas.height = Math.max(1, Math.floor(height * pixelRatio))
+      ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+    }
+
+    const draw = (time: number): void => {
+      const pointer = pointerRef.current
+      pointer.x += (pointer.targetX - pointer.x) * 0.13
+      pointer.y += (pointer.targetY - pointer.y) * 0.13
+
+      ctx.clearRect(0, 0, width, height)
+      const gradient = ctx.createRadialGradient(width * 0.5, height * 0.42, 0, width * 0.5, height * 0.42, width * 0.72)
+      gradient.addColorStop(0, 'rgba(31, 190, 126, 0.16)')
+      gradient.addColorStop(0.45, 'rgba(6, 28, 24, 0.22)')
+      gradient.addColorStop(1, 'rgba(0, 0, 0, 0)')
+      ctx.fillStyle = gradient
+      ctx.fillRect(0, 0, width, height)
+
+      const spacing = 20
+      const pulse = Math.sin(time / 900) * 0.18 + 0.82
+      for (let y = 16; y < height; y += spacing) {
+        for (let x = 16; x < width; x += spacing) {
+          const dx = x - pointer.x
+          const dy = y - pointer.y
+          const distance = Math.sqrt(dx * dx + dy * dy)
+          const influence = Math.max(0, 1 - distance / 190)
+          const wave = Math.sin((x + y + time * 0.035) * 0.045) * 0.12
+          const alpha = 0.12 + influence * 0.72 + wave * 0.05
+          const radius = 1 + influence * 2.35
+          ctx.beginPath()
+          ctx.fillStyle = `rgba(79, 219, 200, ${Math.min(0.88, alpha * pulse)})`
+          ctx.shadowBlur = influence * 18
+          ctx.shadowColor = 'rgba(42, 255, 128, 0.8)'
+          ctx.arc(x, y, radius, 0, Math.PI * 2)
+          ctx.fill()
+        }
+      }
+
+      ctx.shadowBlur = 0
+      animationId = window.requestAnimationFrame(draw)
+    }
+
+    const updatePointer = (event: PointerEvent): void => {
+      const rect = canvas.getBoundingClientRect()
+      pointerRef.current.targetX = event.clientX - rect.left
+      pointerRef.current.targetY = event.clientY - rect.top
+    }
+
+    const clearPointer = (): void => {
+      pointerRef.current.targetX = -9999
+      pointerRef.current.targetY = -9999
+    }
+
+    resize()
+    window.addEventListener('resize', resize)
+    window.addEventListener('pointermove', updatePointer)
+    window.addEventListener('pointerleave', clearPointer)
+    animationId = window.requestAnimationFrame(draw)
+
+    return () => {
+      window.cancelAnimationFrame(animationId)
+      window.removeEventListener('resize', resize)
+      window.removeEventListener('pointermove', updatePointer)
+      window.removeEventListener('pointerleave', clearPointer)
+    }
+  }, [])
+
+  return (
+    <main className="welcome-shell">
+      <canvas ref={canvasRef} className="welcome-dots" aria-hidden="true" />
+      <section className="welcome-frame">
+        <div className="welcome-content">
+          <div className="welcome-eyebrow">Affective Intelligence Portal</div>
+          <h1>
+            <span>Niedenthal</span>
+            <em>Emotions Lab</em>
+          </h1>
+          <p>Live emotion study sessions for research observation, recording, and participant connection.</p>
+          <button className="welcome-start" onClick={onStart}>
+            Initialize Session
+            <span aria-hidden="true">›</span>
+          </button>
+        </div>
+      </section>
+    </main>
   )
 }
 

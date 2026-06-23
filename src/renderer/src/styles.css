@@ -170,6 +170,145 @@ label {
   text-transform: uppercase;
 }
 
+.welcome-shell {
+  position: relative;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 50% 45%, rgb(0 83 50 / 0.28), transparent 42%),
+    linear-gradient(135deg, #01070d 0%, #06131f 44%, #020407 100%);
+  color: #e8f4ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 34px;
+}
+
+.welcome-dots {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+}
+
+.welcome-frame {
+  position: relative;
+  z-index: 1;
+  width: min(1180px, 100%);
+  min-height: min(860px, calc(100vh - 68px));
+  border: 1px solid rgb(79 219 200 / 0.22);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 12% 16%, rgb(42 255 128 / 0.1), transparent 28%),
+    radial-gradient(circle at 50% 48%, rgb(79 219 200 / 0.08), transparent 34%),
+    rgb(1 8 13 / 0.64);
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.035),
+    0 28px 90px rgb(0 0 0 / 0.55);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px;
+}
+
+.welcome-frame::before {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background:
+    linear-gradient(90deg, transparent, rgb(42 255 128 / 0.09), transparent),
+    linear-gradient(0deg, rgb(42 255 128 / 0.06), transparent 24%, transparent 76%, rgb(79 219 200 / 0.05));
+  content: '';
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.welcome-content {
+  position: relative;
+  z-index: 2;
+  max-width: 900px;
+  text-align: center;
+  display: grid;
+  justify-items: center;
+}
+
+.welcome-eyebrow {
+  color: #d7e6ef;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.72em;
+  margin-bottom: 42px;
+  opacity: 0.9;
+  text-transform: uppercase;
+}
+
+.welcome-content h1 {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  line-height: 0.88;
+  letter-spacing: -0.04em;
+}
+
+.welcome-content h1 span {
+  color: #e9f3ff;
+  font-size: clamp(76px, 9.8vw, 136px);
+  font-weight: 950;
+  text-shadow:
+    0 2px 0 rgb(0 0 0 / 0.5),
+    0 0 42px rgb(122 186 255 / 0.22);
+}
+
+.welcome-content h1 em {
+  color: #2aff80;
+  font-size: clamp(70px, 9.4vw, 124px);
+  font-style: italic;
+  font-weight: 550;
+  text-shadow:
+    0 0 14px rgb(42 255 128 / 0.45),
+    0 0 42px rgb(42 255 128 / 0.3);
+}
+
+.welcome-content p {
+  color: rgb(212 228 250 / 0.68);
+  font-size: 16px;
+  margin: 44px 0 0;
+  max-width: 680px;
+}
+
+.welcome-start {
+  min-width: 260px;
+  min-height: 64px;
+  border: 1px solid rgb(42 255 128 / 0.8);
+  border-radius: 999px;
+  background: linear-gradient(135deg, #2aff80, #17d875);
+  color: #003915;
+  box-shadow:
+    0 0 28px rgb(42 255 128 / 0.38),
+    inset 0 1px 0 rgb(255 255 255 / 0.26);
+  font-size: 12px;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  margin-top: 190px;
+  padding: 0 30px;
+  text-transform: uppercase;
+}
+
+.welcome-start:hover:not(:disabled) {
+  background: linear-gradient(135deg, #76ffaa, #2aff80);
+  border-color: #b8ffd0;
+  transform: translateY(-1px);
+}
+
+.welcome-start span {
+  font-size: 30px;
+  line-height: 1;
+  margin-top: -2px;
+}
+
 .app-shell {
   height: 100vh;
   display: flex;
