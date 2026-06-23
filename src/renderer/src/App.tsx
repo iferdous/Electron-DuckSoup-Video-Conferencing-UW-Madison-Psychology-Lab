@@ -1705,6 +1705,7 @@ export default function App(): ReactElement {
                     onKeyDown={(event) => {
                       if (event.key === 'Enter') submitExperimenterLogin()
                     }}
+                    placeholder="Enter your password"
                   />
                 </label>
 
