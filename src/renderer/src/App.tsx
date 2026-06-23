@@ -1680,7 +1680,6 @@ export default function App(): ReactElement {
               <div className="portal-login-card-header">
                 <div className="portal-icon">NEL</div>
                 <h2>Experimenter Portal</h2>
-                <p>Secure access required</p>
               </div>
 
               <div className="portal-login-form">
@@ -1706,14 +1705,8 @@ export default function App(): ReactElement {
                     onKeyDown={(event) => {
                       if (event.key === 'Enter') submitExperimenterLogin()
                     }}
-                    placeholder="admin"
                   />
                 </label>
-
-                <div className="system-status-card">
-                  <span className="status-dot status-connected" />
-                  <span>System status: online and secure</span>
-                </div>
 
                 {experimenterLoginError && <p className="login-error">{experimenterLoginError}</p>}
 
