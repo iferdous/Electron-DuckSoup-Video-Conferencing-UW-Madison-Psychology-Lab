@@ -389,13 +389,13 @@ const applySmileWarp = (
 
   if (controlState.overlay) {
     processor.ctx.save()
-    processor.ctx.strokeStyle = Math.abs(strength) > 0.02 ? '#22d3ee' : '#f59e0b'
+    processor.ctx.strokeStyle = Math.abs(strength) > 0.02 ? '#60a5fa' : '#fbbf24'
     processor.ctx.lineWidth = Math.max(2, width / 360)
     processor.ctx.setLineDash([8, 6])
     processor.ctx.strokeRect(regionX, regionY, regionWidth, regionHeight)
     processor.ctx.fillStyle = 'rgba(2, 6, 23, 0.72)'
     processor.ctx.fillRect(regionX, regionY - 28, Math.min(360, regionWidth), 24)
-    processor.ctx.fillStyle = '#bae6fd'
+    processor.ctx.fillStyle = '#dbeafe'
     processor.ctx.font = `${Math.max(12, Math.round(width / 80))}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`
     processor.ctx.fillText(`smile alpha ${controlState.smileAlpha.toFixed(2)}`, regionX + 8, regionY - 10)
     processor.ctx.restore()
@@ -2173,8 +2173,8 @@ function WelcomeScreen({ onStart }: { onStart: () => void }): ReactElement {
 
       ctx.clearRect(0, 0, width, height)
       const gradient = ctx.createRadialGradient(width * 0.5, height * 0.42, 0, width * 0.5, height * 0.42, width * 0.72)
-      gradient.addColorStop(0, 'rgba(31, 190, 126, 0.16)')
-      gradient.addColorStop(0.45, 'rgba(6, 28, 24, 0.22)')
+      gradient.addColorStop(0, 'rgba(96, 165, 250, 0.12)')
+      gradient.addColorStop(0.45, 'rgba(17, 24, 39, 0.24)')
       gradient.addColorStop(1, 'rgba(0, 0, 0, 0)')
       ctx.fillStyle = gradient
       ctx.fillRect(0, 0, width, height)
@@ -2191,9 +2191,9 @@ function WelcomeScreen({ onStart }: { onStart: () => void }): ReactElement {
           const alpha = 0.12 + influence * 0.72 + wave * 0.05
           const radius = 0.9 + influence * 2.65
           ctx.beginPath()
-          ctx.fillStyle = `rgba(79, 219, 200, ${Math.min(0.88, alpha * pulse)})`
+          ctx.fillStyle = `rgba(96, 165, 250, ${Math.min(0.78, alpha * pulse)})`
           ctx.shadowBlur = influence * 18
-          ctx.shadowColor = 'rgba(42, 255, 128, 0.8)'
+          ctx.shadowColor = 'rgba(96, 165, 250, 0.58)'
           ctx.arc(x, y, radius, 0, Math.PI * 2)
           ctx.fill()
         }
