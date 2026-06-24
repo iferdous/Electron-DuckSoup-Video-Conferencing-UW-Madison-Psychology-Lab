@@ -12,4 +12,8 @@ const result = spawnSync(command, ['electron-builder', 'install-app-deps'], {
   stdio: 'inherit'
 })
 
-process.exit(result.status ?? 1)
+if (result.status && result.status !== 0) {
+  console.warn('Electron native dependency install did not complete. Continuing because this app has no required native app deps.')
+}
+
+process.exit(0)
