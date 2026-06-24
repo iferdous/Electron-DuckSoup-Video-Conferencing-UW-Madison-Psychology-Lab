@@ -406,7 +406,7 @@ label {
 }
 
 .participant-workspace {
-  grid-template-columns: 320px minmax(520px, 1fr) 340px;
+  grid-template-columns: minmax(620px, 1fr) 340px;
 }
 
 .controller-workspace {
@@ -703,6 +703,44 @@ label {
   font-size: 12px;
   font-weight: 800;
   padding: 6px 10px;
+}
+
+.participant-workspace .center-stage {
+  padding: 18px;
+}
+
+.participant-workspace .controls {
+  background: var(--bg);
+  padding: 18px 18px 18px 0;
+}
+
+.participant-workspace .call-panel {
+  min-height: calc(100vh - 100px);
+}
+
+.participant-workspace .chat-panel {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 100px);
+  margin-bottom: 0;
+}
+
+.participant-workspace .chat-list {
+  max-height: none;
+  min-height: 0;
+  flex: 1;
+}
+
+.participant-workspace .conference-grid {
+  min-height: calc(100vh - 168px);
+}
+
+.participant-workspace .video-panel {
+  min-height: 520px;
+}
+
+.participant-workspace .video-surface {
+  min-height: 520px;
 }
 
 .button-row.no-margin {

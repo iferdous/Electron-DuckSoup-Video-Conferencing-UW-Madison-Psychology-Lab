@@ -460,6 +460,15 @@ export default function App(): ReactElement {
     [activeRoomPeers, isController]
   )
   const simpleLatencyMs = latency.rttMs ?? latency.videoRttMs ?? latency.audioRttMs
+  const roomStatusText = isController
+    ? `${sessionLabels[form.sessionFormat]} room · Experimenter · ${callState}`
+    : callState === 'connected'
+      ? 'Connected'
+      : callState === 'idle'
+        ? 'Ready to join'
+        : callState === 'error'
+          ? 'Connection issue'
+          : 'Connecting'
   const sessionLink = useMemo(() => {
     let url: URL
     try {
@@ -1754,7 +1763,7 @@ export default function App(): ReactElement {
           <h1>{appTitle}</h1>
           <div className="inline-status">
             <span className={`status-dot status-${callState === 'connected' ? 'connected' : callState === 'error' ? 'error' : callState === 'idle' ? 'idle' : 'connecting'}`} />
-            {sessionLabels[form.sessionFormat]} room · {roleLabel(form.role)} · {callState}
+            {roomStatusText}
           </div>
         </div>
         <div className="topbar-actions">
@@ -1778,7 +1787,8 @@ export default function App(): ReactElement {
       </header>
 
       <main className={isController ? 'workspace controller-workspace' : 'workspace participant-workspace'}>
-        <aside className="sidebar">
+        {isController && (
+          <aside className="sidebar">
           <section className="panel">
             <div className="section-title accent">Room</div>
             <div className="metric-list">
@@ -1876,7 +1886,8 @@ export default function App(): ReactElement {
               </div>
             </div>
           </section>
-        </aside>
+          </aside>
+        )}
 
         <section className="center-stage">
           <section className="panel call-panel">
@@ -1884,7 +1895,7 @@ export default function App(): ReactElement {
             <div className={`conference-grid tiles-${Math.min(remoteTiles.length + (isController ? 0 : 1), 4)}`}>
               {!isController && (
                 <div className="video-panel">
-                  <div className="video-label">Self view · {callDisplayName()}</div>
+                  <div className="video-label">Self view</div>
                   <video
                     ref={callLocalVideoRef}
                     autoPlay
@@ -1917,21 +1928,23 @@ export default function App(): ReactElement {
             </div>
           </section>
 
-          <section className="panel log-panel">
-            <div className="section-title">Event Log</div>
-            <div className="log-list">
-              {logs.length === 0 ? (
-                <p className="muted">No events yet. Join the room or check the server to start.</p>
-              ) : (
-                logs.map((log) => (
-                  <div key={log.id} className={`log-line ${log.level}`}>
-                    <span className="log-time">{log.timestamp}</span>
-                    <span className="log-message">{log.message}</span>
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
+          {isController && (
+            <section className="panel log-panel">
+              <div className="section-title">Event Log</div>
+              <div className="log-list">
+                {logs.length === 0 ? (
+                  <p className="muted">No events yet. Join the room or check the server to start.</p>
+                ) : (
+                  logs.map((log) => (
+                    <div key={log.id} className={`log-line ${log.level}`}>
+                      <span className="log-time">{log.timestamp}</span>
+                      <span className="log-message">{log.message}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+          )}
         </section>
 
         <aside className="controls">
@@ -2056,17 +2069,7 @@ export default function App(): ReactElement {
                 />
               </section>
             </>
-          ) : (
-            <section className="panel">
-              <div className="section-title accent">Participant View</div>
-              <p className="plain-text">
-                The experimenter manages the study settings. Keep this window open and use chat if anything is not working.
-              </p>
-              <button className="wide-button" onClick={() => setShowSelfView((prev) => !prev)}>
-                {showSelfView ? 'Hide self view' : 'Show self view'}
-              </button>
-            </section>
-          )}
+          ) : null}
 
           <ChatPanel
             messages={chatMessages}
@@ -2133,9 +2136,7 @@ function RemoteVideoCard({ tile, volume }: { tile: RemoteTile; volume: number })
 
   return (
     <div className="video-panel">
-      <div className="video-label">
-        {tile.displayName} · {roleLabel(tile.role)}
-      </div>
+      <div className="video-label">{tile.displayName}</div>
       <video ref={videoRef} data-remote-call-video="true" autoPlay playsInline className="video-surface" />
       {tile.stream.getTracks().length === 0 && <div className="video-empty">Connected, waiting for video/audio.</div>}
     </div>
