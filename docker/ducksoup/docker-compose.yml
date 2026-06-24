@@ -1,13 +1,25 @@
 services:
   ducksoup:
-    image: ducksouplab/ducksoup:arm_latest
+    image: ducksouplab/ducksoup:latest
     restart: unless-stopped
     env_file:
       - .env
     environment:
       - DUCKSOUP_PORT=8100
-      - DUCKSOUP_NVCODEC=false
-      - DUCKSOUP_NVCUDA=false
+      # GPU (NVENC + CUDA) hardware acceleration. Requires an NVIDIA GPU + the nvidia
+      # container runtime (the `deploy` block below). On a host WITHOUT an NVIDIA GPU,
+      # set both to false AND delete the `deploy:` block, or the container won't start.
+      - DUCKSOUP_NVCODEC=true
+      - DUCKSOUP_NVCUDA=true
+    # Pass the NVIDIA GPU into the container for hardware H.264 encoding (frees the CPU
+    # for dlib face detection -> much smoother/sharper Mozza output).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     volumes:
       - ./data:/app/data
       - ./log:/app/log

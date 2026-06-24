@@ -5,9 +5,14 @@ export type CallRole = 'participant' | 'controller'
 export type CallState = 'idle' | 'starting' | 'waiting' | 'connecting' | 'connected' | 'error'
 export type SessionFormat = 'dyad' | 'triad' | 'quad'
 
+// 'ducksoup' = live A/V + face/voice manipulation routed through the DuckSoup SFU + Mozza
+// (face-only smile warp). 'mesh' = the legacy custom WebRTC mesh + 2D canvas warp (fallback).
+export type MediaTransport = 'ducksoup' | 'mesh'
+
 export type SessionForm = {
   role: CallRole
   sessionFormat: SessionFormat
+  mediaTransport: MediaTransport
   serverName: string
   studyId: string
   raId: string

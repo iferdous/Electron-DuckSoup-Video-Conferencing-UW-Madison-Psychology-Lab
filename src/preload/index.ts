@@ -46,7 +46,13 @@ const researchApi = {
     ipcRenderer.invoke('start-call-signal-server', port),
   stopCallSignalServer: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('stop-call-signal-server'),
   checkCallSignalServer: (baseUrl: string): Promise<{ ok: boolean; status: number; detail: string }> =>
-    ipcRenderer.invoke('check-call-signal-server', baseUrl)
+    ipcRenderer.invoke('check-call-signal-server', baseUrl),
+  collectDuckSoupRecordings: (payload: {
+    destDir: string
+    namespace: string
+    interaction: string
+  }): Promise<{ copied: string[]; dataDir: string | null }> =>
+    ipcRenderer.invoke('collect-ducksoup-recordings', payload)
 }
 
 if (process.contextIsolated) {

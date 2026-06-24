@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import dgram, { type Socket } from 'node:dgram'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile, readdir, copyFile } from 'node:fs/promises'
 import http, { type Server, type ServerResponse } from 'node:http'
 import os from 'node:os'
 import { join, sanitize } from './path-utils'
@@ -678,6 +678,48 @@ app.whenReady().then(() => {
       }
     }
   })
+
+  // Best-effort copy of DuckSoup's server-side recordings (clean -dry + altered -wet) into
+  // the session output folder. Only works when the media server runs on this machine (the
+  // data volume is docker/ducksoup/data). When the server is remote, returns copied: [] and
+  // the caller keeps the server-side paths in the manifest.
+  ipcMain.handle(
+    'collect-ducksoup-recordings',
+    async (_, payload: { destDir: string; namespace: string; interaction: string }) => {
+      const candidateRoots = [
+        join(process.cwd(), 'docker', 'ducksoup', 'data'),
+        join(app.getAppPath(), 'docker', 'ducksoup', 'data')
+      ]
+      const copied: string[] = []
+      let dataDir: string | null = null
+
+      for (const root of candidateRoots) {
+        const recordingsDir = join(
+          root,
+          safeSegment(payload.namespace, 'default'),
+          safeSegment(payload.interaction, 'interaction'),
+          'recordings'
+        )
+        try {
+          const entries = await readdir(recordingsDir)
+          const media = entries.filter((name) => /\.(webm|mp4|mkv|ogg)$/i.test(name))
+          if (media.length === 0) continue
+          dataDir = recordingsDir
+          const destVideo = join(payload.destDir, 'video')
+          await mkdir(destVideo, { recursive: true })
+          for (const name of media) {
+            await copyFile(join(recordingsDir, name), join(destVideo, safeSegment(name, 'recording')))
+            copied.push(name)
+          }
+          break
+        } catch {
+          // try the next candidate root
+        }
+      }
+
+      return { copied, dataDir }
+    }
+  )
 
   ipcMain.handle('get-network-info', () => {
     return {
