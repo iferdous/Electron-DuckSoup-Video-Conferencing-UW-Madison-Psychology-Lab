@@ -1828,34 +1828,36 @@ export default function App(): ReactElement {
             </div>
           </section>
 
-          <section className="panel">
-            <div className="section-title">Recording</div>
-            <div className="button-row no-margin">
-              <button onClick={startRecording} disabled={recordingState !== 'idle' || isController} className="record">
-                Start recording
-              </button>
-              <button onClick={stopRecording} disabled={recordingState !== 'recording'} className="stop">
-                Stop
-              </button>
-            </div>
-            <div className="metric-list">
-              <div className="metric">
-                <span>Recording</span>
-                <strong>{recordingState === 'recording' ? `${recordingSeconds}s` : recordingState}</strong>
+          {isController && (
+            <section className="panel">
+              <div className="section-title">Recording</div>
+              <div className="button-row no-margin">
+                <button onClick={startRecording} disabled={recordingState !== 'idle' || isController} className="record">
+                  Start recording
+                </button>
+                <button onClick={stopRecording} disabled={recordingState !== 'recording'} className="stop">
+                  Stop
+                </button>
               </div>
-              <div className="metric">
-                <span>Events logged</span>
-                <strong>{controlEvents.length}</strong>
+              <div className="metric-list">
+                <div className="metric">
+                  <span>Recording</span>
+                  <strong>{recordingState === 'recording' ? `${recordingSeconds}s` : recordingState}</strong>
+                </div>
+                <div className="metric">
+                  <span>Events logged</span>
+                  <strong>{controlEvents.length}</strong>
+                </div>
+                <div className="metric">
+                  <span>Folder</span>
+                  <strong>{sessionDir || 'created when recording starts'}</strong>
+                </div>
               </div>
-              <div className="metric">
-                <span>Folder</span>
-                <strong>{sessionDir || 'created when recording starts'}</strong>
-              </div>
-            </div>
-            <p className="plain-text compact-copy">
-              Recordings stay as .webm. Each participant station saves its own clean video, altered video, session file, and control timing CSV.
-            </p>
-          </section>
+              <p className="plain-text compact-copy">
+                Recordings stay as .webm. Each participant station saves its own clean video, altered video, session file, and control timing CSV.
+              </p>
+            </section>
+          )}
 
           <section className="panel">
             <div className="section-title">Session Details</div>
