@@ -62,7 +62,16 @@ Participants should see each other after they join the same session link. The Ex
 
 ## Local Media / Effects Server
 
-Only start this when the local media/effects path is needed.
+The media/effects server (DuckSoup SFU + Mozza face-only smile warp) carries the live A/V and the
+face/voice manipulation. See `docs/DUCKSOUP_INTEGRATION.md` for the full picture.
+
+One-time, fetch the Mozza plugin + models (gitignored binaries) via Docker:
+
+```bash
+cd docker/ducksoup && bash fetch-mozza-plugins.sh
+```
+
+Then start it:
 
 ```bash
 npm run media:up

@@ -1,13 +1,15 @@
 services:
   ducksoup:
-    image: ducksouplab/ducksoup:arm_latest
+    image: ${DUCKSOUP_IMAGE:-ducksouplab/ducksoup:arm_latest}
     restart: unless-stopped
     env_file:
       - .env
     environment:
       - DUCKSOUP_PORT=8100
-      - DUCKSOUP_NVCODEC=false
-      - DUCKSOUP_NVCUDA=false
+      # CPU mode is the portable default for lab laptops and Apple Silicon Docker.
+      # NVIDIA hosts can override these values in .env or a local compose override.
+      - DUCKSOUP_NVCODEC=${DUCKSOUP_NVCODEC:-false}
+      - DUCKSOUP_NVCUDA=${DUCKSOUP_NVCUDA:-false}
     volumes:
       - ./data:/app/data
       - ./log:/app/log

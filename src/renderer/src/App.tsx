@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
+import {
+  renderDuckSoup,
+  applyMozzaControls,
+  buildMozzaVideoFx,
+  buildAudioFx,
+  MOZZA_AUDIO_FX_NAME,
+  type DuckSoupPlayer,
+  type DuckSoupCallbackMessage
+} from './ducksoup-client'
 import type {
   CallPeer,
   CallRole,
@@ -15,11 +24,16 @@ import type {
   SessionFormat
 } from './types'
 
+// DuckSoup interactions are capped server-side at 1200s (20 min). Lab conversations longer
+// than this must rejoin. Kept as a constant so it's easy to surface as a setting later.
+const DUCKSOUP_DURATION_SEC = 1200
+
 const hostedSignalUrl = 'https://nelf-call-signaling.onrender.com'
 
 const initialForm: SessionForm = {
   role: 'participant',
   sessionFormat: 'dyad',
+  mediaTransport: 'ducksoup',
   serverName: 'Emotions Lab Host',
   studyId: 'NELF2026',
   raId: '',
@@ -39,7 +53,9 @@ const initialControls: ManipulationControls = {
   smileAlpha: 1,
   faceThreshold: 0.15,
   landmarkBeta: 0.1,
-  smoothingCutoff: 5,
+  // Mozza One-Euro filter cutoff (fc): lower = smoother/less jitter when still (more lag).
+  // Default lowered from the jittery 5 toward the smoother end; fine-tune via the slider.
+  smoothingCutoff: 1,
   overlay: false,
   audioPreset: 'none',
   audioPitch: 1,
@@ -209,6 +225,10 @@ const parseSessionLink = (value: string): Partial<SessionForm> & { callSignalUrl
   if (studyId) parsed.studyId = studyId
   if (dyadId) parsed.dyadId = dyadId
   if (nextFormat && nextFormat in sessionCapacity) parsed.sessionFormat = nextFormat
+  const transport = url.searchParams.get('transport')
+  if (transport === 'ducksoup' || transport === 'mesh') parsed.mediaTransport = transport
+  const ds = url.searchParams.get('ds')?.trim()
+  if (ds) parsed.duckSoupUrl = ds
   return parsed
 }
 
@@ -421,6 +441,13 @@ export default function App(): ReactElement {
   const alteredRecorderRef = useRef<MediaRecorder | null>(null)
   const cleanChunksRef = useRef<Blob[]>([])
   const alteredChunksRef = useRef<Blob[]>([])
+  // DuckSoup (SFU + Mozza) media path
+  const duckSoupPlayerRef = useRef<DuckSoupPlayer | null>(null)
+  const duckSoupActiveRef = useRef(false)
+  const streamUserMapRef = useRef<Map<string, string>>(new Map())
+  const callPeersRef = useRef<CallPeer[]>([])
+  const duckSoupFilesRef = useRef<Record<string, string[]>>({})
+  const controlEventsRef = useRef<ControlEvent[]>([])
 
   const [setupComplete, setSetupComplete] = useState(false)
   const [welcomeComplete, setWelcomeComplete] = useState(false)
@@ -452,6 +479,7 @@ export default function App(): ReactElement {
   const [experimenterLoginError, setExperimenterLoginError] = useState('')
 
   const isController = form.role === 'controller'
+  const useDuckSoup = form.mediaTransport === 'ducksoup' && form.duckSoupUrl.trim().length > 0
   const expectedParticipants = sessionCapacity[form.sessionFormat]
   const participantPeers = useMemo(() => callPeers.filter((peer) => peer.role === 'participant'), [callPeers])
   const activeRoomPeers = callState === 'idle' || callState === 'error' ? roomPresence?.peers ?? [] : callPeers
@@ -479,9 +507,21 @@ export default function App(): ReactElement {
     url.searchParams.set('roomId', form.roomId)
     url.searchParams.set('studyId', form.studyId)
     url.searchParams.set('format', form.sessionFormat)
+    url.searchParams.set('transport', form.mediaTransport)
+    if (form.mediaTransport === 'ducksoup' && form.duckSoupUrl.trim()) {
+      url.searchParams.set('ds', form.duckSoupUrl.trim())
+    }
     if (form.dyadId.trim()) url.searchParams.set('dyadId', form.dyadId.trim())
     return url.toString()
-  }, [form.callSignalUrl, form.dyadId, form.roomId, form.sessionFormat, form.studyId])
+  }, [
+    form.callSignalUrl,
+    form.dyadId,
+    form.duckSoupUrl,
+    form.mediaTransport,
+    form.roomId,
+    form.sessionFormat,
+    form.studyId
+  ])
 
   const addLog = useCallback((message: string, level: LogEvent['level'] = 'info') => {
     setLogs((prev) =>
@@ -546,7 +586,38 @@ export default function App(): ReactElement {
       applyMediaElementVolume(video, controls.partnerVolume)
     }
     applyAudioControlsToProcessor(liveMediaProcessorRef.current, controls)
-  }, [controls])
+    // DuckSoup/Mozza path: push the face controls live onto this station's own pipeline.
+    // The transformed stream is what partners (and recordings) receive; self-view stays raw.
+    if (duckSoupPlayerRef.current && !isController) {
+      applyMozzaControls(duckSoupPlayerRef.current, {
+        smileAlpha: controls.smileAlpha,
+        faceThreshold: controls.faceThreshold,
+        landmarkBeta: controls.landmarkBeta,
+        smoothingCutoff: controls.smoothingCutoff
+      })
+      duckSoupPlayerRef.current.controlFx(MOZZA_AUDIO_FX_NAME, 'pitch', controls.audioPitch)
+    }
+  }, [controls, isController])
+
+  // Keep a ref of room presence fresh for DuckSoup callbacks, and refresh remote tile
+  // labels (DuckSoup gives us userIds; display names come from the Render presence list).
+  useEffect(() => {
+    controlEventsRef.current = controlEvents
+  }, [controlEvents])
+
+  useEffect(() => {
+    callPeersRef.current = callPeers
+    if (remoteStreamsRef.current.size === 0) return
+    let changed = false
+    for (const peer of callPeers) {
+      const tile = remoteStreamsRef.current.get(peer.userId)
+      if (tile && (tile.displayName !== peer.displayName || tile.role !== peer.role)) {
+        remoteStreamsRef.current.set(peer.userId, { ...tile, displayName: peer.displayName, role: peer.role })
+        changed = true
+      }
+    }
+    if (changed) syncRemoteTiles()
+  }, [callPeers])
 
   useEffect(() => {
     if (!['waiting', 'connecting', 'connected'].includes(callState)) return undefined
@@ -720,7 +791,7 @@ export default function App(): ReactElement {
         condition: form.condition,
         control,
         value,
-        appliedToDuckSoup: false,
+        appliedToDuckSoup: duckSoupActiveRef.current,
         notes
       }
       setControlEvents((prev) => [...prev, event])
@@ -880,6 +951,7 @@ export default function App(): ReactElement {
   }
 
   const maybeOfferToPeer = (peer: CallPeer): void => {
+    if (useDuckSoup) return // media flows through the DuckSoup SFU, not the legacy mesh
     if (peer.userId === callUserIdRef.current) return
     if (isController) {
       if (peer.role !== 'participant') return
@@ -954,6 +1026,7 @@ export default function App(): ReactElement {
       return
     }
 
+    if (useDuckSoup && envelope.type === 'signal') return // SFU handles WebRTC negotiation
     if (envelope.type !== 'signal' || !envelope.payload?.type || !envelope.payload.from) return
     if (envelope.payload.to && envelope.payload.to !== callUserIdRef.current) return
 
@@ -1084,6 +1157,207 @@ export default function App(): ReactElement {
     return processor
   }
 
+  const duckSoupNamespace = (): string => slugify(form.studyId, 'default')
+
+  // Write the session audit trail (manifest + ms-stamped control CSV) and best-effort copy
+  // the server-recorded clean (-dry) + altered (-wet) webm/mp4 files into the output folder.
+  const finalizeDuckSoupSession = useCallback(async (): Promise<void> => {
+    if (!recordingStartRef.current) return
+    recordingStartRef.current = null
+    setRecordingState('saving')
+    try {
+      const { sessionDir: createdDir } = await window.researchApi.createSessionDirectory(form)
+      setSessionDir(createdDir)
+      const namespace = duckSoupNamespace()
+      const interaction = form.roomId
+      let copied: string[] = []
+      try {
+        const result = await window.researchApi.collectDuckSoupRecordings({
+          destDir: createdDir,
+          namespace,
+          interaction
+        })
+        copied = result.copied
+        if (copied.length > 0) addLog(`Copied ${copied.length} server recording(s) into the session folder.`, 'success')
+        else addLog('Server recordings stay on the media server (data/' + namespace + '/' + interaction + '/recordings). Copy them manually if the server is on another computer.', 'info')
+      } catch {
+        addLog('Could not auto-copy server recordings. They remain in the media server data folder.', 'warn')
+      }
+
+      const manifest = {
+        savedAt: new Date().toISOString(),
+        transport: 'ducksoup',
+        session: form,
+        controlsAtEnd: controlsRef.current,
+        mediaServer: form.duckSoupUrl,
+        duckSoup: { namespace, interaction, recordingMode: 'reenc', serverFiles: duckSoupFilesRef.current, copiedFiles: copied },
+        notes: [
+          'Media + face/voice manipulation routed through DuckSoup (SFU) + Mozza (face-only smile warp).',
+          'Server records clean (-dry) and altered (-wet) streams per participant under data/<namespace>/<interaction>/recordings/.',
+          'manipulation_events.csv lists experimenter control changes with timestamps relative to recording start.'
+        ]
+      }
+      await Promise.all([
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'session_manifest.json',
+          contents: JSON.stringify(manifest, null, 2)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'manipulation_events.csv',
+          contents: controlEventsToCsv(controlEventsRef.current)
+        })
+      ])
+      addLog(`Saved session manifest + control log to ${createdDir}`, 'success')
+    } catch (error) {
+      addLog(error instanceof Error ? error.message : 'Could not finalize the session files.', 'error')
+    } finally {
+      setRecordingState('idle')
+    }
+  }, [addLog, form])
+
+  const handleDuckSoupEvent = useCallback(
+    (message: DuckSoupCallbackMessage): void => {
+      const { kind, payload } = message
+      switch (kind) {
+        case 'joined':
+          setCallState('connecting')
+          addLog('Connected to the media server. Waiting for the interaction to start.', 'info')
+          break
+        case 'local-stream': {
+          const stream = payload as MediaStream
+          cleanStreamRef.current = stream
+          callLocalStreamRef.current = stream
+          if (callLocalVideoRef.current) {
+            callLocalVideoRef.current.srcObject = stream
+            void callLocalVideoRef.current.play().catch(() => undefined)
+          }
+          addLog('Camera and mic started. Your self-view is unedited; partners see the manipulated stream.', 'success')
+          break
+        }
+        case 'other_joined': {
+          const info = (payload ?? {}) as { userId?: string; streamId?: string }
+          if (info.userId && info.streamId) streamUserMapRef.current.set(info.streamId, info.userId)
+          if (info.userId && !remoteStreamsRef.current.has(info.userId)) {
+            const meta = callPeersRef.current.find((peer) => peer.userId === info.userId)
+            remoteStreamsRef.current.set(info.userId, {
+              userId: info.userId,
+              displayName: meta?.displayName || info.userId,
+              role: meta?.role || 'participant',
+              stream: new MediaStream()
+            })
+            syncRemoteTiles()
+          }
+          addLog('Another participant connected to the media server.', 'success')
+          break
+        }
+        case 'track': {
+          const event = payload as RTCTrackEvent
+          const stream = event.streams[0]
+          const mappedUserId = stream ? streamUserMapRef.current.get(stream.id) : undefined
+          const userId = mappedUserId || `peer-${stream?.id ?? makeId()}`
+          let tile = remoteStreamsRef.current.get(userId)
+          if (!tile) {
+            const meta = callPeersRef.current.find((peer) => peer.userId === userId)
+            tile = {
+              userId,
+              displayName: meta?.displayName || userId,
+              role: meta?.role || 'participant',
+              stream: new MediaStream()
+            }
+            remoteStreamsRef.current.set(userId, tile)
+          }
+          if (!tile.stream.getTrackById(event.track.id)) tile.stream.addTrack(event.track)
+          syncRemoteTiles()
+          setCallState('connected')
+          break
+        }
+        case 'start':
+          setCallState('connected')
+          recordingStartRef.current = Date.now()
+          setRecordingSeconds(0)
+          setRecordingState('recording')
+          appendControlEvent('recording', 'start', 'DuckSoup server-side recording (clean -dry + altered -wet).')
+          addLog('Live interaction started. Server-side recording is running.', 'success')
+          if (duckSoupPlayerRef.current && !isController) {
+            applyMozzaControls(duckSoupPlayerRef.current, {
+              smileAlpha: controlsRef.current.smileAlpha,
+              faceThreshold: controlsRef.current.faceThreshold,
+              landmarkBeta: controlsRef.current.landmarkBeta,
+              smoothingCutoff: controlsRef.current.smoothingCutoff
+            })
+          }
+          break
+        case 'ending':
+          addLog('The session will end soon (media server duration limit).', 'warn')
+          break
+        case 'files':
+          duckSoupFilesRef.current = (payload ?? {}) as Record<string, string[]>
+          addLog('Server finished writing recordings.', 'success')
+          break
+        case 'end':
+          addLog('The media interaction ended.', 'info')
+          void finalizeDuckSoupSession()
+          setCallState('waiting')
+          break
+        case 'closed':
+          addLog('Media server connection closed.', 'warn')
+          break
+        default:
+          if (typeof kind === 'string' && kind.startsWith('error')) {
+            const detail =
+              kind === 'error-aborted'
+                ? 'Media interaction aborted: all participants must press Join within ~15 seconds of each other. Coordinate the join, then try again.'
+                : kind === 'error-full'
+                  ? 'The media interaction is already full for this session size.'
+                  : kind === 'error-duplicate'
+                    ? 'This station ID is already connected to the media server.'
+                    : `Media server error (${kind}).`
+            addLog(detail, 'error')
+            setCallState('error')
+          }
+      }
+    },
+    [addLog, appendControlEvent, finalizeDuckSoupSession, isController]
+  )
+
+  const startDuckSoupMedia = useCallback(async (): Promise<void> => {
+    const baseUrl = form.duckSoupUrl.trim()
+    streamUserMapRef.current.clear()
+    duckSoupFilesRef.current = {}
+    const controls = controlsRef.current
+    const player = await renderDuckSoup(
+      baseUrl,
+      { stats: false, callback: handleDuckSoupEvent },
+      {
+        interactionName: form.roomId,
+        userId: callUserIdRef.current,
+        duration: DUCKSOUP_DURATION_SEC,
+        size: expectedParticipants,
+        namespace: duckSoupNamespace(),
+        videoFormat: 'H264',
+        gpu: true, // use NVENC when the server has a GPU (DUCKSOUP_NVCODEC); falls back to x264 otherwise
+        recordingMode: 'reenc',
+        width: 640,
+        height: 480,
+        framerate: 25,
+        logLevel: 2,
+        videoFx: buildMozzaVideoFx({
+          smileAlpha: controls.smileAlpha,
+          faceThreshold: controls.faceThreshold,
+          landmarkBeta: controls.landmarkBeta,
+          smoothingCutoff: controls.smoothingCutoff,
+          overlay: controls.overlay
+        }),
+        audioFx: buildAudioFx(controls.audioPitch)
+      }
+    )
+    duckSoupPlayerRef.current = player
+    duckSoupActiveRef.current = true
+    addLog('Media routed through DuckSoup/Mozza (face-only smile warp).', 'success')
+  }, [addLog, expectedParticipants, form.duckSoupUrl, form.roomId, handleDuckSoupEvent])
+
   const joinLiveCall = async (): Promise<void> => {
     if (!form.callSignalUrl.trim() || !form.roomId.trim() || !callDisplayName().trim()) {
       addLog('Server URL, meeting ID, and display name are required before joining.', 'error')
@@ -1098,19 +1372,24 @@ export default function App(): ReactElement {
       }
 
       if (!isController) {
-        const rawStream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-          audio: true
-        })
-        const processor = await createLiveMediaProcessor(rawStream)
-        cleanStreamRef.current = rawStream
-        alteredStreamRef.current = processor.processedStream
-        callLocalStreamRef.current = processor.processedStream
-        if (callLocalVideoRef.current) {
-          callLocalVideoRef.current.srcObject = processor.processedStream
-          await callLocalVideoRef.current.play().catch(() => undefined)
+        if (useDuckSoup) {
+          // DuckSoup grabs the camera/mic itself and routes media through the SFU + Mozza.
+          await startDuckSoupMedia()
+        } else {
+          const rawStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+            audio: true
+          })
+          const processor = await createLiveMediaProcessor(rawStream)
+          cleanStreamRef.current = rawStream
+          alteredStreamRef.current = processor.processedStream
+          callLocalStreamRef.current = processor.processedStream
+          if (callLocalVideoRef.current) {
+            callLocalVideoRef.current.srcObject = processor.processedStream
+            await callLocalVideoRef.current.play().catch(() => undefined)
+          }
+          addLog('Camera and mic started. Experimenter settings now affect your outgoing stream.', 'success')
         }
-        addLog('Camera and mic started. Experimenter settings now affect your outgoing stream.', 'success')
       }
 
       const params = new URLSearchParams({
@@ -1154,6 +1433,20 @@ export default function App(): ReactElement {
   }
 
   const leaveLiveCall = (): void => {
+    if (duckSoupActiveRef.current) {
+      void finalizeDuckSoupSession()
+      if (duckSoupPlayerRef.current) {
+        try {
+          duckSoupPlayerRef.current.stop()
+        } catch {
+          // already stopped
+        }
+        duckSoupPlayerRef.current = null
+      }
+      duckSoupActiveRef.current = false
+      streamUserMapRef.current.clear()
+    }
+
     if (form.callSignalUrl.trim() && form.roomId.trim()) {
       fetch(`${signalBaseUrl()}/leave`, {
         method: 'POST',
@@ -1677,6 +1970,28 @@ export default function App(): ReactElement {
                       placeholder={hostedSignalUrl}
                     />
                   </label>
+                  {isController && (
+                    <>
+                      <label>
+                        Media server (DuckSoup/Mozza) URL
+                        <input
+                          value={form.duckSoupUrl}
+                          onChange={(event) => updateForm('duckSoupUrl', event.target.value)}
+                          placeholder="http://localhost:8100"
+                        />
+                      </label>
+                      <label className="toggle-row">
+                        <span>Face-only smile via DuckSoup/Mozza</span>
+                        <input
+                          type="checkbox"
+                          checked={form.mediaTransport === 'ducksoup'}
+                          onChange={(event) =>
+                            updateForm('mediaTransport', event.target.checked ? 'ducksoup' : 'mesh')
+                          }
+                        />
+                      </label>
+                    </>
+                  )}
                   {isController && isLocalSignalUrl(form.callSignalUrl) && (
                     <div className="button-row no-margin">
                       <button onClick={startSignalServer}>Start local server</button>
@@ -1841,31 +2156,59 @@ export default function App(): ReactElement {
           {isController && (
             <section className="panel">
               <div className="section-title">Recording</div>
-              <div className="button-row no-margin">
-                <button onClick={startRecording} disabled={recordingState !== 'idle' || isController} className="record">
-                  Start recording
-                </button>
-                <button onClick={stopRecording} disabled={recordingState !== 'recording'} className="stop">
-                  Stop
-                </button>
-              </div>
-              <div className="metric-list">
-                <div className="metric">
-                  <span>Recording</span>
-                  <strong>{recordingState === 'recording' ? `${recordingSeconds}s` : recordingState}</strong>
-                </div>
-                <div className="metric">
-                  <span>Events logged</span>
-                  <strong>{controlEvents.length}</strong>
-                </div>
-                <div className="metric">
-                  <span>Folder</span>
-                  <strong>{sessionDir || 'created when recording starts'}</strong>
-                </div>
-              </div>
-              <p className="plain-text compact-copy">
-                Recordings stay as .webm. Each participant station saves its own clean video, altered video, session file, and control timing CSV.
-              </p>
+              {useDuckSoup ? (
+                <>
+                  <p className="plain-text compact-copy">
+                    Recording runs automatically on the media server while the interaction is live. Each
+                    participant station is captured both clean (<code>-dry</code>) and altered
+                    (<code>-wet</code>). A session manifest and the control-timing CSV are written when a
+                    station leaves the room.
+                  </p>
+                  <div className="metric-list">
+                    <div className="metric">
+                      <span>Mode</span>
+                      <strong>DuckSoup server-side (reenc)</strong>
+                    </div>
+                    <div className="metric">
+                      <span>Events logged</span>
+                      <strong>{controlEvents.length}</strong>
+                    </div>
+                    <div className="metric">
+                      <span>Folder</span>
+                      <strong>{sessionDir || 'created when a station leaves'}</strong>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="button-row no-margin">
+                    <button onClick={startRecording} disabled={recordingState !== 'idle'} className="record">
+                      Start recording
+                    </button>
+                    <button onClick={stopRecording} disabled={recordingState !== 'recording'} className="stop">
+                      Stop
+                    </button>
+                  </div>
+                  <div className="metric-list">
+                    <div className="metric">
+                      <span>Recording</span>
+                      <strong>{recordingState === 'recording' ? `${recordingSeconds}s` : recordingState}</strong>
+                    </div>
+                    <div className="metric">
+                      <span>Events logged</span>
+                      <strong>{controlEvents.length}</strong>
+                    </div>
+                    <div className="metric">
+                      <span>Folder</span>
+                      <strong>{sessionDir || 'created when recording starts'}</strong>
+                    </div>
+                  </div>
+                  <p className="plain-text compact-copy">
+                    Legacy local recording (canvas path). Each participant station saves its own clean and
+                    altered video, session file, and control timing CSV.
+                  </p>
+                </>
+              )}
             </section>
           )}
 
