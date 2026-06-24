@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision'
-import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 import type {
   CallPeer,
   CallRole,
@@ -78,21 +76,14 @@ type FaceBox = {
   width: number
   height: number
   score: number
-  source: 'mediapipe' | 'fallback'
+  source: 'native' | 'fallback'
 }
 
-type MouthRegion = {
-  centerX: number
-  centerY: number
-  width: number
-  height: number
+type BrowserFaceDetector = {
+  detect: (source: CanvasImageSource) => Promise<Array<{ boundingBox: DOMRectReadOnly }>>
 }
 
-type TrackedFace = {
-  box: FaceBox
-  mouth: MouthRegion
-  landmarks?: NormalizedLandmark[]
-}
+type BrowserFaceDetectorConstructor = new (options?: { fastMode?: boolean; maxDetectedFaces?: number }) => BrowserFaceDetector
 
 type LiveMediaProcessor = {
   rawStream: MediaStream
@@ -106,10 +97,11 @@ type LiveMediaProcessor = {
   detectorCtx: CanvasRenderingContext2D
   animationId: number
   currentSmileAlpha: number
-  faceLandmarker?: FaceLandmarker
-  detectedFace?: TrackedFace
-  smoothedFace?: TrackedFace
+  faceDetector?: BrowserFaceDetector
+  detectedFaceBox?: FaceBox
+  smoothedFaceBox?: FaceBox
   facePresence: number
+  detectingFace: boolean
   lastFaceDetectionAt: number
   audioContext?: AudioContext
   audioDelay?: DelayNode
@@ -215,31 +207,6 @@ const slugify = (value: string, fallback: string): string => {
 const makeRoomId = (dyadId: string): string => `nelf-${slugify(dyadId, 'room')}-${Date.now().toString(36)}`
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value))
-
-const localAssetUrl = (path: string): string => new URL(path.replace(/^\/+/, ''), window.location.href).toString()
-
-let faceLandmarkerPromise: Promise<FaceLandmarker | null> | null = null
-
-const getFaceLandmarker = (): Promise<FaceLandmarker | null> => {
-  faceLandmarkerPromise ??= FilesetResolver.forVisionTasks(localAssetUrl('mediapipe/wasm/'))
-    .then((wasmFileset) =>
-      FaceLandmarker.createFromOptions(wasmFileset, {
-        baseOptions: {
-          modelAssetPath: localAssetUrl('mediapipe/models/face_landmarker.task'),
-          delegate: 'CPU'
-        },
-        runningMode: 'VIDEO',
-        numFaces: 1,
-        minFaceDetectionConfidence: 0.25,
-        minFacePresenceConfidence: 0.25,
-        minTrackingConfidence: 0.25,
-        outputFaceBlendshapes: false,
-        outputFacialTransformationMatrixes: false
-      })
-    )
-    .catch(() => null)
-  return faceLandmarkerPromise
-}
 
 const browserVolume = (value: number): number => clamp(Number.isFinite(value) ? value : 1, 0, 1)
 
@@ -404,6 +371,17 @@ const applyAudioControlsToProcessor = (
   processor.audioHighShelf?.gain.setTargetAtTime(brighterAmount * 14 - warmerAmount * 5, now, 0.05)
 }
 
+const makeFaceDetector = (): BrowserFaceDetector | undefined => {
+  const Detector = (window as typeof window & { FaceDetector?: BrowserFaceDetectorConstructor }).FaceDetector
+  if (!Detector) return undefined
+
+  try {
+    return new Detector({ fastMode: true, maxDetectedFaces: 1 })
+  } catch {
+    return undefined
+  }
+}
+
 const normalizeFaceBox = (
   box: { x: number; y: number; width: number; height: number },
   width: number,
@@ -416,70 +394,11 @@ const normalizeFaceBox = (
   const boxWidth = clamp(box.width, 0, width - x)
   const boxHeight = clamp(box.height, 0, height - y)
 
-  if (boxWidth < width * 0.08 || boxHeight < height * 0.1) return null
-  if (boxWidth > width * 0.95 || boxHeight > height * 0.95) return null
-  if (y > height * 0.78) return null
+  if (boxWidth < width * 0.1 || boxHeight < height * 0.12) return null
+  if (boxWidth > width * 0.92 || boxHeight > height * 0.92) return null
+  if (y > height * 0.72) return null
 
   return { x, y, width: boxWidth, height: boxHeight, score, source }
-}
-
-const landmarkPoint = (landmarks: NormalizedLandmark[], index: number, width: number, height: number): { x: number; y: number } => ({
-  x: landmarks[index].x * width,
-  y: landmarks[index].y * height
-})
-
-const extractLandmarkFace = (landmarks: NormalizedLandmark[], width: number, height: number): TrackedFace | null => {
-  if (landmarks.length < 292) return null
-
-  let minX = width
-  let minY = height
-  let maxX = 0
-  let maxY = 0
-  let validPoints = 0
-
-  for (const landmark of landmarks) {
-    if (!Number.isFinite(landmark.x) || !Number.isFinite(landmark.y)) continue
-    const x = landmark.x * width
-    const y = landmark.y * height
-    if (x < -width * 0.15 || x > width * 1.15 || y < -height * 0.15 || y > height * 1.15) continue
-    minX = Math.min(minX, x)
-    minY = Math.min(minY, y)
-    maxX = Math.max(maxX, x)
-    maxY = Math.max(maxY, y)
-    validPoints += 1
-  }
-
-  if (validPoints < 360) return null
-  const box = normalizeFaceBox(
-    {
-      x: minX,
-      y: minY,
-      width: maxX - minX,
-      height: maxY - minY
-    },
-    width,
-    height,
-    1,
-    'mediapipe'
-  )
-  if (!box) return null
-
-  const leftCorner = landmarkPoint(landmarks, 61, width, height)
-  const rightCorner = landmarkPoint(landmarks, 291, width, height)
-  const upperLip = landmarkPoint(landmarks, 13, width, height)
-  const lowerLip = landmarkPoint(landmarks, 14, width, height)
-  const mouthWidth = Math.hypot(rightCorner.x - leftCorner.x, rightCorner.y - leftCorner.y)
-  const mouthHeight = Math.max(1, Math.hypot(lowerLip.x - upperLip.x, lowerLip.y - upperLip.y))
-  if (mouthWidth < box.width * 0.16 || mouthWidth > box.width * 0.72) return null
-
-  const mouth: MouthRegion = {
-    centerX: (leftCorner.x + rightCorner.x + upperLip.x + lowerLip.x) / 4,
-    centerY: (upperLip.y + lowerLip.y) / 2 + box.height * 0.018,
-    width: mouthWidth,
-    height: mouthHeight
-  }
-
-  return { box, mouth, landmarks }
 }
 
 const isLikelySkinPixel = (r: number, g: number, b: number): boolean => {
@@ -499,17 +418,7 @@ const isLikelySkinPixel = (r: number, g: number, b: number): boolean => {
   return chromaSkin && rgbSkin
 }
 
-const fallbackTrackedFace = (box: FaceBox): TrackedFace => ({
-  box,
-  mouth: {
-    centerX: box.x + box.width * 0.5,
-    centerY: box.y + box.height * 0.66,
-    width: box.width * 0.34,
-    height: box.height * 0.055
-  }
-})
-
-const detectFaceFallback = (processor: LiveMediaProcessor, width: number, height: number): TrackedFace | null => {
+const detectFaceFallback = (processor: LiveMediaProcessor, width: number, height: number): FaceBox | null => {
   const sampleWidth = 160
   const sampleHeight = Math.max(90, Math.round(sampleWidth * (height / width)))
   if (processor.detectorCanvas.width !== sampleWidth || processor.detectorCanvas.height !== sampleHeight) {
@@ -520,7 +429,7 @@ const detectFaceFallback = (processor: LiveMediaProcessor, width: number, height
   processor.detectorCtx.drawImage(processor.rawVideo, 0, 0, sampleWidth, sampleHeight)
   const data = processor.detectorCtx.getImageData(0, 0, sampleWidth, sampleHeight).data
   const cropTop = Math.round(sampleHeight * 0.04)
-  const cropBottom = Math.round(sampleHeight * 0.78)
+  const cropBottom = Math.round(sampleHeight * 0.84)
   let minX = sampleWidth
   let minY = sampleHeight
   let maxX = 0
@@ -532,8 +441,8 @@ const detectFaceFallback = (processor: LiveMediaProcessor, width: number, height
       const index = (y * sampleWidth + x) * 4
       if (!isLikelySkinPixel(data[index], data[index + 1], data[index + 2])) continue
 
-      const centerWeight = 1 - Math.min(1, Math.abs(x / sampleWidth - 0.5) * 1.4)
-      if (centerWeight < 0.25) continue
+      const centerWeight = 1 - Math.min(1, Math.abs(x / sampleWidth - 0.5) * 1.25)
+      if (centerWeight < 0.2) continue
 
       skinCount += 1
       minX = Math.min(minX, x)
@@ -545,7 +454,7 @@ const detectFaceFallback = (processor: LiveMediaProcessor, width: number, height
 
   const skinArea = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1))
   const density = skinCount / skinArea
-  if (skinCount < sampleWidth * sampleHeight * 0.018 || density < 0.18) return null
+  if (skinCount < sampleWidth * sampleHeight * 0.012 || density < 0.12) return null
 
   const scaleX = width / sampleWidth
   const scaleY = height / sampleHeight
@@ -553,11 +462,12 @@ const detectFaceFallback = (processor: LiveMediaProcessor, width: number, height
   const rawY = minY * scaleY
   const rawWidth = (maxX - minX + 1) * scaleX
   const rawHeight = (maxY - minY + 1) * scaleY
-  const expandedWidth = rawWidth * 1.24
-  const expandedHeight = Math.max(rawHeight * 1.42, expandedWidth * 1.02)
+  const expandedWidth = rawWidth * 1.34
+  const expandedHeight = Math.max(rawHeight * 1.55, expandedWidth * 1.08)
   const expandedX = rawX + rawWidth / 2 - expandedWidth / 2
-  const expandedY = rawY + rawHeight / 2 - expandedHeight * 0.45
-  const box = normalizeFaceBox(
+  const expandedY = rawY + rawHeight / 2 - expandedHeight * 0.46
+
+  return normalizeFaceBox(
     {
       x: expandedX,
       y: expandedY,
@@ -569,63 +479,61 @@ const detectFaceFallback = (processor: LiveMediaProcessor, width: number, height
     clamp(density, 0, 1),
     'fallback'
   )
-  return box ? fallbackTrackedFace(box) : null
 }
 
-const smoothTrackedFace = (current: TrackedFace | undefined, next: TrackedFace, beta: number): TrackedFace => {
+const smoothFaceBox = (current: FaceBox | undefined, next: FaceBox, beta: number): FaceBox => {
   if (!current) return next
-  const amount = clamp(0.2 + beta * 0.55, 0.2, 0.68)
+  const amount = clamp(0.12 + beta * 0.5, 0.12, 0.55)
   return {
     ...next,
-    box: {
-      ...next.box,
-      x: current.box.x + (next.box.x - current.box.x) * amount,
-      y: current.box.y + (next.box.y - current.box.y) * amount,
-      width: current.box.width + (next.box.width - current.box.width) * amount,
-      height: current.box.height + (next.box.height - current.box.height) * amount,
-      score: current.box.score + (next.box.score - current.box.score) * amount
-    },
-    mouth: {
-      centerX: current.mouth.centerX + (next.mouth.centerX - current.mouth.centerX) * amount,
-      centerY: current.mouth.centerY + (next.mouth.centerY - current.mouth.centerY) * amount,
-      width: current.mouth.width + (next.mouth.width - current.mouth.width) * amount,
-      height: current.mouth.height + (next.mouth.height - current.mouth.height) * amount
-    }
+    x: current.x + (next.x - current.x) * amount,
+    y: current.y + (next.y - current.y) * amount,
+    width: current.width + (next.width - current.width) * amount,
+    height: current.height + (next.height - current.height) * amount,
+    score: current.score + (next.score - current.score) * amount
   }
 }
 
 const updateFaceTracking = (processor: LiveMediaProcessor, width: number, height: number, controlState: ManipulationControls): void => {
   const now = performance.now()
-  const interval = Math.round(33 + controlState.faceThreshold * 55)
+  const interval = Math.round(90 + controlState.faceThreshold * 130)
 
-  if (now - processor.lastFaceDetectionAt > interval) {
+  if (!processor.detectingFace && now - processor.lastFaceDetectionAt > interval) {
+    processor.detectingFace = true
     processor.lastFaceDetectionAt = now
-    let face: TrackedFace | null = null
 
-    if (processor.faceLandmarker) {
-      try {
-        const result = processor.faceLandmarker.detectForVideo(processor.rawVideo, now)
-        face = result.faceLandmarks[0] ? extractLandmarkFace(result.faceLandmarks[0], width, height) : null
-      } catch {
-        face = null
+    const finish = (face: FaceBox | null): void => {
+      if (face && face.score >= 0.08 + controlState.faceThreshold * 0.12) {
+        processor.detectedFaceBox = face
+        processor.smoothedFaceBox = smoothFaceBox(processor.smoothedFaceBox, face, controlState.landmarkBeta)
+        processor.facePresence += (1 - processor.facePresence) * 0.32
+      } else {
+        processor.detectedFaceBox = undefined
       }
-    } else {
-      face = detectFaceFallback(processor, width, height)
+      processor.detectingFace = false
     }
 
-    if (face && face.box.score >= 0.06 + controlState.faceThreshold * 0.08) {
-      processor.detectedFace = face
-      processor.smoothedFace = smoothTrackedFace(processor.smoothedFace, face, controlState.landmarkBeta)
-      processor.facePresence += (1 - processor.facePresence) * 0.48
+    if (processor.faceDetector) {
+      processor.faceDetector
+        .detect(processor.rawVideo)
+        .then((faces) => {
+          const face = faces
+            .map((item) => item.boundingBox)
+            .map((box) => normalizeFaceBox(box, width, height, 1, 'native'))
+            .filter((item): item is FaceBox => item !== null)
+            .sort((a, b) => b.width * b.height - a.width * a.height)[0]
+          finish(face ?? detectFaceFallback(processor, width, height))
+        })
+        .catch(() => finish(detectFaceFallback(processor, width, height)))
     } else {
-      processor.detectedFace = undefined
+      finish(detectFaceFallback(processor, width, height))
     }
   }
 
-  if (!processor.detectedFace) {
-    processor.facePresence += (0 - processor.facePresence) * 0.28
+  if (!processor.detectedFaceBox) {
+    processor.facePresence += (0 - processor.facePresence) * 0.22
     if (processor.facePresence < 0.04) {
-      processor.smoothedFace = undefined
+      processor.smoothedFaceBox = undefined
       processor.currentSmileAlpha += (0 - processor.currentSmileAlpha) * 0.24
     }
   }
@@ -643,21 +551,19 @@ const applySmileWarp = (
   const smoothing = clamp(0.03 + controlState.landmarkBeta * 0.25 + controlState.smoothingCutoff / 80, 0.03, 0.45)
   processor.currentSmileAlpha += (targetAlpha - processor.currentSmileAlpha) * smoothing
 
-  const trackedFace = processor.smoothedFace
+  const face = processor.smoothedFaceBox
   const presence = clamp(processor.facePresence, 0, 1)
   const strength = clamp(processor.currentSmileAlpha, -2.5, 3.2) * presence
-  if ((!trackedFace || presence < 0.2 || Math.abs(strength) < 0.018) && !controlState.overlay) return
+  if ((!face || presence < 0.2 || Math.abs(strength) < 0.018) && !controlState.overlay) return
 
-  if (!trackedFace) return
+  if (!face) return
 
-  const face = trackedFace.box
-  const mouth = trackedFace.mouth
-  const regionWidth = clamp(Math.max(mouth.width * 2.25, face.width * 0.32), width * 0.08, face.width * 0.74)
-  const regionHeight = clamp(Math.max(mouth.width * 0.78, face.height * 0.18), height * 0.045, face.height * 0.34)
-  const regionX = clamp(mouth.centerX - regionWidth / 2, face.x + face.width * 0.06, face.x + face.width * 0.94 - regionWidth)
-  const regionY = clamp(mouth.centerY - regionHeight * 0.52, face.y + face.height * 0.42, face.y + face.height * 0.92 - regionHeight)
+  const regionWidth = clamp(face.width * 0.62, width * 0.08, width * 0.44)
+  const regionHeight = clamp(face.height * 0.24, height * 0.045, height * 0.18)
+  const regionX = clamp(face.x + face.width * 0.5 - regionWidth / 2, 0, width - regionWidth)
+  const regionY = clamp(face.y + face.height * 0.56, 0, height - regionHeight)
   const step = Math.max(2, Math.round(regionWidth / 80))
-  const maxOffset = clamp(Math.abs(strength) * face.height * 0.045, 0, face.height * 0.12)
+  const maxOffset = clamp(Math.abs(strength) * face.height * 0.024, 0, face.height * 0.065)
   const direction = strength >= 0 ? -1 : 1
 
   const patchWidth = Math.max(1, Math.round(regionWidth))
@@ -670,15 +576,15 @@ const applySmileWarp = (
   processor.warpCtx.clearRect(0, 0, patchWidth, patchHeight)
   for (let x = 0; x < regionWidth; x += step) {
     const normalizedX = (x / regionWidth - 0.5) * 2
-    const cornerWeight = Math.pow(Math.abs(normalizedX), 1.72)
+    const cornerWeight = Math.pow(Math.abs(normalizedX), 1.9)
     const centerWeight = Math.max(0, 1 - Math.abs(normalizedX))
-    const cheekBlend = Math.pow(Math.max(0, 1 - Math.abs(normalizedX) * 0.58), 2)
-    const smileCurve = direction * maxOffset * cornerWeight + -direction * maxOffset * 0.2 * centerWeight
+    const cheekBlend = Math.pow(Math.max(0, 1 - Math.abs(normalizedX) * 0.55), 2)
+    const smileCurve = direction * maxOffset * cornerWeight + -direction * maxOffset * 0.12 * centerWeight
     const verticalFeather = 1 - Math.abs((x / regionWidth - 0.5) * 0.35)
     const dy = smileCurve * verticalFeather
     const sx = Math.round(regionX + x)
     const sw = Math.max(1, Math.min(step + 1, patchWidth - Math.round(x)))
-    processor.warpCtx.globalAlpha = 0.72 + cheekBlend * 0.24
+    processor.warpCtx.globalAlpha = 0.68 + cheekBlend * 0.22
     processor.warpCtx.drawImage(
       processor.rawVideo,
       sx,
@@ -696,9 +602,9 @@ const applySmileWarp = (
   processor.warpCtx.globalCompositeOperation = 'destination-in'
   processor.warpCtx.translate(patchWidth / 2, patchHeight / 2)
   processor.warpCtx.scale(patchWidth / 2, patchHeight / 2)
-  const mask = processor.warpCtx.createRadialGradient(0, 0, 0.34, 0, 0, 1)
+  const mask = processor.warpCtx.createRadialGradient(0, 0, 0.42, 0, 0, 1)
   mask.addColorStop(0, 'rgba(255,255,255,1)')
-  mask.addColorStop(0.68, 'rgba(255,255,255,0.9)')
+  mask.addColorStop(0.72, 'rgba(255,255,255,0.88)')
   mask.addColorStop(1, 'rgba(255,255,255,0)')
   processor.warpCtx.fillStyle = mask
   processor.warpCtx.beginPath()
@@ -720,7 +626,11 @@ const applySmileWarp = (
     processor.ctx.fillRect(face.x, Math.max(0, face.y - 30), Math.min(420, face.width + 56), 24)
     processor.ctx.fillStyle = presence > 0.2 ? '#b8ffd0' : '#ffdad6'
     processor.ctx.font = `${Math.max(12, Math.round(width / 80))}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`
-    processor.ctx.fillText(`face ${face.source} ${(presence * 100).toFixed(0)}% · smile ${controlState.smileAlpha.toFixed(2)}`, face.x + 8, Math.max(16, face.y - 12))
+    processor.ctx.fillText(
+      `face ${face.source} ${(presence * 100).toFixed(0)}% · smile alpha ${controlState.smileAlpha.toFixed(2)}`,
+      face.x + 8,
+      Math.max(16, face.y - 12)
+    )
     processor.ctx.restore()
   }
 }
@@ -1351,8 +1261,9 @@ export default function App(): ReactElement {
       detectorCtx,
       animationId: 0,
       currentSmileAlpha: 0,
-      faceLandmarker: (await getFaceLandmarker()) ?? undefined,
+      faceDetector: makeFaceDetector(),
       facePresence: 0,
+      detectingFace: false,
       lastFaceDetectionAt: 0
     }
 
@@ -1436,12 +1347,6 @@ export default function App(): ReactElement {
           callLocalVideoRef.current.srcObject = processor.processedStream
           await callLocalVideoRef.current.play().catch(() => undefined)
         }
-        addLog(
-          processor.faceLandmarker
-            ? 'Face-landmark tracking ready. Smile Alpha will follow the participant face.'
-            : 'Face-landmark model unavailable. Using conservative fallback tracking.',
-          processor.faceLandmarker ? 'success' : 'warn'
-        )
         addLog('Camera and mic started. Experimenter settings now affect your outgoing stream.', 'success')
       }
 
