@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactElement } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 import {
   renderDuckSoup,
   applyMozzaControls,
@@ -2636,24 +2636,27 @@ export default function App(): ReactElement {
                     <p>Toggle alignment live during the conversation. Use a target for one participant.</p>
                   </div>
                   <div className="segmented-row">
-                    <button
+                    <InfoButton
                       className={controls.synchronyMode === 'aligned' ? 'active' : ''}
+                      description="Returns the selected participant or room to the neutral/baseline expression. Use this when you want normal expressive synchrony."
                       onClick={() => setSynchronyMode('aligned')}
                     >
                       Aligned
-                    </button>
-                    <button
+                    </InfoButton>
+                    <InfoButton
                       className={controls.synchronyMode === 'suppressed' ? 'active' : ''}
+                      description="Applies the suppressed smile alpha live. Use this to dampen or pull down the target participant's smile during the conversation."
                       onClick={() => setSynchronyMode('suppressed')}
                     >
                       Suppressed
-                    </button>
-                    <button
+                    </InfoButton>
+                    <InfoButton
                       className={controls.synchronyMode === 'reactive' ? 'active' : ''}
+                      description="Keeps the session ready for cue-based responses. Cue buttons can briefly change expression, then return to baseline."
                       onClick={() => setSynchronyMode('reactive')}
                     >
                       Reactive
-                    </button>
+                    </InfoButton>
                   </div>
                 </div>
                 <RangeControl
@@ -2687,18 +2690,30 @@ export default function App(): ReactElement {
                   onChange={(value) => setControl('reactivePulseMs', value, 'Updated cue-response duration.')}
                 />
                 <div className="cue-grid">
-                  <button onClick={() => triggerCueResponse('partner-smile', controls.suppressSmileAlpha, 'Partner smile cue -> dampen/frown response')}>
+                  <InfoButton
+                    description="Manual cue for when the partner smiles. Briefly dampens or pulls down the selected participant's mouth, then returns to baseline."
+                    onClick={() => triggerCueResponse('partner-smile', controls.suppressSmileAlpha, 'Partner smile cue -> dampen/frown response')}
+                  >
                     Partner smile cue
-                  </button>
-                  <button onClick={() => triggerCueResponse('partner-laugh', Math.min(0.25, controls.suppressSmileAlpha), 'Partner laugh cue -> stronger suppression')}>
+                  </InfoButton>
+                  <InfoButton
+                    description="Manual cue for when the partner laughs. Uses a stronger suppression response than the regular smile cue."
+                    onClick={() => triggerCueResponse('partner-laugh', Math.min(0.25, controls.suppressSmileAlpha), 'Partner laugh cue -> stronger suppression')}
+                  >
                     Partner laugh cue
-                  </button>
-                  <button onClick={() => triggerCueResponse('repair-smile', 1.4, 'Repair cue -> brief affiliative smile')}>
+                  </InfoButton>
+                  <InfoButton
+                    description="Briefly increases the selected participant's smile. Use as a repair or affiliative response cue."
+                    onClick={() => triggerCueResponse('repair-smile', 1.4, 'Repair cue -> brief affiliative smile')}
+                  >
                     Repair smile cue
-                  </button>
-                  <button onClick={() => triggerCueResponse('neutral-reset', 1, 'Neutral reset cue')}>
+                  </InfoButton>
+                  <InfoButton
+                    description="Returns the selected participant to neutral smile alpha. Use this to clear a cue response."
+                    onClick={() => triggerCueResponse('neutral-reset', 1, 'Neutral reset cue')}
+                  >
                     Neutral reset
-                  </button>
+                  </InfoButton>
                 </div>
                 <RangeControl
                   label="Detection threshold"
@@ -3056,6 +3071,27 @@ function ChatPanel({
         </button>
       </div>
     </section>
+  )
+}
+
+function InfoButton({
+  children,
+  className = '',
+  description,
+  onClick
+}: {
+  children: ReactNode
+  className?: string
+  description: string
+  onClick: () => void
+}): ReactElement {
+  return (
+    <button className={`info-button ${className}`.trim()} onClick={onClick} aria-label={description}>
+      <span className="button-label">{children}</span>
+      <span className="button-info-tooltip" role="tooltip">
+        {description}
+      </span>
+    </button>
   )
 }
 
