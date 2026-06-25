@@ -1315,6 +1315,32 @@ label {
   font-size: 11px;
 }
 
+/* Wrapper so the default-value tick can be positioned over the slider track. */
+.range-track {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.range-track input[type='range'] {
+  position: relative;
+  z-index: 1;
+}
+
+/* Small vertical bar marking the default / no-alteration value on the track. */
+.range-default-tick {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 15px;
+  border-radius: 1px;
+  background: var(--muted-2);
+  opacity: 0.8;
+  pointer-events: none;
+  z-index: 0;
+}
+
 .toggle-row {
   min-height: 42px;
   border: 1px solid var(--line);

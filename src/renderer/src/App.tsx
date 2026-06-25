@@ -51,11 +51,14 @@ const initialForm: SessionForm = {
 
 const initialControls: ManipulationControls = {
   smileAlpha: 1,
-  faceThreshold: 0.15,
-  landmarkBeta: 0.1,
-  // Mozza One-Euro filter cutoff (fc): lower = smoother/less jitter when still (more lag).
-  // Default lowered from the jittery 5 toward the smoother end; fine-tune via the slider.
-  smoothingCutoff: 1,
+  // dlib detector confidence floor: lower = stickier detection (fewer dropped frames that
+  // snap the warp on/off and cause fast flicker), at the cost of occasional false positives.
+  faceThreshold: 0.1,
+  // Mozza One-Euro filter speed coefficient (beta): lower = steadier (less jitter, more lag).
+  landmarkBeta: 0.02,
+  // Mozza One-Euro filter min cutoff (fc): lower = smoother/less jitter when still (more lag).
+  // 0.3 matches the validated smooth test settings (beta=0.02 fc=0.3); fine-tune via the slider.
+  smoothingCutoff: 0.3,
   overlay: false,
   synchronyMode: 'aligned',
   suppressSmileAlpha: 0.55,
@@ -2759,12 +2762,13 @@ export default function App(): ReactElement {
                 </div>
                 <RangeControl
                   label="Smile alpha"
-                  description="Controls the live smile/frown deformation sent to participant machines. 1.00 is neutral, higher moves toward a smile, lower moves toward a frown."
+                  description="Live smile/frown deformation sent to participant machines. 1.00 is neutral; higher = smile, lower/negative = frown. Kept within Mozza's natural range (-1 to 2) — beyond that the face distorts unnaturally."
                   value={controls.smileAlpha}
-                  min={-2}
-                  max={5}
-                  step={0.1}
+                  min={-1}
+                  max={2}
+                  step={0.05}
                   markers={['Frown', 'Neutral', 'Smile']}
+                  neutral={1}
                   onChange={(value) => setControl('smileAlpha', value)}
                 />
                 <RangeControl
@@ -2775,6 +2779,7 @@ export default function App(): ReactElement {
                   max={1}
                   step={0.05}
                   markers={['Frown pull', 'Dampened', 'Neutral']}
+                  neutral={1}
                   onChange={(value) => setControl('suppressSmileAlpha', value, 'Updated the suppression alpha preset.')}
                 />
                 <RangeControl
@@ -2785,6 +2790,7 @@ export default function App(): ReactElement {
                   max={5000}
                   step={100}
                   markers={['Quick', 'Default', 'Long']}
+                  neutral={1800}
                   onChange={(value) => setControl('reactivePulseMs', value, 'Updated cue-response duration.')}
                 />
                 <div className="cue-grid">
@@ -2821,26 +2827,29 @@ export default function App(): ReactElement {
                   max={1}
                   step={0.05}
                   markers={['Sensitive', 'Default', 'Strict']}
+                  neutral={0.1}
                   onChange={(value) => setControl('faceThreshold', value)}
                 />
                 <RangeControl
                   label="Landmark beta"
-                  description="How quickly the face warp follows movement. Lower is steadier; higher reacts faster but can look jumpier."
+                  description="How quickly the face warp follows movement. Lower is steadier (less jitter, slight lag); higher reacts faster but looks jumpier. ~0.02 is the validated smooth value."
                   value={controls.landmarkBeta}
                   min={0}
-                  max={1}
-                  step={0.05}
+                  max={0.5}
+                  step={0.01}
                   markers={['Stable', 'Default', 'Fast']}
+                  neutral={0.02}
                   onChange={(value) => setControl('landmarkBeta', value)}
                 />
                 <RangeControl
                   label="Smoothing cutoff"
-                  description="How much smoothing is applied over time. Lower is smoother/slower; higher is more immediate."
+                  description="One-Euro min cutoff (fc): how much the warp is smoothed over time. Lower is smoother/less jitter (slight lag); higher is more immediate but jitterier. ~0.3 is the validated smooth value."
                   value={controls.smoothingCutoff}
-                  min={0}
-                  max={20}
-                  step={0.5}
+                  min={0.1}
+                  max={3}
+                  step={0.05}
                   markers={['Smooth', 'Default', 'Responsive']}
+                  neutral={0.3}
                   onChange={(value) => setControl('smoothingCutoff', value)}
                 />
                 <label className="toggle-row">
@@ -2874,6 +2883,7 @@ export default function App(): ReactElement {
                   max={1}
                   step={0.05}
                   markers={['Muted', 'Half', 'Full']}
+                  neutral={1}
                   onChange={(value) => setControl('partnerVolume', value, 'Local playback volume only.')}
                 />
                 <RangeControl
@@ -2884,6 +2894,7 @@ export default function App(): ReactElement {
                   max={1.4}
                   step={0.02}
                   markers={['Deeper', 'Neutral', 'Brighter']}
+                  neutral={1}
                   onChange={(value) => {
                     setControls((prev) => ({ ...prev, audioPreset: 'custom-pitch', audioPitch: value }))
                     appendControlEvent('audioTone', value, 'Applied to outgoing participant microphone audio.')
@@ -2900,6 +2911,7 @@ export default function App(): ReactElement {
                   max={2}
                   step={0.05}
                   markers={['Muted', 'Neutral', 'Boosted']}
+                  neutral={1}
                   onChange={(value) => {
                     setControls((prev) => ({ ...prev, audioPreset: 'custom-volume', audioGain: value }))
                     appendControlEvent('audioGain', value, 'Applied to outgoing participant microphone audio.')
@@ -2916,6 +2928,7 @@ export default function App(): ReactElement {
                   max={1200}
                   step={50}
                   markers={['Live', 'Lagged', 'Delayed']}
+                  neutral={0}
                   onChange={(value) => setControl('synchronyDelayMs', value, 'Applied as a live outgoing microphone delay.')}
                 />
               </section>
@@ -3227,6 +3240,7 @@ function RangeControl({
   max,
   step,
   markers,
+  neutral,
   onChange
 }: {
   label: string
@@ -3236,8 +3250,11 @@ function RangeControl({
   max: number
   step: number
   markers: string[]
+  neutral?: number
   onChange: (value: number) => void
 }): ReactElement {
+  const neutralPct =
+    typeof neutral === 'number' ? Math.max(0, Math.min(100, ((neutral - min) / (max - min)) * 100)) : null
   return (
     <div className="range-control">
       <div className="range-header">
@@ -3254,14 +3271,24 @@ function RangeControl({
         </span>
         <strong>{Number.isInteger(value) ? value : value.toFixed(2)}</strong>
       </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
+      <div className="range-track">
+        {neutralPct !== null && (
+          <span
+            className="range-default-tick"
+            style={{ left: `${neutralPct}%` }}
+            title="Default (no alteration)"
+            aria-hidden="true"
+          />
+        )}
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+      </div>
       <div className="range-markers">
         {markers.map((marker) => (
           <span key={marker}>{marker}</span>
