@@ -570,6 +570,7 @@ export default function App(): ReactElement {
   const chatPanelRef = useRef<HTMLDivElement | null>(null)
   const chatMessagesRef = useRef<ChatMessage[]>([])
   const logListRef = useRef<HTMLDivElement | null>(null)
+  const autoJoinedRef = useRef(false)
   const recordingStartRef = useRef<number | null>(null)
   const cleanRecorderRef = useRef<MediaRecorder | null>(null)
   const alteredRecorderRef = useRef<MediaRecorder | null>(null)
@@ -794,6 +795,32 @@ export default function App(): ReactElement {
     const el = logListRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [logs])
+
+  // Keep the self-view <video> bound to the local camera stream. The stream is attached
+  // imperatively when it first arrives, so if the element re-renders detached (e.g. when
+  // the self tile swaps between full-size and PiP, or the layout changes) the preview can
+  // go black. Re-attach it whenever that happens so the camera doesn't randomly drop out.
+  useEffect(() => {
+    const video = callLocalVideoRef.current
+    const stream = callLocalStreamRef.current
+    if (video && stream && video.srcObject !== stream) {
+      video.srcObject = stream
+      void video.play().catch(() => undefined)
+    }
+  })
+
+  // Auto-join the room as soon as the user reaches it (no manual "Join room" click).
+  // Guarded so it fires once per room entry — leaving or going back to setup re-arms it,
+  // and a join error won't loop (the Rejoin button covers recovery).
+  useEffect(() => {
+    if (!setupComplete) {
+      autoJoinedRef.current = false
+      return
+    }
+    if (autoJoinedRef.current || callState !== 'idle') return
+    autoJoinedRef.current = true
+    void joinLiveCall()
+  }, [setupComplete, callState])
 
   useEffect(() => {
     callPeersRef.current = callPeers
@@ -2479,7 +2506,7 @@ export default function App(): ReactElement {
           <button onClick={returnToSetup}>Back to setup</button>
           {callState === 'idle' || callState === 'error' ? (
             <button className="primary" onClick={joinLiveCall}>
-              Join room
+              {callState === 'error' ? 'Rejoin' : 'Join room'}
             </button>
           ) : (
             <button className="danger leave-button" onClick={leaveLiveCall}>
@@ -2517,7 +2544,7 @@ export default function App(): ReactElement {
             <div className="room-action-stack">
               {callState === 'idle' || callState === 'error' ? (
                 <button className="primary wide-button" onClick={joinLiveCall}>
-                  Join this room
+                  {callState === 'error' ? 'Rejoin this room' : 'Join this room'}
                 </button>
               ) : (
                 <button className="danger wide-button" onClick={leaveLiveCall}>
