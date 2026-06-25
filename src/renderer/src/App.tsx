@@ -2637,8 +2637,22 @@ export default function App(): ReactElement {
         <section className="center-stage">
           <section className="panel call-panel">
             <div className="section-title accent">Live Video Conference</div>
-            <div className={`conference-grid tiles-${Math.min(remoteTiles.length + (isController ? 0 : 1), 4)}`}>
-              {!isController && (
+            {isController ? (
+              <div className={`conference-grid tiles-${Math.min(remoteTiles.length, 4)}`}>
+                {remoteTiles.map((tile) => (
+                  <RemoteVideoCard key={tile.userId} tile={tile} volume={controls.partnerVolume} />
+                ))}
+                {remoteTiles.length === 0 && (
+                  <div className="video-panel">
+                    <div className="video-label">Waiting room</div>
+                    <div className="video-empty">
+                      Join as experimenter to keep chat and controls available while participants enter the same meeting ID.
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className={`participant-grid count-${Math.min(remoteTiles.length === 0 ? 2 : remoteTiles.length + 1, 4)}`}>
                 <div className="video-panel">
                   <div className="video-label">Self view</div>
                   <video
@@ -2654,23 +2668,17 @@ export default function App(): ReactElement {
                     {showSelfView ? 'Hide self view' : 'Show self view'}
                   </button>
                 </div>
-              )}
-
-              {remoteTiles.map((tile) => (
-                <RemoteVideoCard key={tile.userId} tile={tile} volume={controls.partnerVolume} />
-              ))}
-
-              {remoteTiles.length === 0 && (
-                <div className="video-panel">
-                  <div className="video-label">Waiting room</div>
-                  <div className="video-empty">
-                    {isController
-                      ? 'Join as experimenter to keep chat and controls available while participants enter the same meeting ID.'
-                      : 'Waiting for another participant in this meeting ID.'}
+                {remoteTiles.map((tile) => (
+                  <RemoteVideoCard key={tile.userId} tile={tile} volume={controls.partnerVolume} />
+                ))}
+                {remoteTiles.length === 0 && (
+                  <div className="video-panel">
+                    <div className="video-label">Waiting room</div>
+                    <div className="video-empty">Waiting for another participant to join this meeting ID…</div>
                   </div>
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )}
           </section>
 
           {isController && (

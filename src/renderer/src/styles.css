@@ -749,16 +749,47 @@ label {
   flex: 1;
 }
 
-.participant-workspace .conference-grid {
-  min-height: calc(100vh - 168px);
+/* Participant view: equal video tiles side by side, each as large as fits. Tiles are
+   a fixed 4:3 box (matching the DuckSoup 640x480 stream) so the video fills them with
+   no crop and no black bars, centered in the stage. */
+.participant-workspace .participant-grid {
+  height: calc(100vh - 168px);
+  min-height: 0;
+  display: grid;
+  gap: 12px;
+  align-items: center;
+  justify-items: center;
+  overflow: hidden;
 }
 
-.participant-workspace .video-panel {
-  min-height: 520px;
+.participant-grid.count-2 {
+  grid-template-columns: 1fr 1fr;
 }
 
-.participant-workspace .video-surface {
-  min-height: 520px;
+.participant-grid.count-3,
+.participant-grid.count-4 {
+  grid-template-columns: 1fr 1fr;
+  grid-auto-rows: 1fr;
+  align-items: stretch;
+}
+
+.participant-grid .video-panel {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 4 / 3;
+  max-height: 100%;
+  min-height: 0;
+}
+
+/* 3+ tiles: fill the cells (height-driven) so two rows fit without overflowing. */
+.participant-grid.count-3 .video-panel,
+.participant-grid.count-4 .video-panel {
+  height: 100%;
+  aspect-ratio: auto;
+}
+
+.participant-grid .video-surface {
+  min-height: 0;
 }
 
 .button-row.no-margin {
