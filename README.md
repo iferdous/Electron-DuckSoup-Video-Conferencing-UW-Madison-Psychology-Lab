@@ -105,7 +105,11 @@ Each saved session can include:
 - `clean.webm`
 - `altered.webm`
 - `session_manifest.json`
+- `pps_playback_manifest.json`
 - `manipulation_events.csv`
+
+For PPS/empathic accuracy ratings, use `pps_playback_manifest.json`. It tells the RA which clean
+self video and altered partner video should be shown together for each participant.
 
 If no output folder is selected, the app saves sessions to the default lab sessions folder in Documents.
 

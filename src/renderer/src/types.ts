@@ -48,6 +48,9 @@ export type ManipulationControls = {
   landmarkBeta: number
   smoothingCutoff: number
   overlay: boolean
+  synchronyMode: 'aligned' | 'suppressed' | 'reactive'
+  suppressSmileAlpha: number
+  reactivePulseMs: number
   audioPreset: string
   audioPitch: number
   audioGain: number

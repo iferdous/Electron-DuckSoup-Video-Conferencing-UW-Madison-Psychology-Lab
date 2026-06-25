@@ -691,6 +691,7 @@ app.whenReady().then(() => {
         join(app.getAppPath(), 'docker', 'ducksoup', 'data')
       ]
       const copied: string[] = []
+      const copiedPaths: string[] = []
       let dataDir: string | null = null
 
       for (const root of candidateRoots) {
@@ -708,8 +709,10 @@ app.whenReady().then(() => {
           const destVideo = join(payload.destDir, 'video')
           await mkdir(destVideo, { recursive: true })
           for (const name of media) {
-            await copyFile(join(recordingsDir, name), join(destVideo, safeSegment(name, 'recording')))
+            const destination = join(destVideo, safeSegment(name, 'recording'))
+            await copyFile(join(recordingsDir, name), destination)
             copied.push(name)
+            copiedPaths.push(destination)
           }
           break
         } catch {
@@ -717,7 +720,7 @@ app.whenReady().then(() => {
         }
       }
 
-      return { copied, dataDir }
+      return { copied, copiedPaths, dataDir }
     }
   )
 

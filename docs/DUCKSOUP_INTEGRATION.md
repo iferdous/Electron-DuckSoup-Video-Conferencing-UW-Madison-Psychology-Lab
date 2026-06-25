@@ -77,10 +77,32 @@ transition `1000`, **Send** → bob's face smiles. That's exactly what the app's
 
 `recordingMode = "reenc"`: the server writes, per participant, a **clean `-dry`** and an **altered `-wet`**
 file under `docker/ducksoup/data/<namespace>/<interaction>/recordings/` (namespace = study ID slug,
-interaction = room ID), plus its own ms event log. When a station leaves, the app writes
-`session_manifest.json` + `manipulation_events.csv` to the chosen output folder and, **if the media
-server is on this machine**, copies the dry/wet files into the session's `video/` folder. If the server
-is on another computer, the files stay there and the manifest records their server-side location.
+interaction = room ID), plus its own ms event log. When a station leaves or the experimenter clicks
+**Conclude study**, the app writes `session_manifest.json`, `pps_playback_manifest.json`, and
+`manipulation_events.csv` to the chosen output folder and, **if the media server is on this machine**,
+copies the dry/wet files into the session's `video/` folder. If the server is on another computer, the
+files stay there and the manifest records their server-side location.
+
+`pps_playback_manifest.json` is the bridge to empathic accuracy ratings. For each participant, it points
+to the intended playback pair: **unmanipulated self video** (`clean`/`dry`) and **manipulated partner
+video** (`altered`/`wet`). If the filename pattern is unclear, the manifest keeps the best candidate
+files so the RA can verify before loading the PPS task.
+
+## Live synchrony controls
+
+The experimenter can now change synchrony during the conversation instead of choosing the condition only
+beforehand:
+
+- **Aligned** returns the target to neutral smile alpha.
+- **Suppressed** applies the configured suppressed smile alpha to the selected participant or everyone.
+- **Reactive** keeps the session in cue-response mode. Cue buttons can trigger a temporary frown/dampened
+  smile or a repair smile, then return to baseline after the configured pulse duration.
+
+Controls are target-aware: choose one live participant in **Control target**, or leave it on **All
+participants**. Every synchrony mode change and cue response is written to `manipulation_events.csv`.
+The current cue buttons are manual experimenter triggers. Automatic partner-smile detection should be a
+separate validated module so it can be tested against lighting, camera angle, false positives, and timing
+before it is used for data collection.
 
 ## Known limitations / follow-ups
 

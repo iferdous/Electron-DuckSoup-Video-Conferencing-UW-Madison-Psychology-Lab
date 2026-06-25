@@ -362,6 +362,24 @@ label {
   font-size: 13px;
 }
 
+.chat-notification {
+  border-color: rgb(96 165 250 / 0.55);
+  background: rgb(37 99 235 / 0.22);
+  color: #dbeafe;
+  min-height: 38px;
+  max-width: 230px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.chat-notification:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: rgb(37 99 235 / 0.34);
+}
+
 .inline-status {
   display: inline-flex;
   align-items: center;
@@ -761,6 +779,67 @@ label {
 .room-action-stack .wide-button {
   min-height: 42px;
   font-weight: 800;
+}
+
+.mode-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  padding: 12px;
+}
+
+.mode-card span {
+  display: block;
+  color: var(--muted-2);
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.mode-card strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--text);
+  text-transform: capitalize;
+}
+
+.mode-card p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.segmented-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.segmented-row button {
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.segmented-row button.active,
+.cue-grid button:hover {
+  border-color: var(--accent);
+  background: var(--surface-4);
+}
+
+.cue-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cue-grid button {
+  min-height: 44px;
+  white-space: normal;
+  line-height: 1.25;
 }
 
 .video-panel {
@@ -1377,6 +1456,20 @@ label {
 
 .setup-continue {
   min-width: 180px;
+}
+
+.setup-notice {
+  margin: 0;
+  border: 1px solid rgb(252 165 165 / 0.5);
+  border-radius: 4px;
+  background: rgb(127 29 29 / 0.28);
+  color: #fecaca;
+  padding: 9px 10px;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0;
+  line-height: 1.35;
+  text-transform: none;
 }
 
 .room-status-card {

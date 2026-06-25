@@ -57,6 +57,9 @@ const initialControls: ManipulationControls = {
   // Default lowered from the jittery 5 toward the smoother end; fine-tune via the slider.
   smoothingCutoff: 1,
   overlay: false,
+  synchronyMode: 'aligned',
+  suppressSmileAlpha: 0.55,
+  reactivePulseMs: 1800,
   audioPreset: 'none',
   audioPitch: 1,
   audioGain: 1,
@@ -107,6 +110,27 @@ type RemoteTile = {
   role: CallRole
   stream: MediaStream
 }
+
+type DirectorPayload =
+  | {
+      kind: 'live-control'
+      key: keyof ManipulationControls
+      value: ManipulationControls[keyof ManipulationControls]
+      targetUserId?: string
+      label?: string
+    }
+  | {
+      kind: 'cue-response'
+      cue: string
+      targetUserId?: string
+      alpha: number
+      returnAlpha: number
+      durationMs: number
+      label: string
+    }
+  | {
+      kind: 'session-conclude'
+    }
 
 const sessionCapacity: Record<SessionFormat, number> = {
   dyad: 2,
@@ -279,6 +303,64 @@ const controlEventsToCsv = (events: ControlEvent[]): string => {
   return [header.join(','), ...rows].join('\n') + '\n'
 }
 
+const normalizePath = (value: string): string => value.replace(/\\/g, '/').toLowerCase()
+
+const classifyRecordingFile = (value: string): 'clean' | 'altered' | 'unknown' => {
+  const normalized = normalizePath(value)
+  if (/(^|[-_])(dry|clean|unmanipulated)([-_.]|$)/.test(normalized)) return 'clean'
+  if (/(^|[-_])(wet|altered|manipulated)([-_.]|$)/.test(normalized)) return 'altered'
+  return 'unknown'
+}
+
+const fileLooksLikeParticipant = (value: string, participant: CallPeer): boolean => {
+  const normalized = normalizePath(value)
+  return [participant.userId, participant.displayName]
+    .filter(Boolean)
+    .some((candidate) => normalized.includes(String(candidate).trim().toLowerCase()))
+}
+
+const buildPpsPlaybackPlan = (
+  files: string[],
+  participants: CallPeer[],
+  fallbackSelfId: string,
+  fallbackPartnerId: string
+): Array<Record<string, unknown>> => {
+  const activeParticipants =
+    participants.length > 0
+      ? participants
+      : [
+          { userId: fallbackSelfId, displayName: fallbackSelfId, role: 'participant' as const, joinedAt: Date.now() },
+          { userId: fallbackPartnerId, displayName: fallbackPartnerId, role: 'participant' as const, joinedAt: Date.now() }
+        ].filter((participant) => participant.userId.trim())
+
+  const cleanFiles = files.filter((file) => classifyRecordingFile(file) === 'clean')
+  const alteredFiles = files.filter((file) => classifyRecordingFile(file) === 'altered')
+
+  return activeParticipants.map((participant) => {
+    const partners = activeParticipants.filter((candidate) => candidate.userId !== participant.userId)
+    const selfClean = cleanFiles.find((file) => fileLooksLikeParticipant(file, participant)) ?? cleanFiles[0] ?? null
+    const partnerAltered =
+      partners
+        .map((partner) => alteredFiles.find((file) => fileLooksLikeParticipant(file, partner)))
+        .find(Boolean) ??
+      alteredFiles.find((file) => !fileLooksLikeParticipant(file, participant)) ??
+      alteredFiles[0] ??
+      null
+
+    return {
+      participantUserId: participant.userId,
+      participantDisplayName: participant.displayName,
+      ratingView: {
+        selfVideo: selfClean,
+        partnerVideo: partnerAltered,
+        selfVideoMeaning: 'Unmanipulated self recording (clean/dry).',
+        partnerVideoMeaning: 'Manipulated partner recording as seen during the conversation (altered/wet).'
+      },
+      partnerCandidates: partners.map((partner) => ({ userId: partner.userId, displayName: partner.displayName }))
+    }
+  })
+}
+
 const toMs = (value: unknown): number | null => {
   return typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 1000) : null
 }
@@ -436,6 +518,8 @@ export default function App(): ReactElement {
   const alteredStreamRef = useRef<MediaStream | null>(null)
   const eventSourceErrorAtRef = useRef(0)
   const clickAudioContextRef = useRef<AudioContext | null>(null)
+  const sessionLinkSectionRef = useRef<HTMLElement | null>(null)
+  const chatPanelRef = useRef<HTMLDivElement | null>(null)
   const recordingStartRef = useRef<number | null>(null)
   const cleanRecorderRef = useRef<MediaRecorder | null>(null)
   const alteredRecorderRef = useRef<MediaRecorder | null>(null)
@@ -448,6 +532,7 @@ export default function App(): ReactElement {
   const callPeersRef = useRef<CallPeer[]>([])
   const duckSoupFilesRef = useRef<Record<string, string[]>>({})
   const controlEventsRef = useRef<ControlEvent[]>([])
+  const leaveLiveCallRef = useRef<(() => void) | null>(null)
 
   const [setupComplete, setSetupComplete] = useState(false)
   const [welcomeComplete, setWelcomeComplete] = useState(false)
@@ -473,6 +558,9 @@ export default function App(): ReactElement {
   const [chatText, setChatText] = useState('')
   const [chatTarget, setChatTarget] = useState<ChatTarget>('room')
   const [sessionLinkInput, setSessionLinkInput] = useState('')
+  const [appliedSessionLinkInput, setAppliedSessionLinkInput] = useState('')
+  const [sessionLinkNotice, setSessionLinkNotice] = useState('')
+  const [unreadChatCount, setUnreadChatCount] = useState(0)
   const [showAdvancedConnection, setShowAdvancedConnection] = useState(false)
   const [experimenterLoginOpen, setExperimenterLoginOpen] = useState(false)
   const [experimenterCredentials, setExperimenterCredentials] = useState({ username: '', password: '' })
@@ -482,6 +570,15 @@ export default function App(): ReactElement {
   const useDuckSoup = form.mediaTransport === 'ducksoup' && form.duckSoupUrl.trim().length > 0
   const expectedParticipants = sessionCapacity[form.sessionFormat]
   const participantPeers = useMemo(() => callPeers.filter((peer) => peer.role === 'participant'), [callPeers])
+  const selectedControlTarget = useMemo(
+    () => participantPeers.find((peer) => peer.userId === form.targetUserId),
+    [form.targetUserId, participantPeers]
+  )
+  const controlTargetLabel = selectedControlTarget
+    ? selectedControlTarget.displayName
+    : form.targetUserId
+      ? form.targetUserId
+      : 'all participants'
   const activeRoomPeers = callState === 'idle' || callState === 'error' ? roomPresence?.peers ?? [] : callPeers
   const visibleRoomPeers = useMemo(
     () => (isController ? activeRoomPeers : activeRoomPeers.filter((peer) => peer.role !== 'controller')),
@@ -558,6 +655,30 @@ export default function App(): ReactElement {
     gain.connect(audioContext.destination)
     oscillator.start()
     oscillator.stop(audioContext.currentTime + 0.08)
+  }, [])
+
+  const playNoticeTone = useCallback(() => {
+    const AudioContextConstructor =
+      window.AudioContext ||
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!AudioContextConstructor) return
+
+    const audioContext = clickAudioContextRef.current ?? new AudioContextConstructor()
+    clickAudioContextRef.current = audioContext
+    if (audioContext.state === 'suspended') audioContext.resume().catch(() => undefined)
+
+    const oscillator = audioContext.createOscillator()
+    const gain = audioContext.createGain()
+    oscillator.type = 'triangle'
+    oscillator.frequency.setValueAtTime(240, audioContext.currentTime)
+    oscillator.frequency.exponentialRampToValueAtTime(170, audioContext.currentTime + 0.12)
+    gain.gain.setValueAtTime(0.0001, audioContext.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.05, audioContext.currentTime + 0.01)
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.16)
+    oscillator.connect(gain)
+    gain.connect(audioContext.destination)
+    oscillator.start()
+    oscillator.stop(audioContext.currentTime + 0.17)
   }, [])
 
   useEffect(() => {
@@ -689,6 +810,8 @@ export default function App(): ReactElement {
     try {
       const parsed = parseSessionLink(trimmed)
       setForm((prev) => ({ ...prev, ...parsed }))
+      setAppliedSessionLinkInput(trimmed)
+      setSessionLinkNotice('')
       addLog('Session link loaded. You can continue to the room.', 'success')
       return true
     } catch (error) {
@@ -787,7 +910,7 @@ export default function App(): ReactElement {
         roomId: form.roomId,
         participantId: form.participantId,
         partnerId: form.partnerId,
-        targetUserId: form.targetUserId || form.participantId,
+        targetUserId: form.targetUserId || 'all-participants',
         condition: form.condition,
         control,
         value,
@@ -799,8 +922,8 @@ export default function App(): ReactElement {
     [form]
   )
 
-  const broadcastLiveControl = useCallback(
-    (key: keyof ManipulationControls, value: ManipulationControls[keyof ManipulationControls]): void => {
+  const sendDirectorPayload = useCallback(
+    (payload: DirectorPayload): void => {
       if (!form.roomId.trim() || !form.callSignalUrl.trim() || !callEventsRef.current) return
 
       fetch(`${signalBaseUrl()}/director-control`, {
@@ -812,7 +935,7 @@ export default function App(): ReactElement {
           type: 'live-control',
           role: form.role,
           displayName: callDisplayName(),
-          payload: { key, value }
+          payload
         })
       }).catch((error) =>
         addLog(error instanceof Error ? error.message : 'Could not send live control to the room.', 'error')
@@ -821,10 +944,60 @@ export default function App(): ReactElement {
     [addLog, form.callSignalUrl, form.role, form.roomId]
   )
 
+  const broadcastLiveControl = useCallback(
+    (
+      key: keyof ManipulationControls,
+      value: ManipulationControls[keyof ManipulationControls],
+      label?: string
+    ): void => {
+      sendDirectorPayload({
+        kind: 'live-control',
+        key,
+        value,
+        targetUserId: form.targetUserId || undefined,
+        label
+      })
+    },
+    [form.targetUserId, sendDirectorPayload]
+  )
+
   const applyRemoteLiveControl = useCallback(
     (payload: unknown, sender = 'Experimenter'): void => {
       if (!payload || typeof payload !== 'object') return
-      const update = payload as { key?: keyof ManipulationControls; value?: unknown }
+      const message = payload as Partial<DirectorPayload> & {
+        key?: keyof ManipulationControls
+        value?: unknown
+        targetUserId?: string
+      }
+      const targetUserId = typeof message.targetUserId === 'string' ? message.targetUserId : ''
+      if (targetUserId && targetUserId !== callUserIdRef.current) return
+
+      if (message.kind === 'session-conclude') {
+        appendControlEvent('study', 'conclude', `Received study conclusion command from ${sender}.`)
+        addLog(`${sender} concluded the study. Saving and leaving the room.`, 'warn')
+        window.setTimeout(() => leaveLiveCallRef.current?.(), 0)
+        return
+      }
+
+      if (message.kind === 'cue-response') {
+        const alpha = typeof message.alpha === 'number' ? message.alpha : initialControls.suppressSmileAlpha
+        const returnAlpha = typeof message.returnAlpha === 'number' ? message.returnAlpha : initialControls.smileAlpha
+        const durationMs = typeof message.durationMs === 'number' ? message.durationMs : initialControls.reactivePulseMs
+        setControls((prev) => ({ ...prev, synchronyMode: 'reactive', smileAlpha: alpha }))
+        appendControlEvent(
+          'cueResponse',
+          alpha,
+          `${sender}: ${message.label || message.cue || 'behavioral cue'}; returning to ${returnAlpha} after ${durationMs}ms.`
+        )
+        addLog(`${sender} triggered ${message.label || 'a synchrony cue response'}.`, 'info')
+        window.setTimeout(() => {
+          setControls((prev) => ({ ...prev, smileAlpha: returnAlpha }))
+          appendControlEvent('cueResponseReturn', returnAlpha, 'Reactive cue response returned to baseline.')
+        }, durationMs)
+        return
+      }
+
+      const update = message as { key?: keyof ManipulationControls; value?: unknown }
       if (!update.key || !(update.key in initialControls)) return
       if (update.key === 'partnerVolume') return
 
@@ -1022,6 +1195,13 @@ export default function App(): ReactElement {
     if (envelope.type === 'chat-message') {
       if (envelope.payload?.id && envelope.payload.text && envelope.payload.from) {
         addChatMessage(envelope.payload as ChatMessage)
+        if (
+          isController &&
+          envelope.payload.from !== callUserIdRef.current &&
+          envelope.payload.fromRole !== 'controller'
+        ) {
+          setUnreadChatCount((prev) => Math.min(prev + 1, 99))
+        }
       }
       return
     }
@@ -1171,6 +1351,8 @@ export default function App(): ReactElement {
       const namespace = duckSoupNamespace()
       const interaction = form.roomId
       let copied: string[] = []
+      let copiedPaths: string[] = []
+      let serverDataDir: string | null = null
       try {
         const result = await window.researchApi.collectDuckSoupRecordings({
           destDir: createdDir,
@@ -1178,11 +1360,22 @@ export default function App(): ReactElement {
           interaction
         })
         copied = result.copied
+        copiedPaths = result.copiedPaths
+        serverDataDir = result.dataDir
         if (copied.length > 0) addLog(`Copied ${copied.length} server recording(s) into the session folder.`, 'success')
         else addLog('Server recordings stay on the media server (data/' + namespace + '/' + interaction + '/recordings). Copy them manually if the server is on another computer.', 'info')
       } catch {
         addLog('Could not auto-copy server recordings. They remain in the media server data folder.', 'warn')
       }
+
+      const serverFiles = Object.values(duckSoupFilesRef.current).flat()
+      const availableVideoFiles = [...copiedPaths, ...serverFiles]
+      const ppsPlaybackPlan = buildPpsPlaybackPlan(
+        availableVideoFiles,
+        participantPeers,
+        form.participantId,
+        form.partnerId
+      )
 
       const manifest = {
         savedAt: new Date().toISOString(),
@@ -1190,11 +1383,21 @@ export default function App(): ReactElement {
         session: form,
         controlsAtEnd: controlsRef.current,
         mediaServer: form.duckSoupUrl,
-        duckSoup: { namespace, interaction, recordingMode: 'reenc', serverFiles: duckSoupFilesRef.current, copiedFiles: copied },
+        duckSoup: {
+          namespace,
+          interaction,
+          recordingMode: 'reenc',
+          serverFiles: duckSoupFilesRef.current,
+          serverDataDir,
+          copiedFiles: copied,
+          copiedPaths
+        },
+        ppsPlaybackPlan,
         notes: [
           'Media + face/voice manipulation routed through DuckSoup (SFU) + Mozza (face-only smile warp).',
           'Server records clean (-dry) and altered (-wet) streams per participant under data/<namespace>/<interaction>/recordings/.',
-          'manipulation_events.csv lists experimenter control changes with timestamps relative to recording start.'
+          'For empathic accuracy ratings, use the participant-specific ppsPlaybackPlan: selfVideo is clean/dry; partnerVideo is altered/wet.',
+          'manipulation_events.csv lists experimenter control changes, cue responses, and synchrony mode changes with timestamps relative to recording start.'
         ]
       }
       await Promise.all([
@@ -1202,6 +1405,23 @@ export default function App(): ReactElement {
           sessionDir: createdDir,
           filename: 'session_manifest.json',
           contents: JSON.stringify(manifest, null, 2)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'pps_playback_manifest.json',
+          contents: JSON.stringify(
+            {
+              savedAt: manifest.savedAt,
+              studyId: form.studyId,
+              roomId: form.roomId,
+              dyadId: form.dyadId,
+              instructions:
+                'For empathic accuracy ratings, show each participant their unmanipulated self video alongside the manipulated partner video they saw during the conversation.',
+              playbackPlan: ppsPlaybackPlan
+            },
+            null,
+            2
+          )
         }),
         window.researchApi.writeTextFile({
           sessionDir: createdDir,
@@ -1215,7 +1435,7 @@ export default function App(): ReactElement {
     } finally {
       setRecordingState('idle')
     }
-  }, [addLog, form])
+  }, [addLog, form, participantPeers])
 
   const handleDuckSoupEvent = useCallback(
     (message: DuckSoupCallbackMessage): void => {
@@ -1434,7 +1654,6 @@ export default function App(): ReactElement {
 
   const leaveLiveCall = (): void => {
     if (duckSoupActiveRef.current) {
-      void finalizeDuckSoupSession()
       if (duckSoupPlayerRef.current) {
         try {
           duckSoupPlayerRef.current.stop()
@@ -1445,6 +1664,9 @@ export default function App(): ReactElement {
       }
       duckSoupActiveRef.current = false
       streamUserMapRef.current.clear()
+      window.setTimeout(() => {
+        void finalizeDuckSoupSession()
+      }, 1500)
     }
 
     if (form.callSignalUrl.trim() && form.roomId.trim()) {
@@ -1483,10 +1705,12 @@ export default function App(): ReactElement {
     setChatMessages([])
     setChatText('')
     setChatTarget('room')
+    setUnreadChatCount(0)
     setLatency(emptyLatency)
     setCallState('idle')
     addLog('Left the room.', 'info')
   }
+  leaveLiveCallRef.current = leaveLiveCall
 
   const returnToSetup = (): void => {
     if (recordingState === 'recording') {
@@ -1511,9 +1735,47 @@ export default function App(): ReactElement {
     }
 
     setControls((prev) => ({ ...prev, [key]: value }))
-    appendControlEvent(String(key), value, notes || 'Applied to participant live stream.')
+    appendControlEvent(String(key), value, notes || `Applied to ${controlTargetLabel}.`)
     broadcastLiveControl(key, value)
-    addLog(`${String(key)} = ${value} sent to the room.`, 'info')
+    addLog(`${String(key)} = ${value} sent to ${controlTargetLabel}.`, 'info')
+  }
+
+  const setSynchronyMode = (mode: ManipulationControls['synchronyMode']): void => {
+    const nextAlpha =
+      mode === 'aligned' ? 1 : mode === 'suppressed' ? controls.suppressSmileAlpha : controls.smileAlpha
+    setControls((prev) => ({ ...prev, synchronyMode: mode, smileAlpha: nextAlpha }))
+    appendControlEvent('synchronyMode', mode, `Mode changed for ${controlTargetLabel}.`)
+    broadcastLiveControl('synchronyMode', mode, `Synchrony mode: ${mode}`)
+    broadcastLiveControl('smileAlpha', nextAlpha, `Synchrony mode alpha: ${mode}`)
+    addLog(`Synchrony mode ${mode} sent to ${controlTargetLabel}.`, 'info')
+  }
+
+  const triggerCueResponse = (cue: string, alpha: number, label: string): void => {
+    const returnAlpha = controls.synchronyMode === 'suppressed' ? controls.suppressSmileAlpha : 1
+    const durationMs = controls.reactivePulseMs
+    setControls((prev) => ({ ...prev, synchronyMode: 'reactive' }))
+    appendControlEvent('cueResponse', alpha, `${label}; target ${controlTargetLabel}; return ${returnAlpha} after ${durationMs}ms.`)
+    sendDirectorPayload({
+      kind: 'cue-response',
+      cue,
+      targetUserId: form.targetUserId || undefined,
+      alpha,
+      returnAlpha,
+      durationMs,
+      label
+    })
+    addLog(`${label} sent to ${controlTargetLabel}.`, 'info')
+  }
+
+  const concludeStudy = (): void => {
+    appendControlEvent('study', 'conclude', 'Experimenter concluded the study for all participant stations.')
+    sendDirectorPayload({ kind: 'session-conclude' })
+    addLog('Study conclusion sent. Participant stations will save/finalize and leave.', 'warn')
+  }
+
+  const jumpToChat = (): void => {
+    chatPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    setUnreadChatCount(0)
   }
 
   const applyAudioPreset = (preset: (typeof audioPresets)[number]): void => {
@@ -1622,24 +1884,57 @@ export default function App(): ReactElement {
 
     const manifest = {
       savedAt: new Date().toISOString(),
+      transport: 'mesh',
       session: form,
       controlsAtEnd: controls,
       files: { cleanVideo: cleanPath, alteredVideo: alteredPath },
+      ppsPlaybackPlan: [
+        {
+          participantUserId: form.participantId,
+          participantDisplayName: form.displayName,
+          ratingView: {
+            selfVideo: cleanPath,
+            partnerVideo: null,
+            selfVideoMeaning: 'Unmanipulated self recording from this station.',
+            partnerVideoMeaning:
+              'Use the partner station altered/manipulated video here after both participant stations are exported.'
+          },
+          partnerCandidates: [{ userId: form.partnerId, displayName: form.partnerId }]
+        }
+      ],
       notes: [
         'cleanVideo is the local unaltered webcam/microphone stream.',
         'alteredVideo is the outgoing participant stream after live experimenter settings.',
+        'For empathic accuracy ratings, pair this clean self video with the partner station altered/manipulated video.',
         'manipulation_events.csv contains live setting changes with timestamps relative to recording start.'
       ]
     }
 
     await Promise.all([
-      window.researchApi.writeTextFile({
-        sessionDir,
-        filename: 'session_manifest.json',
-        contents: JSON.stringify(manifest, null, 2)
-      }),
-      window.researchApi.writeTextFile({
-        sessionDir,
+        window.researchApi.writeTextFile({
+          sessionDir,
+          filename: 'session_manifest.json',
+          contents: JSON.stringify(manifest, null, 2)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir,
+          filename: 'pps_playback_manifest.json',
+          contents: JSON.stringify(
+            {
+              savedAt: manifest.savedAt,
+              studyId: form.studyId,
+              roomId: form.roomId,
+              dyadId: form.dyadId,
+              instructions:
+                'For empathic accuracy ratings, show the participant their clean self video and the partner station altered/manipulated video.',
+              playbackPlan: manifest.ppsPlaybackPlan
+            },
+            null,
+            2
+          )
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir,
         filename: 'manipulation_events.csv',
         contents: controlEventsToCsv([
           ...controlEvents,
@@ -1650,7 +1945,7 @@ export default function App(): ReactElement {
             roomId: form.roomId,
             participantId: form.participantId,
             partnerId: form.partnerId,
-            targetUserId: form.targetUserId || form.participantId,
+            targetUserId: form.targetUserId || 'all-participants',
             condition: form.condition,
             control: 'recording',
             value: 'stop',
@@ -1682,6 +1977,14 @@ export default function App(): ReactElement {
     let nextSignalUrl = form.callSignalUrl
 
     if (!isController && sessionLinkInput.trim()) {
+      if (sessionLinkInput.trim() !== appliedSessionLinkInput) {
+        setSessionLinkNotice('Click Use to load this session link before continuing.')
+        playNoticeTone()
+        sessionLinkSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        addLog('Click Use to load the pasted session link before continuing.', 'error')
+        return
+      }
+
       try {
         const parsed = parseSessionLink(sessionLinkInput)
         nextRoomId = parsed.roomId
@@ -1907,7 +2210,7 @@ export default function App(): ReactElement {
               </section>
             )}
 
-            <section className="panel">
+            <section className="panel" ref={sessionLinkSectionRef}>
               <div className="section-title accent">Meeting</div>
               {isController ? (
                 <div className="share-card">
@@ -1926,9 +2229,9 @@ export default function App(): ReactElement {
                   <div className="input-action-row">
                     <input
                       value={sessionLinkInput}
-                      onChange={(event) => setSessionLinkInput(event.target.value)}
-                      onBlur={() => {
-                        if (sessionLinkInput.trim()) applySessionLink(sessionLinkInput)
+                      onChange={(event) => {
+                        setSessionLinkInput(event.target.value)
+                        setSessionLinkNotice('')
                       }}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter') applySessionLink(sessionLinkInput)
@@ -1937,6 +2240,7 @@ export default function App(): ReactElement {
                     />
                     <button onClick={() => applySessionLink(sessionLinkInput)}>Use</button>
                   </div>
+                  {sessionLinkNotice && <p className="setup-notice">{sessionLinkNotice}</p>}
                 </label>
               )}
               <label>
@@ -2082,6 +2386,11 @@ export default function App(): ReactElement {
           </div>
         </div>
         <div className="topbar-actions">
+          {isController && unreadChatCount > 0 && (
+            <button className="chat-notification" onClick={jumpToChat}>
+              {unreadChatCount === 1 ? '1 new chat message' : `${unreadChatCount} new chat messages`}
+            </button>
+          )}
           {!isController && (
             <div className={`latency-pill ${simpleLatencyMs === null ? 'waiting' : ''}`}>
               <span>Latency</span>
@@ -2178,6 +2487,13 @@ export default function App(): ReactElement {
                       <strong>{sessionDir || 'created when a station leaves'}</strong>
                     </div>
                   </div>
+                  <button
+                    className="danger wide-button"
+                    onClick={concludeStudy}
+                    disabled={callState === 'idle' || callState === 'error'}
+                  >
+                    Conclude study
+                  </button>
                 </>
               ) : (
                 <>
@@ -2207,6 +2523,13 @@ export default function App(): ReactElement {
                     Legacy local recording (canvas path). Each participant station saves its own clean and
                     altered video, session file, and control timing CSV.
                   </p>
+                  <button
+                    className="danger wide-button"
+                    onClick={concludeStudy}
+                    disabled={callState === 'idle' || callState === 'error'}
+                  >
+                    Conclude study
+                  </button>
                 </>
               )}
             </section>
@@ -2295,6 +2618,44 @@ export default function App(): ReactElement {
             <>
               <section className="panel">
                 <div className="section-title accent">Face Modulation</div>
+                <label>
+                  Control target
+                  <select value={form.targetUserId} onChange={(event) => updateForm('targetUserId', event.target.value)}>
+                    <option value="">All participants</option>
+                    {participantPeers.map((peer) => (
+                      <option key={peer.userId} value={peer.userId}>
+                        {peer.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="mode-card">
+                  <div>
+                    <span>Synchrony mode</span>
+                    <strong>{controls.synchronyMode}</strong>
+                    <p>Toggle alignment live during the conversation. Use a target for one participant.</p>
+                  </div>
+                  <div className="segmented-row">
+                    <button
+                      className={controls.synchronyMode === 'aligned' ? 'active' : ''}
+                      onClick={() => setSynchronyMode('aligned')}
+                    >
+                      Aligned
+                    </button>
+                    <button
+                      className={controls.synchronyMode === 'suppressed' ? 'active' : ''}
+                      onClick={() => setSynchronyMode('suppressed')}
+                    >
+                      Suppressed
+                    </button>
+                    <button
+                      className={controls.synchronyMode === 'reactive' ? 'active' : ''}
+                      onClick={() => setSynchronyMode('reactive')}
+                    >
+                      Reactive
+                    </button>
+                  </div>
+                </div>
                 <RangeControl
                   label="Smile alpha"
                   description="Controls the live smile/frown deformation sent to participant machines. 1.00 is neutral, higher moves toward a smile, lower moves toward a frown."
@@ -2305,6 +2666,40 @@ export default function App(): ReactElement {
                   markers={['Frown', 'Neutral', 'Smile']}
                   onChange={(value) => setControl('smileAlpha', value)}
                 />
+                <RangeControl
+                  label="Suppressed smile alpha"
+                  description="The smile setting used when synchrony is suppressed. Lower values dampen smiles or pull the mouth toward frown."
+                  value={controls.suppressSmileAlpha}
+                  min={-1.5}
+                  max={1}
+                  step={0.05}
+                  markers={['Frown pull', 'Dampened', 'Neutral']}
+                  onChange={(value) => setControl('suppressSmileAlpha', value, 'Updated the suppression alpha preset.')}
+                />
+                <RangeControl
+                  label="Reactive pulse (ms)"
+                  description="How long a cue-triggered response should last before returning to the current baseline."
+                  value={controls.reactivePulseMs}
+                  min={300}
+                  max={5000}
+                  step={100}
+                  markers={['Quick', 'Default', 'Long']}
+                  onChange={(value) => setControl('reactivePulseMs', value, 'Updated cue-response duration.')}
+                />
+                <div className="cue-grid">
+                  <button onClick={() => triggerCueResponse('partner-smile', controls.suppressSmileAlpha, 'Partner smile cue -> dampen/frown response')}>
+                    Partner smile cue
+                  </button>
+                  <button onClick={() => triggerCueResponse('partner-laugh', Math.min(0.25, controls.suppressSmileAlpha), 'Partner laugh cue -> stronger suppression')}>
+                    Partner laugh cue
+                  </button>
+                  <button onClick={() => triggerCueResponse('repair-smile', 1.4, 'Repair cue -> brief affiliative smile')}>
+                    Repair smile cue
+                  </button>
+                  <button onClick={() => triggerCueResponse('neutral-reset', 1, 'Neutral reset cue')}>
+                    Neutral reset
+                  </button>
+                </div>
                 <RangeControl
                   label="Detection threshold"
                   description="How strict the face effect should be before applying. Lower is more forgiving in poor lighting; higher can reduce accidental background warping."
@@ -2414,21 +2809,23 @@ export default function App(): ReactElement {
             </>
           ) : null}
 
-          <ChatPanel
-            messages={chatMessages}
-            text={chatText}
-            target={chatTarget}
-            peers={callPeers}
-            isController={isController}
-            selfId={callUserIdRef.current}
-            onTextChange={setChatText}
-            onTargetChange={setChatTarget}
-            onSend={() => {
-              sendChat().catch((error) =>
-                addLog(error instanceof Error ? error.message : 'Could not send chat message.', 'error')
-              )
-            }}
-          />
+          <div ref={chatPanelRef}>
+            <ChatPanel
+              messages={chatMessages}
+              text={chatText}
+              target={chatTarget}
+              peers={callPeers}
+              isController={isController}
+              selfId={callUserIdRef.current}
+              onTextChange={setChatText}
+              onTargetChange={setChatTarget}
+              onSend={() => {
+                sendChat().catch((error) =>
+                  addLog(error instanceof Error ? error.message : 'Could not send chat message.', 'error')
+                )
+              }}
+            />
+          </div>
 
           {isController && (
             <section className="panel">

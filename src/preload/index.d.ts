@@ -65,7 +65,7 @@ declare global {
         destDir: string
         namespace: string
         interaction: string
-      }) => Promise<{ copied: string[]; dataDir: string | null }>
+      }) => Promise<{ copied: string[]; copiedPaths: string[]; dataDir: string | null }>
     }
     DuckSoup?: {
       render: (
