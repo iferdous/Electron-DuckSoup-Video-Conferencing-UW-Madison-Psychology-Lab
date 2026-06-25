@@ -282,7 +282,7 @@ label {
   font-size: 12px;
   font-weight: 950;
   letter-spacing: 0.08em;
-  margin-top: 128px;
+  margin-top: 72px;
   padding: 0 30px;
   text-transform: uppercase;
 }
@@ -812,6 +812,12 @@ label {
   font-weight: 800;
 }
 
+/* Control-target dropdown sits directly above the synchrony card — give it the same
+   20px rhythm the sliders use so it doesn't collide with the card below. */
+.control-target {
+  margin-bottom: 20px;
+}
+
 .mode-card {
   display: grid;
   gap: 12px;
@@ -819,6 +825,7 @@ label {
   border-radius: 6px;
   background: var(--surface-2);
   padding: 12px;
+  margin-bottom: 20px;
 }
 
 .mode-card span {
@@ -852,7 +859,10 @@ label {
 
 .segmented-row button {
   min-width: 0;
-  padding: 0 8px;
+  padding: 0 6px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
 .segmented-row button.active,
@@ -865,6 +875,7 @@ label {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+  margin-bottom: 20px;
 }
 
 .cue-grid button {
@@ -1573,6 +1584,7 @@ label {
 .setup-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: 16px;
 }
 

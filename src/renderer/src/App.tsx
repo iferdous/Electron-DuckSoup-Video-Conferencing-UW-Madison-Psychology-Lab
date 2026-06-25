@@ -2732,7 +2732,7 @@ export default function App(): ReactElement {
             <>
               <section className="panel">
                 <div className="section-title accent">Face Modulation</div>
-                <label>
+                <label className="control-target">
                   Control target
                   <select value={form.targetUserId} onChange={(event) => updateForm('targetUserId', event.target.value)}>
                     <option value="">All participants</option>
