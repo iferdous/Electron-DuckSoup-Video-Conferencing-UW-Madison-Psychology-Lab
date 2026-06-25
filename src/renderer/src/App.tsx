@@ -303,6 +303,54 @@ const controlEventsToCsv = (events: ControlEvent[]): string => {
   return [header.join(','), ...rows].join('\n') + '\n'
 }
 
+const chatMessagesToCsv = (messages: ChatMessage[], peers: CallPeer[]): string => {
+  const nameFor = (id?: string): string =>
+    id ? peers.find((peer) => peer.userId === id)?.displayName ?? id : ''
+  const header = ['sentAt', 'fromId', 'fromName', 'fromRole', 'audience', 'toName', 'targetRole', 'text']
+  const rows = messages.map((message) => {
+    const audience = message.to
+      ? `direct:${nameFor(message.to)}`
+      : message.targetRole
+        ? `role:${message.targetRole}`
+        : 'everyone'
+    return [
+      message.sentAt,
+      message.from,
+      message.fromName,
+      message.fromRole,
+      audience,
+      nameFor(message.to),
+      message.targetRole ?? '',
+      message.text
+    ]
+      .map(csvEscape)
+      .join(',')
+  })
+  return [header.join(','), ...rows].join('\n') + '\n'
+}
+
+type ChatAudience = { label: string; tone: 'everyone' | 'role' | 'private' }
+
+// What audience a chat message went to, from the viewer's perspective — drives the
+// per-message badge so a private/directed experimenter message is visibly distinct
+// from a room-wide one (covert direct-messaging is a core study need).
+const chatAudienceFor = (message: ChatMessage, selfId: string, peers: CallPeer[]): ChatAudience => {
+  if (message.to) {
+    const fromMe = message.from === selfId
+    const otherId = fromMe ? message.to : message.from
+    const otherName = peers.find((peer) => peer.userId === otherId)?.displayName
+    return { label: fromMe ? `to ${otherName ?? 'participant'}` : 'to you', tone: 'private' }
+  }
+  if (message.targetRole) {
+    const toExperimenter = message.targetRole === 'controller'
+    return {
+      label: toExperimenter ? 'to Experimenter' : 'to all participants',
+      tone: toExperimenter ? 'private' : 'role'
+    }
+  }
+  return { label: 'Everyone', tone: 'everyone' }
+}
+
 const normalizePath = (value: string): string => value.replace(/\\/g, '/').toLowerCase()
 
 const classifyRecordingFile = (value: string): 'clean' | 'altered' | 'unknown' => {
@@ -520,6 +568,7 @@ export default function App(): ReactElement {
   const clickAudioContextRef = useRef<AudioContext | null>(null)
   const sessionLinkSectionRef = useRef<HTMLElement | null>(null)
   const chatPanelRef = useRef<HTMLDivElement | null>(null)
+  const chatMessagesRef = useRef<ChatMessage[]>([])
   const recordingStartRef = useRef<number | null>(null)
   const cleanRecorderRef = useRef<MediaRecorder | null>(null)
   const alteredRecorderRef = useRef<MediaRecorder | null>(null)
@@ -725,6 +774,19 @@ export default function App(): ReactElement {
   useEffect(() => {
     controlEventsRef.current = controlEvents
   }, [controlEvents])
+
+  // Keep a fresh ref of chat messages so session finalize (which runs from refs) can
+  // write the full chat_log.csv without re-creating the callback on every message.
+  useEffect(() => {
+    chatMessagesRef.current = chatMessages
+  }, [chatMessages])
+
+  // If a direct-message target was selected and that peer leaves, fall back to
+  // Everyone so messages don't silently route to a dead userId.
+  useEffect(() => {
+    if (chatTarget === 'room' || chatTarget === 'controllers' || chatTarget === 'participants') return
+    if (!callPeers.some((peer) => peer.userId === chatTarget)) setChatTarget('room')
+  }, [callPeers, chatTarget])
 
   useEffect(() => {
     callPeersRef.current = callPeers
@@ -1195,11 +1257,9 @@ export default function App(): ReactElement {
     if (envelope.type === 'chat-message') {
       if (envelope.payload?.id && envelope.payload.text && envelope.payload.from) {
         addChatMessage(envelope.payload as ChatMessage)
-        if (
-          isController &&
-          envelope.payload.from !== callUserIdRef.current &&
-          envelope.payload.fromRole !== 'controller'
-        ) {
+        // Flag unread for every role (participants need to notice a directed
+        // experimenter message just as much as the experimenter notices theirs).
+        if (envelope.payload.from !== callUserIdRef.current) {
           setUnreadChatCount((prev) => Math.min(prev + 1, 99))
         }
       }
@@ -1393,11 +1453,13 @@ export default function App(): ReactElement {
           copiedPaths
         },
         ppsPlaybackPlan,
+        chatLog: { file: 'chat_log.csv', messageCount: chatMessagesRef.current.length },
         notes: [
           'Media + face/voice manipulation routed through DuckSoup (SFU) + Mozza (face-only smile warp).',
           'Server records clean (-dry) and altered (-wet) streams per participant under data/<namespace>/<interaction>/recordings/.',
           'For empathic accuracy ratings, use the participant-specific ppsPlaybackPlan: selfVideo is clean/dry; partnerVideo is altered/wet.',
-          'manipulation_events.csv lists experimenter control changes, cue responses, and synchrony mode changes with timestamps relative to recording start.'
+          'manipulation_events.csv lists experimenter control changes, cue responses, and synchrony mode changes with timestamps relative to recording start.',
+          'chat_log.csv lists every chat message with its audience (everyone / role / direct), including private experimenter messages.'
         ]
       }
       await Promise.all([
@@ -1427,6 +1489,11 @@ export default function App(): ReactElement {
           sessionDir: createdDir,
           filename: 'manipulation_events.csv',
           contents: controlEventsToCsv(controlEventsRef.current)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'chat_log.csv',
+          contents: chatMessagesToCsv(chatMessagesRef.current, callPeersRef.current)
         })
       ])
       addLog(`Saved session manifest + control log to ${createdDir}`, 'success')
@@ -1953,6 +2020,11 @@ export default function App(): ReactElement {
             notes: 'Recording stopped and files saved.'
           }
         ])
+      }),
+      window.researchApi.writeTextFile({
+        sessionDir,
+        filename: 'chat_log.csv',
+        contents: chatMessagesToCsv(chatMessagesRef.current, callPeersRef.current)
       })
     ])
 
@@ -2386,7 +2458,7 @@ export default function App(): ReactElement {
           </div>
         </div>
         <div className="topbar-actions">
-          {isController && unreadChatCount > 0 && (
+          {unreadChatCount > 0 && (
             <button className="chat-notification" onClick={jumpToChat}>
               {unreadChatCount === 1 ? '1 new chat message' : `${unreadChatCount} new chat messages`}
             </button>
@@ -3026,6 +3098,22 @@ function ChatPanel({
   onSend: () => void
 }): ReactElement {
   const visiblePeers = peers.filter((peer) => peer.userId !== selfId)
+  const listRef = useRef<HTMLDivElement | null>(null)
+
+  // Keep the newest message in view as the conversation grows.
+  useEffect(() => {
+    const el = listRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages])
+
+  const targetHint =
+    target === 'room'
+      ? ''
+      : target === 'participants'
+        ? 'Sending to all participants.'
+        : target === 'controllers'
+          ? 'Private message to the experimenter.'
+          : `Private message to ${visiblePeers.find((peer) => peer.userId === target)?.displayName ?? 'this participant'}.`
 
   return (
     <section className="panel chat-panel">
@@ -3042,19 +3130,29 @@ function ChatPanel({
           ))}
         </select>
       </label>
-      <div className="chat-list">
+      {targetHint && <p className="chat-target-hint">{targetHint}</p>}
+      <div className="chat-list" ref={listRef}>
         {messages.length === 0 ? (
-          <p className="muted">No chat messages yet.</p>
+          <p className="muted">No chat messages yet. Use “Send to” above to message everyone or privately.</p>
         ) : (
-          messages.map((message) => (
-            <div key={message.id} className={message.from === selfId ? 'chat-message self' : 'chat-message'}>
-              <div>
-                <strong>{message.fromName}</strong>
-                <span>{new Date(message.sentAt).toLocaleTimeString()}</span>
+          messages.map((message) => {
+            const audience = chatAudienceFor(message, selfId, peers)
+            const mine = message.from === selfId
+            return (
+              <div
+                key={message.id}
+                className={`chat-message${mine ? ' self' : ''}${audience.tone === 'private' ? ' private' : ''}`}
+              >
+                <div className="chat-message-head">
+                  <strong>{message.fromName}</strong>
+                  {message.fromRole === 'controller' && <span className="chat-role-tag">Experimenter</span>}
+                  <span className={`chat-audience chat-audience-${audience.tone}`}>{audience.label}</span>
+                  <span className="chat-time">{new Date(message.sentAt).toLocaleTimeString()}</span>
+                </div>
+                <p>{message.text}</p>
               </div>
-              <p>{message.text}</p>
-            </div>
-          ))
+            )
+          })
         )}
       </div>
       <div className="chat-compose">

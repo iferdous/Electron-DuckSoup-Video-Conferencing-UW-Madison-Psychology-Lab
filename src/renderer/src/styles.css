@@ -1689,6 +1689,62 @@ label {
   overflow-wrap: anywhere;
 }
 
+.chat-message .chat-message-head {
+  justify-content: flex-start;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-message .chat-time {
+  margin-left: auto;
+}
+
+/* Audience + role badges — make directed/private experimenter messages visibly
+   distinct from room-wide ones. Scoped under .chat-message to win over `.chat-message span`. */
+.chat-message .chat-role-tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  background: rgb(96 165 250 / 0.22);
+  border: 1px solid rgb(96 165 250 / 0.4);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.chat-message .chat-audience {
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  border-radius: 999px;
+  padding: 1px 7px;
+  border: 1px solid var(--line-soft);
+  color: var(--muted-2);
+}
+
+.chat-message .chat-audience-private {
+  color: #fcd34d;
+  border-color: rgb(252 211 77 / 0.5);
+  background: rgb(252 211 77 / 0.12);
+}
+
+.chat-message .chat-audience-role {
+  color: #93c5fd;
+  border-color: rgb(147 197 253 / 0.45);
+  background: rgb(147 197 253 / 0.1);
+}
+
+.chat-message.private {
+  border-color: rgb(252 211 77 / 0.45);
+  background: rgb(60 50 20 / 0.34);
+}
+
+.chat-target-hint {
+  margin: -4px 0 0;
+  font-size: 11px;
+  color: #fcd34d;
+}
+
 .chat-compose {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
