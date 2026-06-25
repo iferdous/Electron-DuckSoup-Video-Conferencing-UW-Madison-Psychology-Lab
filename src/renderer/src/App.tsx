@@ -808,18 +808,19 @@ export default function App(): ReactElement {
     }
   })
 
-  // Auto-join the room as soon as the user reaches it (no manual "Join room" click).
-  // Guarded so it fires once per room entry — leaving or going back to setup re-arms it,
-  // and a join error won't loop (the Rejoin button covers recovery).
+  // Auto-join the room once, only when the user first reaches it (entering from setup).
+  // Deliberately depends on setupComplete ONLY — not callState — so that pressing "Leave
+  // room" (which sets callState to 'idle') can never re-trigger an auto-join. Re-arms when
+  // you go back to setup; the manual Join/Rejoin button covers re-entry and error recovery.
   useEffect(() => {
     if (!setupComplete) {
       autoJoinedRef.current = false
       return
     }
-    if (autoJoinedRef.current || callState !== 'idle') return
+    if (autoJoinedRef.current) return
     autoJoinedRef.current = true
     void joinLiveCall()
-  }, [setupComplete, callState])
+  }, [setupComplete])
 
   useEffect(() => {
     callPeersRef.current = callPeers
