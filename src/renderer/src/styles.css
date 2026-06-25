@@ -1092,13 +1092,18 @@ label {
 
 .log-panel {
   flex: 1;
-  min-height: 160px;
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
 }
 
 .log-list {
-  max-height: 260px;
+  flex: 1;
+  min-height: 0;
+  max-height: 360px;
   overflow-y: auto;
   display: grid;
+  align-content: start;
   gap: 7px;
   padding: 4px 4px 4px 0;
 }

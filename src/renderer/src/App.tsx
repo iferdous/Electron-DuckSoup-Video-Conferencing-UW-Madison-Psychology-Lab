@@ -569,6 +569,7 @@ export default function App(): ReactElement {
   const sessionLinkSectionRef = useRef<HTMLElement | null>(null)
   const chatPanelRef = useRef<HTMLDivElement | null>(null)
   const chatMessagesRef = useRef<ChatMessage[]>([])
+  const logListRef = useRef<HTMLDivElement | null>(null)
   const recordingStartRef = useRef<number | null>(null)
   const cleanRecorderRef = useRef<MediaRecorder | null>(null)
   const alteredRecorderRef = useRef<MediaRecorder | null>(null)
@@ -787,6 +788,12 @@ export default function App(): ReactElement {
     if (chatTarget === 'room' || chatTarget === 'controllers' || chatTarget === 'participants') return
     if (!callPeers.some((peer) => peer.userId === chatTarget)) setChatTarget('room')
   }, [callPeers, chatTarget])
+
+  // Keep the newest event in view as the log grows.
+  useEffect(() => {
+    const el = logListRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [logs])
 
   useEffect(() => {
     callPeersRef.current = callPeers
@@ -2669,7 +2676,7 @@ export default function App(): ReactElement {
           {isController && (
             <section className="panel log-panel">
               <div className="section-title">Event Log</div>
-              <div className="log-list">
+              <div className="log-list" ref={logListRef}>
                 {logs.length === 0 ? (
                   <p className="muted">No events yet. Join the room or check the server to start.</p>
                 ) : (
