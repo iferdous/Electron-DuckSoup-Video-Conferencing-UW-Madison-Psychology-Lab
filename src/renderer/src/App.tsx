@@ -611,7 +611,6 @@ export default function App(): ReactElement {
   const [sessionLinkInput, setSessionLinkInput] = useState('')
   const [appliedSessionLinkInput, setAppliedSessionLinkInput] = useState('')
   const [sessionLinkNotice, setSessionLinkNotice] = useState('')
-  const [unreadChatCount, setUnreadChatCount] = useState(0)
   const [showAdvancedConnection, setShowAdvancedConnection] = useState(false)
   const [experimenterLoginOpen, setExperimenterLoginOpen] = useState(false)
   const [experimenterCredentials, setExperimenterCredentials] = useState({ username: '', password: '' })
@@ -674,14 +673,14 @@ export default function App(): ReactElement {
   const addLog = useCallback((message: string, level: LogEvent['level'] = 'info') => {
     setLogs((prev) =>
       [
+        ...prev,
         {
           id: makeId(),
           timestamp: new Date().toLocaleTimeString(),
           level,
           message
-        },
-        ...prev
-      ].slice(0, 100)
+        }
+      ].slice(-100)
     )
   }, [])
 
@@ -1291,11 +1290,6 @@ export default function App(): ReactElement {
     if (envelope.type === 'chat-message') {
       if (envelope.payload?.id && envelope.payload.text && envelope.payload.from) {
         addChatMessage(envelope.payload as ChatMessage)
-        // Flag unread for every role (participants need to notice a directed
-        // experimenter message just as much as the experimenter notices theirs).
-        if (envelope.payload.from !== callUserIdRef.current) {
-          setUnreadChatCount((prev) => Math.min(prev + 1, 99))
-        }
       }
       return
     }
@@ -1806,7 +1800,6 @@ export default function App(): ReactElement {
     setChatMessages([])
     setChatText('')
     setChatTarget('room')
-    setUnreadChatCount(0)
     setLatency(emptyLatency)
     setCallState('idle')
     addLog('Left the room.', 'info')
@@ -1872,11 +1865,6 @@ export default function App(): ReactElement {
     appendControlEvent('study', 'conclude', 'Experimenter concluded the study for all participant stations.')
     sendDirectorPayload({ kind: 'session-conclude' })
     addLog('Study conclusion sent. Participant stations will save/finalize and leave.', 'warn')
-  }
-
-  const jumpToChat = (): void => {
-    chatPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    setUnreadChatCount(0)
   }
 
   const applyAudioPreset = (preset: (typeof audioPresets)[number]): void => {
@@ -2492,11 +2480,6 @@ export default function App(): ReactElement {
           </div>
         </div>
         <div className="topbar-actions">
-          {unreadChatCount > 0 && (
-            <button className="chat-notification" onClick={jumpToChat}>
-              {unreadChatCount === 1 ? '1 new chat message' : `${unreadChatCount} new chat messages`}
-            </button>
-          )}
           {!isController && (
             <div className={`latency-pill ${simpleLatencyMs === null ? 'waiting' : ''}`}>
               <span>Latency</span>
@@ -2701,7 +2684,7 @@ export default function App(): ReactElement {
                 {remoteTiles.length === 0 && (
                   <div className="video-panel">
                     <div className="video-label">Waiting room</div>
-                    <div className="video-empty">Waiting for another participant to join this meeting ID…</div>
+                    <div className="video-empty">Waiting for another participant to join this meeting IDâ€¦</div>
                   </div>
                 )}
               </div>
