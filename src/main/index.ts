@@ -60,6 +60,7 @@ type SignalClient = {
   userId: string
   role: CallRole
   displayName: string
+  participantId: string
   response: ServerResponse
   joinedAt: number
   heartbeat?: NodeJS.Timeout
@@ -286,7 +287,8 @@ const roomPeers = (roomId: string): Array<Omit<SignalClient, 'id' | 'response' |
       userId: client.userId,
       role: client.role,
       displayName: client.displayName,
-      joinedAt: client.joinedAt
+      joinedAt: client.joinedAt,
+      participantId: client.participantId
     })
   }
   return [...unique.values()]
@@ -296,7 +298,8 @@ const peerPayload = (client: SignalClient): Omit<SignalClient, 'id' | 'response'
   userId: client.userId,
   role: client.role,
   displayName: client.displayName,
-  joinedAt: client.joinedAt
+  joinedAt: client.joinedAt,
+  participantId: client.participantId
 })
 
 const removeSignalClient = (client: SignalClient, notify = true, closeResponse = false): void => {
@@ -391,6 +394,7 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
           const requestedRole = url.searchParams.get('role')
           const role = requestedRole === 'director' ? 'controller' : ((requestedRole as CallRole | null) ?? 'participant')
           const displayName = url.searchParams.get('displayName')?.trim() || userId || 'Participant'
+          const participantId = url.searchParams.get('participantId')?.trim() || ''
 
           if (!roomId || !userId || !['participant', 'controller'].includes(role)) {
             jsonResponse(response, 400, { ok: false, error: 'Missing roomId, userId, or role.' })
@@ -417,6 +421,7 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
             userId,
             role,
             displayName,
+            participantId,
             response,
             joinedAt: Date.now()
           }
