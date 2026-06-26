@@ -424,7 +424,7 @@ label {
 }
 
 .participant-workspace {
-  grid-template-columns: minmax(620px, 1fr) 340px;
+  grid-template-columns: minmax(660px, 1fr) 300px;
 }
 
 .controller-workspace {
@@ -724,22 +724,27 @@ label {
 }
 
 .participant-workspace .center-stage {
-  padding: 18px;
+  padding: 12px;
 }
 
 .participant-workspace .controls {
-  background: var(--bg);
-  padding: 18px 18px 18px 0;
+  background: var(--surface);
+  border-left: 0;
+  padding: 12px 12px 12px 0;
 }
 
 .participant-workspace .call-panel {
-  min-height: calc(100vh - 100px);
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
 }
 
 .participant-workspace .chat-panel {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 100px);
+  height: calc(100vh - 88px);
   margin-bottom: 0;
 }
 
@@ -753,7 +758,7 @@ label {
    a fixed 4:3 box (matching the DuckSoup 640x480 stream) so the video fills them with
    no crop and no black bars, centered in the stage. */
 .participant-workspace .participant-grid {
-  height: calc(100vh - 168px);
+  height: calc(100vh - 140px);
   min-height: 0;
   display: grid;
   gap: 12px;
@@ -799,6 +804,11 @@ label {
 
 .wide-button {
   width: 100%;
+}
+
+/* The Conclude button follows a compact (margin-bottom: 0) note; give it breathing room. */
+.danger.wide-button {
+  margin-top: 12px;
 }
 
 .room-action-stack {
@@ -863,6 +873,12 @@ label {
   font-size: 11px;
   letter-spacing: 0.02em;
   white-space: nowrap;
+  justify-content: center;
+}
+
+.segmented-row .button-label {
+  width: 100%;
+  text-align: center;
 }
 
 .segmented-row button.active,
@@ -1533,25 +1549,8 @@ label {
   background:
     radial-gradient(circle at 50% 18%, rgb(31 41 55 / 0.58), transparent 34%),
     var(--bg);
-  padding: 68px 24px 24px;
+  padding: 24px;
   overflow-y: auto;
-}
-
-.welcome-back-button {
-  position: absolute;
-  left: 24px;
-  top: 22px;
-  min-height: 36px;
-  border-color: rgb(75 85 99 / 0.72);
-  background: rgb(17 17 17 / 0.86);
-  color: #e5e7eb;
-  box-shadow: 0 12px 30px rgb(0 0 0 / 0.24);
-  backdrop-filter: blur(4px);
-}
-
-.welcome-back-button:hover:not(:disabled) {
-  border-color: rgb(96 165 250 / 0.52);
-  background: rgb(31 41 55 / 0.72);
 }
 
 .setup-card {
@@ -1597,13 +1596,17 @@ label {
 }
 
 .setup-pill {
-  border: 1px solid rgb(96 165 250 / 0.35);
-  color: #e5e7eb;
-  background: rgb(31 41 55 / 0.66);
-  border-radius: 12px;
-  padding: 8px 13px;
+  border: 1px solid var(--line);
+  color: var(--text);
+  background: var(--surface-3);
+  border-radius: 4px;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 14px;
+  font-size: 12px;
   font-weight: 800;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
@@ -1647,9 +1650,7 @@ label {
 .setup-actions {
   display: flex;
   justify-content: flex-end;
-  border-top: 1px solid var(--line);
   margin-top: 18px;
-  padding-top: 18px;
 }
 
 .setup-continue {

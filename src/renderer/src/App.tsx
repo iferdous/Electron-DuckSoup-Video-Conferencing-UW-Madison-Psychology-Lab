@@ -16,7 +16,6 @@ import type {
   ChatMessage,
   ChatTarget,
   ControlEvent,
-  LatencyStats,
   LogEvent,
   ManipulationControls,
   RecordingState,
@@ -50,7 +49,9 @@ const initialForm: SessionForm = {
 }
 
 const initialControls: ManipulationControls = {
-  smileAlpha: 1,
+  // Mozza `alpha`: 0 = neutral (no warp), positive = smile, negative = frown. The sham
+  // baseline must be a true neutral face, so this starts at 0 (not 1, which is a full smile).
+  smileAlpha: 0,
   // dlib detector confidence floor: lower = stickier detection (fewer dropped frames that
   // snap the warp on/off and cause fast flicker), at the cost of occasional false positives.
   faceThreshold: 0.1,
@@ -61,7 +62,7 @@ const initialControls: ManipulationControls = {
   smoothingCutoff: 0.3,
   overlay: false,
   synchronyMode: 'aligned',
-  suppressSmileAlpha: 0.55,
+  suppressSmileAlpha: -0.45,
   reactivePulseMs: 1800,
   audioPreset: 'none',
   audioPitch: 1,
@@ -152,6 +153,12 @@ const appSubtitle = 'Live emotion study session'
 
 const roleLabel = (role: CallRole): string => (role === 'controller' ? 'Experimenter' : 'Participant')
 
+// "Alice · P001" once the participant's study ID has been relayed; otherwise just the name.
+const peerStripLabel = (peer: CallPeer): string => {
+  const id = peer.role === 'participant' ? peer.participantId : ''
+  return id ? `${peer.displayName} · ${id}` : peer.displayName
+}
+
 const audioPresets: Array<{
   label: string
   preset: string
@@ -185,7 +192,7 @@ const audioPresets: Array<{
     note: 'Brighter outgoing voice tone.'
   },
   {
-    label: 'Quieter voice',
+    label: 'Quieter voice (not wired)',
     preset: 'quieter',
     effectName: 'volume',
     property: 'volume',
@@ -193,7 +200,7 @@ const audioPresets: Array<{
     note: 'Lower outgoing microphone gain.'
   },
   {
-    label: 'Louder voice',
+    label: 'Louder voice (not wired)',
     preset: 'louder',
     effectName: 'volume',
     property: 'volume',
@@ -201,15 +208,6 @@ const audioPresets: Array<{
     note: 'Higher outgoing microphone gain.'
   }
 ]
-
-const emptyLatency: LatencyStats = {
-  rttMs: null,
-  jitterMs: null,
-  audioRttMs: null,
-  videoRttMs: null,
-  packetsLost: 0,
-  updatedAt: ''
-}
 
 const makeId = (): string => `${Date.now()}-${Math.random().toString(16).slice(2)}`
 
@@ -221,8 +219,6 @@ const slugify = (value: string, fallback: string): string => {
     .replace(/^-+|-+$/g, '')
   return slug || fallback
 }
-
-const makeRoomId = (dyadId: string): string => `nelf-${slugify(dyadId, 'room')}-${Date.now().toString(36)}`
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value))
 
@@ -412,71 +408,6 @@ const buildPpsPlaybackPlan = (
   })
 }
 
-const toMs = (value: unknown): number | null => {
-  return typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 1000) : null
-}
-
-const latencyFromPeerConnection = async (peer: RTCPeerConnection): Promise<LatencyStats | null> => {
-  const report = await peer.getStats()
-  let rttMs: number | null = null
-  let videoRttMs: number | null = null
-  let audioRttMs: number | null = null
-  let jitterMs: number | null = null
-  let packetsLost = 0
-
-  report.forEach((stat) => {
-    const item = stat as RTCStats & {
-      state?: string
-      nominated?: boolean
-      currentRoundTripTime?: number
-      roundTripTime?: number
-      kind?: string
-      mediaType?: string
-      jitter?: number
-      packetsLost?: number
-    }
-
-    if (
-      item.type === 'candidate-pair' &&
-      item.state === 'succeeded' &&
-      item.nominated &&
-      typeof item.currentRoundTripTime === 'number'
-    ) {
-      rttMs = toMs(item.currentRoundTripTime)
-    }
-
-    if (item.type === 'remote-inbound-rtp' && typeof item.roundTripTime === 'number') {
-      const kind = item.kind ?? item.mediaType
-      if (kind === 'video') videoRttMs = toMs(item.roundTripTime)
-      if (kind === 'audio') audioRttMs = toMs(item.roundTripTime)
-    }
-
-    if (item.type === 'inbound-rtp') {
-      if (typeof item.jitter === 'number') jitterMs = toMs(item.jitter)
-      if (typeof item.packetsLost === 'number') packetsLost += item.packetsLost
-    }
-  })
-
-  const rttValues = ([rttMs, videoRttMs, audioRttMs] as Array<number | null>).filter(
-    (value): value is number => value !== null
-  )
-  const averageRtt =
-    rttValues.length > 0
-      ? Math.round(rttValues.reduce((total, value) => total + value, 0) / rttValues.length)
-      : null
-
-  if (averageRtt === null && jitterMs === null && packetsLost === 0) return null
-
-  return {
-    rttMs: averageRtt,
-    jitterMs,
-    audioRttMs,
-    videoRttMs,
-    packetsLost,
-    updatedAt: new Date().toLocaleTimeString()
-  }
-}
-
 const supportedRecorderType = (): string => {
   const candidates = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
   return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? ''
@@ -505,7 +436,8 @@ const applySmileWarp = (
   height: number,
   controlState: ManipulationControls
 ): void => {
-  const targetAlpha = controlState.smileAlpha - 1
+  // smileAlpha now follows Mozza's convention directly: 0 = neutral, +smile, -frown.
+  const targetAlpha = controlState.smileAlpha
   const smoothing = clamp(0.03 + controlState.landmarkBeta * 0.25 + controlState.smoothingCutoff / 80, 0.03, 0.45)
   processor.currentSmileAlpha += (targetAlpha - processor.currentSmileAlpha) * smoothing
 
@@ -587,6 +519,10 @@ export default function App(): ReactElement {
   const duckSoupFilesRef = useRef<Record<string, string[]>>({})
   const controlEventsRef = useRef<ControlEvent[]>([])
   const leaveLiveCallRef = useRef<(() => void) | null>(null)
+  // True from the moment the user initiates a join until they leave. Late async callbacks
+  // (DuckSoup teardown events like 'end'/'track', in-flight signaling) check this so pressing
+  // "Leave room" can't be undone by a stale event flipping callState back or re-adding tiles.
+  const inCallRef = useRef(false)
 
   const [setupComplete, setSetupComplete] = useState(false)
   const [welcomeComplete, setWelcomeComplete] = useState(false)
@@ -607,7 +543,6 @@ export default function App(): ReactElement {
   const [logs, setLogs] = useState<LogEvent[]>([])
   const [controlEvents, setControlEvents] = useState<ControlEvent[]>([])
   const [recordingSeconds, setRecordingSeconds] = useState(0)
-  const [latency, setLatency] = useState<LatencyStats>(emptyLatency)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatText, setChatText] = useState('')
   const [chatTarget, setChatTarget] = useState<ChatTarget>('room')
@@ -637,16 +572,6 @@ export default function App(): ReactElement {
     () => (isController ? activeRoomPeers : activeRoomPeers.filter((peer) => peer.role !== 'controller')),
     [activeRoomPeers, isController]
   )
-  const simpleLatencyMs = latency.rttMs ?? latency.videoRttMs ?? latency.audioRttMs
-  const roomStatusText = isController
-    ? `${sessionLabels[form.sessionFormat]} room · Experimenter · ${callState}`
-    : callState === 'connected'
-      ? 'Connected'
-      : callState === 'idle'
-        ? 'Ready to join'
-        : callState === 'error'
-          ? 'Connection issue'
-          : 'Connecting'
   const sessionLink = useMemo(() => {
     let url: URL
     try {
@@ -839,22 +764,6 @@ export default function App(): ReactElement {
     if (changed) syncRemoteTiles()
   }, [callPeers])
 
-  useEffect(() => {
-    if (!['waiting', 'connecting', 'connected'].includes(callState)) return undefined
-
-    const interval = window.setInterval(() => {
-      const peer = peerConnectionsRef.current.values().next().value as RTCPeerConnection | undefined
-      if (!peer) return
-      latencyFromPeerConnection(peer)
-        .then((nextLatency) => {
-          if (nextLatency) setLatency(nextLatency)
-        })
-        .catch(() => undefined)
-    }, 1000)
-
-    return () => window.clearInterval(interval)
-  }, [callState])
-
   const updateForm = <K extends keyof SessionForm>(field: K, value: SessionForm[K]): void => {
     setForm((prev) => ({ ...prev, [field]: value }))
   }
@@ -896,12 +805,6 @@ export default function App(): ReactElement {
     addLog('Returned to participant setup.', 'info')
   }
 
-  const generateNewRoom = (): void => {
-    const roomId = makeRoomId(form.dyadId)
-    updateForm('roomId', roomId)
-    addLog(`New meeting ID created: ${roomId}`, 'success')
-  }
-
   const applySessionLink = (value: string): boolean => {
     const trimmed = value.trim()
     if (!trimmed) return false
@@ -934,11 +837,6 @@ export default function App(): ReactElement {
     updateForm('callSignalUrl', result.localUrl)
     addLog(`Call server running. Participants can use ${result.lanUrl}.`, 'success')
     return result
-  }
-
-  const checkSignalServer = async (): Promise<void> => {
-    const result = await window.researchApi.checkCallSignalServer(form.callSignalUrl)
-    addLog(result.detail, result.ok ? 'success' : 'error')
   }
 
   const checkRoomStatus = useCallback(
@@ -1249,6 +1147,7 @@ export default function App(): ReactElement {
   }
 
   const handleSignalEvent = async (event: MessageEvent<string>): Promise<void> => {
+    if (!inCallRef.current) return
     const envelope = JSON.parse(event.data) as SignalEnvelope
 
     if (envelope.type === 'hello' || envelope.type === 'peer-list') {
@@ -1538,6 +1437,9 @@ export default function App(): ReactElement {
 
   const handleDuckSoupEvent = useCallback(
     (message: DuckSoupCallbackMessage): void => {
+      // Drop any DuckSoup callbacks that land after the user left — otherwise teardown events
+      // ('end' -> 'waiting', a trailing 'track') would re-enter the call UI and look like a rejoin.
+      if (!inCallRef.current) return
       const { kind, payload } = message
       switch (kind) {
         case 'joined':
@@ -1683,6 +1585,7 @@ export default function App(): ReactElement {
       return
     }
 
+    inCallRef.current = true
     setCallState('starting')
     try {
       const roomReachable = await checkRoomStatus(true)
@@ -1711,11 +1614,28 @@ export default function App(): ReactElement {
         }
       }
 
+      if (!inCallRef.current) {
+        // The user pressed Leave during the async join window — undo and stay out.
+        if (duckSoupPlayerRef.current) {
+          try {
+            duckSoupPlayerRef.current.stop()
+          } catch {
+            // already stopped
+          }
+          duckSoupPlayerRef.current = null
+        }
+        duckSoupActiveRef.current = false
+        cleanupLiveMediaProcessor()
+        setCallState('idle')
+        return
+      }
+
       const params = new URLSearchParams({
         roomId: form.roomId,
         userId: callUserIdRef.current,
         role: form.role,
-        displayName: callDisplayName()
+        displayName: callDisplayName(),
+        participantId: form.participantId
       })
       const events = new EventSource(`${signalBaseUrl()}/events?${params.toString()}`)
       callEventsRef.current = events
@@ -1752,6 +1672,7 @@ export default function App(): ReactElement {
   }
 
   const leaveLiveCall = (): void => {
+    inCallRef.current = false
     if (duckSoupActiveRef.current) {
       if (duckSoupPlayerRef.current) {
         try {
@@ -1804,7 +1725,6 @@ export default function App(): ReactElement {
     setChatMessages([])
     setChatText('')
     setChatTarget('room')
-    setLatency(emptyLatency)
     setCallState('idle')
     addLog('Left the room.', 'info')
   }
@@ -1840,7 +1760,7 @@ export default function App(): ReactElement {
 
   const setSynchronyMode = (mode: ManipulationControls['synchronyMode']): void => {
     const nextAlpha =
-      mode === 'aligned' ? 1 : mode === 'suppressed' ? controls.suppressSmileAlpha : controls.smileAlpha
+      mode === 'aligned' ? 0 : mode === 'suppressed' ? controls.suppressSmileAlpha : controls.smileAlpha
     setControls((prev) => ({ ...prev, synchronyMode: mode, smileAlpha: nextAlpha }))
     appendControlEvent('synchronyMode', mode, `Mode changed for ${controlTargetLabel}.`)
     broadcastLiveControl('synchronyMode', mode, `Synchrony mode: ${mode}`)
@@ -1849,7 +1769,7 @@ export default function App(): ReactElement {
   }
 
   const triggerCueResponse = (cue: string, alpha: number, label: string): void => {
-    const returnAlpha = controls.synchronyMode === 'suppressed' ? controls.suppressSmileAlpha : 1
+    const returnAlpha = controls.synchronyMode === 'suppressed' ? controls.suppressSmileAlpha : 0
     const durationMs = controls.reactivePulseMs
     setControls((prev) => ({ ...prev, synchronyMode: 'reactive' }))
     appendControlEvent('cueResponse', alpha, `${label}; target ${controlTargetLabel}; return ${returnAlpha} after ${durationMs}ms.`)
@@ -2173,19 +2093,9 @@ export default function App(): ReactElement {
 
                 {experimenterLoginError && <p className="login-error">{experimenterLoginError}</p>}
 
-                <div className="button-row no-margin">
-                  <button
-                    onClick={() => {
-                      setExperimenterLoginOpen(false)
-                      setExperimenterLoginError('')
-                    }}
-                  >
-                    Cancel
-                  </button>
-                  <button className="primary" onClick={submitExperimenterLogin}>
-                    Login
-                  </button>
-                </div>
+                <button className="primary wide-button" onClick={submitExperimenterLogin}>
+                  Login
+                </button>
               </div>
             </section>
           </main>
@@ -2195,16 +2105,6 @@ export default function App(): ReactElement {
 
     return (
       <div className="setup-shell">
-        <button
-          className="welcome-back-button"
-          onClick={() => {
-            setExperimenterLoginOpen(false)
-            setExperimenterLoginError('')
-            setWelcomeComplete(false)
-          }}
-        >
-          ‹ Back
-        </button>
         <section className="setup-card">
           <div className="setup-header">
             <div>
@@ -2271,7 +2171,7 @@ export default function App(): ReactElement {
           )}
 
           <div className="setup-grid">
-            {isController ? (
+            {isController && (
               <section className="panel">
                 <div className="section-title accent">Study Setup</div>
                 <div className="format-switch">
@@ -2282,28 +2182,9 @@ export default function App(): ReactElement {
                       onClick={() => updateForm('sessionFormat', format)}
                     >
                       {sessionLabels[format]}
+                      {format !== 'dyad' ? ' (not wired)' : ''}
                     </button>
                   ))}
-                </div>
-                <p className="plain-text">
-                  Choose the group size here. Participants will only enter the session details and meeting information you give them.
-                </p>
-              </section>
-            ) : (
-              <section className="panel">
-                <div className="section-title accent">Participant Session</div>
-                <p className="plain-text">
-                  Enter the details from the experimenter. You do not need to choose a role or study format.
-                </p>
-                <div className="metric-list no-bottom">
-                  <div className="metric">
-                    <span>Role</span>
-                    <strong>Participant</strong>
-                  </div>
-                  <div className="metric">
-                    <span>Study</span>
-                    <strong>{form.studyId}</strong>
-                  </div>
                 </div>
               </section>
             )}
@@ -2318,7 +2199,6 @@ export default function App(): ReactElement {
                     <button className="primary" onClick={() => copySessionLink()}>
                       Copy link
                     </button>
-                    <button onClick={() => checkSignalServer()}>Check hosted server</button>
                   </div>
                 </div>
               ) : (
@@ -2341,23 +2221,7 @@ export default function App(): ReactElement {
                   {sessionLinkNotice && <p className="setup-notice">{sessionLinkNotice}</p>}
                 </label>
               )}
-              <label>
-                Meeting ID
-                {isController ? (
-                  <div className="input-action-row">
-                    <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
-                    <button onClick={generateNewRoom}>New</button>
-                  </div>
-                ) : (
-                  <input value={form.roomId} onChange={(event) => updateForm('roomId', event.target.value)} />
-                )}
-              </label>
-              <div className="host-summary">
-                <span>Hosted call server</span>
-                <strong>{form.callSignalUrl}</strong>
-              </div>
               <div className="button-row">
-                <button onClick={() => checkRoomStatus(false)}>Check room</button>
                 <button onClick={() => setShowAdvancedConnection((prev) => !prev)}>
                   {showAdvancedConnection ? 'Hide advanced' : 'Advanced'}
                 </button>
@@ -2407,7 +2271,7 @@ export default function App(): ReactElement {
                   )}
                 </div>
               )}
-              {roomPresence && (
+              {isController && roomPresence && (
                 <div className="room-status-card">
                   <div>
                     <span>Room status</span>
@@ -2425,32 +2289,42 @@ export default function App(): ReactElement {
             <section className="panel setup-wide">
               <div className="section-title accent">Session Details</div>
               <div className="field-grid two">
-                <label>
-                  Display name
-                  <input value={form.displayName} onChange={(event) => updateForm('displayName', event.target.value)} />
-                </label>
-                <label>
-                  Study
-                  <input value={form.studyId} onChange={(event) => updateForm('studyId', event.target.value)} />
-                </label>
+                {!isController && (
+                  <label>
+                    Display name
+                    <input value={form.displayName} onChange={(event) => updateForm('displayName', event.target.value)} />
+                  </label>
+                )}
+                {isController && (
+                  <label>
+                    Study
+                    <input value={form.studyId} onChange={(event) => updateForm('studyId', event.target.value)} />
+                  </label>
+                )}
                 {isController && (
                   <label>
                     RA
                     <input value={form.raId} onChange={(event) => updateForm('raId', event.target.value)} />
                   </label>
                 )}
-                <label>
-                  Dyad/session ID
-                  <input value={form.dyadId} onChange={(event) => updateForm('dyadId', event.target.value)} />
-                </label>
-                <label>
-                  This station ID
-                  <input value={form.participantId} onChange={(event) => updateForm('participantId', event.target.value)} />
-                </label>
-                <label>
-                  Partner/group ID
-                  <input value={form.partnerId} onChange={(event) => updateForm('partnerId', event.target.value)} />
-                </label>
+                {isController && (
+                  <label>
+                    Dyad/session ID
+                    <input value={form.dyadId} onChange={(event) => updateForm('dyadId', event.target.value)} />
+                  </label>
+                )}
+                {!isController && (
+                  <label>
+                    This station ID
+                    <input value={form.participantId} onChange={(event) => updateForm('participantId', event.target.value)} />
+                  </label>
+                )}
+                {!isController && (
+                  <label>
+                    Partner/group ID
+                    <input value={form.partnerId} onChange={(event) => updateForm('partnerId', event.target.value)} />
+                  </label>
+                )}
               </div>
               {isController && (
                 <div className="folder-row">
@@ -2478,18 +2352,8 @@ export default function App(): ReactElement {
       <header className="topbar">
         <div>
           <h1>{appTitle}</h1>
-          <div className="inline-status">
-            <span className={`status-dot status-${callState === 'connected' ? 'connected' : callState === 'error' ? 'error' : callState === 'idle' ? 'idle' : 'connecting'}`} />
-            {roomStatusText}
-          </div>
         </div>
         <div className="topbar-actions">
-          {!isController && (
-            <div className={`latency-pill ${simpleLatencyMs === null ? 'waiting' : ''}`}>
-              <span>Latency</span>
-              <strong>{simpleLatencyMs === null ? 'waiting' : `${simpleLatencyMs} ms`}</strong>
-            </div>
-          )}
           <button onClick={returnToSetup}>Back to setup</button>
           {callState === 'idle' || callState === 'error' ? (
             <button className="primary" onClick={joinLiveCall}>
@@ -2510,46 +2374,19 @@ export default function App(): ReactElement {
             <div className="section-title accent">Room</div>
             <div className="metric-list">
               <div className="metric">
-                <span>Meeting ID</span>
-                <strong>{form.roomId}</strong>
-              </div>
-              <div className="metric">
-                <span>Connection</span>
-                <strong>{isLocalSignalUrl(form.callSignalUrl) ? form.callSignalUrl : 'Hosted room link'}</strong>
-              </div>
-              <div className="metric">
-                <span>Expected participants</span>
+                <span>Participants joined</span>
                 <strong>{participantPeers.length}/{expectedParticipants}</strong>
               </div>
             </div>
             <div className="button-row">
-              <button onClick={checkSignalServer}>Check server</button>
-              <button onClick={() => checkRoomStatus(false)}>Check room</button>
-              {isController && <button onClick={() => copySessionLink()}>Copy link</button>}
-              {isController && isLocalSignalUrl(form.callSignalUrl) && <button onClick={startSignalServer}>Start server</button>}
-            </div>
-            <div className="room-action-stack">
-              {callState === 'idle' || callState === 'error' ? (
-                <button className="primary wide-button" onClick={joinLiveCall}>
-                  {callState === 'error' ? 'Rejoin this room' : 'Join this room'}
-                </button>
-              ) : (
-                <button className="danger wide-button" onClick={leaveLiveCall}>
-                  Leave this room
-                </button>
-              )}
-              <button className="wide-button" onClick={returnToSetup}>
-                Back to setup
-              </button>
+              <button onClick={() => copySessionLink()}>Copy link</button>
             </div>
             <div className="participant-strip">
               {visibleRoomPeers.length === 0 ? (
                 <span>No one else is in this room yet.</span>
               ) : (
                 visibleRoomPeers.map((peer) => (
-                  <span key={`${peer.userId}-${peer.role}`}>
-                    {peer.displayName} · {roleLabel(peer.role)}
-                  </span>
+                  <span key={`${peer.userId}-${peer.role}`}>{peerStripLabel(peer)}</span>
                 ))
               )}
             </div>
@@ -2560,26 +2397,15 @@ export default function App(): ReactElement {
               <div className="section-title">Recording</div>
               {useDuckSoup ? (
                 <>
-                  <p className="plain-text compact-copy">
-                    Recording runs automatically on the media server while the interaction is live. Each
-                    participant station is captured both clean (<code>-dry</code>) and altered
-                    (<code>-wet</code>). A session manifest and the control-timing CSV are written when a
-                    station leaves the room.
-                  </p>
                   <div className="metric-list">
-                    <div className="metric">
-                      <span>Mode</span>
-                      <strong>DuckSoup server-side (reenc)</strong>
-                    </div>
                     <div className="metric">
                       <span>Events logged</span>
                       <strong>{controlEvents.length}</strong>
                     </div>
-                    <div className="metric">
-                      <span>Folder</span>
-                      <strong>{sessionDir || 'created when a station leaves'}</strong>
-                    </div>
                   </div>
+                  <p className="plain-text compact-copy">
+                    Saving recordings to {form.outputFolder || 'the default lab folder in Documents'} (not wired).
+                  </p>
                   <button
                     className="danger wide-button"
                     onClick={concludeStudy}
@@ -2633,15 +2459,19 @@ export default function App(): ReactElement {
             <div className="metric-list">
               <div className="metric">
                 <span>Study</span>
-                <strong>{form.studyId}</strong>
+                <strong>{form.studyId || 'not set'}</strong>
               </div>
               <div className="metric">
                 <span>RA</span>
                 <strong>{form.raId || 'not set'}</strong>
               </div>
               <div className="metric">
-                <span>Station</span>
-                <strong>{form.participantId}</strong>
+                <span>Session ID</span>
+                <strong>{form.dyadId || 'not set'}</strong>
+              </div>
+              <div className="metric">
+                <span>Format</span>
+                <strong>{sessionLabels[form.sessionFormat]}</strong>
               </div>
             </div>
           </section>
@@ -2650,21 +2480,31 @@ export default function App(): ReactElement {
 
         <section className="center-stage">
           <section className="panel call-panel">
-            <div className="section-title accent">Live Video Conference</div>
+            {isController && <div className="section-title accent">Live Video Conference</div>}
             {isController ? (
-              <div className={`conference-grid tiles-${Math.min(remoteTiles.length, 4)}`}>
-                {remoteTiles.map((tile) => (
-                  <RemoteVideoCard key={tile.userId} tile={tile} volume={controls.partnerVolume} />
-                ))}
-                {remoteTiles.length === 0 && (
-                  <div className="video-panel">
-                    <div className="video-label">Waiting room</div>
-                    <div className="video-empty">
-                      Join as experimenter to keep chat and controls available while participants enter the same meeting ID.
-                    </div>
-                  </div>
-                )}
-              </div>
+              remoteTiles.length > 0 ? (
+                <div className={`conference-grid tiles-${Math.min(remoteTiles.length, 4)}`}>
+                  {remoteTiles.map((tile) => (
+                    <RemoteVideoCard key={tile.userId} tile={tile} volume={controls.partnerVolume} />
+                  ))}
+                </div>
+              ) : (
+                // Placeholder for the experimenter monitor (To-Do #4): each participant's
+                // unaltered + altered feed. Live video appears here once the hidden observer
+                // peer is wired; for now these are layout placeholders.
+                <div className="conference-grid tiles-4">
+                  {Array.from({ length: expectedParticipants }).map((_, index) => {
+                    const peer = participantPeers[index]
+                    const who = peer ? peerStripLabel(peer) : `Participant ${index + 1}`
+                    return (['Unaltered', 'Altered'] as const).map((kind) => (
+                      <div className="video-panel" key={`${index}-${kind}`}>
+                        <div className="video-label">{`${who} · ${kind}`}</div>
+                        <div className="video-empty">(not wired)</div>
+                      </div>
+                    ))
+                  })}
+                </div>
+              )
             ) : (
               <div className={`participant-grid count-${Math.min(remoteTiles.length === 0 ? 2 : remoteTiles.length + 1, 4)}`}>
                 <div className="video-panel">
@@ -2733,8 +2573,6 @@ export default function App(): ReactElement {
                 <div className="mode-card">
                   <div>
                     <span>Synchrony mode</span>
-                    <strong>{controls.synchronyMode}</strong>
-                    <p>Toggle alignment live during the conversation. Use a target for one participant.</p>
                   </div>
                   <div className="segmented-row">
                     <InfoButton
@@ -2762,24 +2600,24 @@ export default function App(): ReactElement {
                 </div>
                 <RangeControl
                   label="Smile alpha"
-                  description="Live smile/frown deformation sent to participant machines. 1.00 is neutral; higher = smile, lower/negative = frown. Kept within Mozza's natural range (-1 to 2) — beyond that the face distorts unnaturally."
+                  description="Live smile/frown deformation sent to participant machines. 0.00 is neutral (no warp); positive = smile, negative = frown. Kept within Mozza's natural range (about -1 to 1) — beyond that the face distorts unnaturally."
                   value={controls.smileAlpha}
                   min={-1}
-                  max={2}
+                  max={1}
                   step={0.05}
                   markers={['Frown', 'Neutral', 'Smile']}
-                  neutral={1}
+                  neutral={0}
                   onChange={(value) => setControl('smileAlpha', value)}
                 />
                 <RangeControl
                   label="Suppressed smile alpha"
-                  description="The smile setting used when synchrony is suppressed. Lower values dampen smiles or pull the mouth toward frown."
+                  description="The smile setting used when synchrony is suppressed. 0 is neutral; negative values dampen smiles or pull the mouth toward frown."
                   value={controls.suppressSmileAlpha}
-                  min={-1.5}
-                  max={1}
+                  min={-1}
+                  max={0}
                   step={0.05}
                   markers={['Frown pull', 'Dampened', 'Neutral']}
-                  neutral={1}
+                  neutral={-0.45}
                   onChange={(value) => setControl('suppressSmileAlpha', value, 'Updated the suppression alpha preset.')}
                 />
                 <RangeControl
@@ -2802,19 +2640,19 @@ export default function App(): ReactElement {
                   </InfoButton>
                   <InfoButton
                     description="Manual cue for when the partner laughs. Uses a stronger suppression response than the regular smile cue."
-                    onClick={() => triggerCueResponse('partner-laugh', Math.min(0.25, controls.suppressSmileAlpha), 'Partner laugh cue -> stronger suppression')}
+                    onClick={() => triggerCueResponse('partner-laugh', Math.min(-0.75, controls.suppressSmileAlpha), 'Partner laugh cue -> stronger suppression')}
                   >
                     Partner laugh cue
                   </InfoButton>
                   <InfoButton
                     description="Briefly increases the selected participant's smile. Use as a repair or affiliative response cue."
-                    onClick={() => triggerCueResponse('repair-smile', 1.4, 'Repair cue -> brief affiliative smile')}
+                    onClick={() => triggerCueResponse('repair-smile', 0.4, 'Repair cue -> brief affiliative smile')}
                   >
                     Repair smile cue
                   </InfoButton>
                   <InfoButton
                     description="Returns the selected participant to neutral smile alpha. Use this to clear a cue response."
-                    onClick={() => triggerCueResponse('neutral-reset', 1, 'Neutral reset cue')}
+                    onClick={() => triggerCueResponse('neutral-reset', 0, 'Neutral reset cue')}
                   >
                     Neutral reset
                   </InfoButton>
@@ -2852,14 +2690,6 @@ export default function App(): ReactElement {
                   neutral={0.3}
                   onChange={(value) => setControl('smoothingCutoff', value)}
                 />
-                <label className="toggle-row">
-                  <span>Debug overlay</span>
-                  <input
-                    type="checkbox"
-                    checked={controls.overlay}
-                    onChange={(event) => setControl('overlay', event.target.checked)}
-                  />
-                </label>
               </section>
 
               <section className="panel">
@@ -2876,7 +2706,7 @@ export default function App(): ReactElement {
                   ))}
                 </div>
                 <RangeControl
-                  label="Partner playback volume"
+                  label="Partner playback volume (not wired)"
                   description="Changes how loud the other people sound on this computer only. It does not change what they hear and is not sent across the room."
                   value={controls.partnerVolume}
                   min={0}
@@ -2904,7 +2734,7 @@ export default function App(): ReactElement {
                   }}
                 />
                 <RangeControl
-                  label="Outgoing voice gain"
+                  label="Outgoing voice gain (not wired)"
                   description="Changes how loud participant microphones are for others. This is the louder/quieter voice control."
                   value={controls.audioGain}
                   min={0}
@@ -2921,7 +2751,7 @@ export default function App(): ReactElement {
                   }}
                 />
                 <RangeControl
-                  label="Voice delay (ms)"
+                  label="Voice delay (not wired)"
                   description="Adds delay to participant outgoing microphone audio before others hear it."
                   value={controls.synchronyDelayMs}
                   min={0}
@@ -2952,38 +2782,6 @@ export default function App(): ReactElement {
               }}
             />
           </div>
-
-          {isController && (
-            <section className="panel">
-              <div className="section-title">Latency Viewer</div>
-              <div className="analysis-list">
-                <div>
-                  <strong>Round trip</strong>
-                  <span>{latency.rttMs === null ? 'waiting' : `${latency.rttMs} ms`}</span>
-                </div>
-                <div>
-                  <strong>Video RTT</strong>
-                  <span>{latency.videoRttMs === null ? 'waiting' : `${latency.videoRttMs} ms`}</span>
-                </div>
-                <div>
-                  <strong>Audio RTT</strong>
-                  <span>{latency.audioRttMs === null ? 'waiting' : `${latency.audioRttMs} ms`}</span>
-                </div>
-                <div>
-                  <strong>Jitter</strong>
-                  <span>{latency.jitterMs === null ? 'waiting' : `${latency.jitterMs} ms`}</span>
-                </div>
-                <div>
-                  <strong>Packets lost</strong>
-                  <span>{latency.packetsLost}</span>
-                </div>
-                <div>
-                  <strong>Updated</strong>
-                  <span>{latency.updatedAt || 'waiting'}</span>
-                </div>
-              </div>
-            </section>
-          )}
         </aside>
       </main>
     </div>
@@ -3161,7 +2959,7 @@ function ChatPanel({
         Send to
         <select value={target} onChange={(event) => onTargetChange(event.target.value)}>
           <option value="room">Everyone</option>
-          {isController ? <option value="participants">All participants</option> : <option value="controllers">Experimenter</option>}
+          {!isController && <option value="controllers">Experimenter</option>}
           {visiblePeers.map((peer) => (
             <option key={peer.userId} value={peer.userId}>
               {peer.displayName}
