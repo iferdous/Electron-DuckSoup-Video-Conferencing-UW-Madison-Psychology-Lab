@@ -161,7 +161,7 @@ export const renderDuckSoup = async (
 // --- Mozza face manipulation mapping -------------------------------------------------
 //
 // App control  ->  mozza GStreamer property (verified via `gst-inspect-1.0 mozza`):
-//   smileAlpha       -> alpha       (float,  neutral 1, negative = frown; range -10..10)
+//   smileAlpha       -> alpha       (float,  neutral 0, positive = smile, negative = frown; realistic ~ -1..1)
 //   faceThreshold    -> face-thresh (double, 0..1, dlib detector confidence)
 //   landmarkBeta     -> beta        (float,  0..1, One-Euro filter lag)
 //   smoothingCutoff  -> fc          (float,  0..1000, One-Euro filter jitter cutoff)

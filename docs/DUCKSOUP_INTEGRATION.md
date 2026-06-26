@@ -21,7 +21,7 @@ toggle in the experimenter setup → Advanced, or by clearing the media-server U
 
 | App slider (`smileAlpha` etc.) | Mozza property | Notes |
 | --- | --- | --- |
-| Smile alpha | `alpha` (float, neutral **1**, negative = frown) | interpolated live (~300 ms) |
+| Smile alpha | `alpha` (float, neutral **0**, positive = smile, negative = frown) | interpolated live (~300 ms) |
 | Detection threshold | `face-thresh` (double, 0–1) | dlib detector confidence |
 | Landmark beta | `beta` (float, 0–1) | One-Euro filter lag |
 | Smoothing cutoff | `fc` (float) | One-Euro filter jitter cutoff |
@@ -59,8 +59,8 @@ mozza deform=smile10 alpha=1.1 beta=0.02 fc=0.3 name=video_fx
 ```
 Start → your face smiles, background unchanged.
 
-**`alpha` value reference (smile intensity):** `1` = neutral · higher (`1.5`, `2`) = bigger smile ·
-lower/negative (`-0.5`, `-0.9`) = frown. Keep it roughly `-1` to `2` for natural results.
+**`alpha` value reference (smile intensity):** `0` = neutral (no warp) · positive (`0.5`, `1`) = bigger smile ·
+negative (`-0.5`, `-0.9`) = frown. Keep it roughly `-1` to `1` for natural results.
 
 **Change it live** (no restart): in the **"Update Video FX"** box → property `alpha`, value `-0.9`,
 transition `1000`, **Send** → morphs to a frown over 1 s. Lower `fc` (e.g. `0.3`) = smoother/less jitter.
