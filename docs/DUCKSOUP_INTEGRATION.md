@@ -30,12 +30,14 @@ toggle in the experimenter setup → Advanced, or by clearing the media-server U
 
 ## Run it (this machine / prototype)
 
-1. **One-time: fetch the Mozza plugin + models** (gitignored binaries):
+1. **One-time: build the lab-patched Mozza plugin + fetch its models** (gitignored binaries):
    ```bash
    cd docker/ducksoup && bash fetch-mozza-plugins.sh
    ```
    Leaves `libgstmozza.so`, `libimgwarp.so`, `smile10.dfm`, `shape_predictor_68_face_landmarks.dat` in
-   `docker/ducksoup/plugins/`.
+   `docker/ducksoup/plugins/`. The build applies `mozza-jitter-fix.patch`, which makes the warp use
+   filtered landmarks, wires live `face-thresh`, `beta`, and `fc` values into the active tracker, and
+   resets stale filter history when a face is reacquired.
 2. **Start the media server**: `npm run media:up` (or `cd docker/ducksoup && docker compose up`).
    The default image is `ducksouplab/ducksoup:arm_latest` for Apple Silicon lab Macs; advanced hosts can
    change `DUCKSOUP_IMAGE` in `docker/ducksoup/.env`.
@@ -49,8 +51,9 @@ toggle in the experimenter setup → Advanced, or by clearing the media-server U
 ## Quick tests (no app / no second computer needed)
 
 The media server's built-in test pages exercise the exact same DuckSoup + Mozza + `controlFx` path the
-app uses. Login is `admin` / `admin`. Use smooth settings: **GPU off on Macs/lab laptops, 480×360,
-15 fps** (the dlib face detector is the CPU bottleneck; higher res/fps lags over time).
+app uses. Login is `admin` / `admin`. The app now requests **480×360 at 15 fps** for both capture and
+processing. Use the same values on the test page. The dlib face detector is the CPU bottleneck; higher
+resolution/frame-rate settings can create a processing backlog that looks like network jitter.
 
 **A) Face-only smile (1 webcam):** open `http://localhost:8100/test/mirror/`, set Frame rate `15`,
 Width `480`, Height `360`, GPU off unless the host has NVIDIA support, and Video FX:
@@ -103,6 +106,12 @@ participants**. Every synchrony mode change and cue response is written to `mani
 The current cue buttons are manual experimenter triggers. Automatic partner-smile detection should be a
 separate validated module so it can be tested against lighting, camera angle, false positives, and timing
 before it is used for data collection.
+
+Each DuckSoup participant also writes `media_quality.csv` at session finalization. It samples WebRTC
+transport data about once per second (RTP jitter, RTT when reported, packet loss, dropped frames, bitrate,
+and mean jitter-buffer delay). Use this file to distinguish network/playback instability from Mozza
+landmark shake. See `DYAD_SYNCHRONY_PLAN.md` for the proposed closed-loop cue architecture and validation
+gates.
 
 ## Known limitations / follow-ups
 

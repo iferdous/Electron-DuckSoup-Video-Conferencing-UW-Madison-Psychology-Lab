@@ -1,0 +1,9 @@
+ARG MOZZA_BASE_IMAGE=ducksouplab/mozza:arm_latest
+FROM ${MOZZA_BASE_IMAGE}
+
+COPY mozza-jitter-fix.patch /tmp/mozza-jitter-fix.patch
+
+RUN cd /gstmozza \
+    && git apply --check /tmp/mozza-jitter-fix.patch \
+    && git apply /tmp/mozza-jitter-fix.patch \
+    && ninja -C build

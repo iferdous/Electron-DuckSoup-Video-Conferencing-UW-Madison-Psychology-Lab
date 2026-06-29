@@ -1,0 +1,62 @@
+diff --git a/gst-plugin-mozza/gstmozza.cpp b/gst-plugin-mozza/gstmozza.cpp
+--- a/gst-plugin-mozza/gstmozza.cpp
++++ b/gst-plugin-mozza/gstmozza.cpp
+@@ -166,8 +166,8 @@ gst_mozza_class_init (GstMozzaClass * klass)
+       g_param_spec_float ("fc", "One euro jitter filter frequency cutoff",
+           "If there is an issue with jittering landmarks at low speed, decrease fc. "
+           "For more detailed informations on tuning the One Euro Filter, "
+-          "visit http://cristal.univ-lille.fr/~casiez/1euro/",
+-          0.0, 1000.0, DEFAULT_BETA, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
++          "visit http://cristal.univ-lille.fr/~casiez/1euro/",
++          0.0, 1000.0, DEFAULT_FC, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+ 
+   opencv_filter_class->cv_trans_ip_func =
+       GST_DEBUG_FUNCPTR(gst_mozza_transform_frame_ip);
+@@ -244,7 +244,7 @@ gst_mozza_transform_frame_ip (GstOpencvVideoFilter * filter, GstBuffer * buf, cv
+   std::vector<dlib::rectangle> dets;
+   if (mozza->probable_face_ROI.empty())
+     mozza->probable_face_ROI = cv::Rect(0, 0, cv_img.cols, cv_img.rows);
+-  find_faces(blurred_img, *mozza->face_detector, 0.15, dets, mozza->probable_face_ROI);
++  find_faces(blurred_img, *mozza->face_detector, mozza->face_thresh, dets, mozza->probable_face_ROI);
+ 
+   /* If we fail to find any faces, simply drop the frame.
+    * Crude but effective on the short short term.
+@@ -269,6 +269,14 @@ gst_mozza_transform_frame_ip (GstOpencvVideoFilter * filter, GstBuffer * buf, cv
+ 
+   std::vector<cv::Point2f> landmarks;
+ 
++  /* Do not blend a newly acquired face with stale landmarks from before tracking
++   * was lost. Reset once on reacquisition, not on every missing-face frame. */
++  if (mozza->tracker_state != TRACKER_OK) {
++    delete mozza->oe_filter;
++    mozza->oe_filter = new OneEuroFilter(mozza->oe_beta, mozza->oe_fc);
++    mozza->prev_time = 0;
++  }
++
+   /* If gstreamer doesn't provide us with a timestamp, we simply skip the
+    * stabilization step */
+   if (!GST_BUFFER_PTS_IS_VALID(buf)) {
+@@ -282,7 +290,7 @@ gst_mozza_transform_frame_ip (GstOpencvVideoFilter * filter, GstBuffer * buf, cv
+   std::vector<std::vector<cv::Point2f>> srcGroups;
+   std::vector<std::vector<cv::Point2f>> dstGroups;
+-  if (!faces_pts.empty())
+-    get_deformation_groups(mozza->deformations, faces_pts[0],
++  if (!landmarks.empty())
++    get_deformation_groups(mozza->deformations, landmarks,
+         mozza->alpha, srcGroups, dstGroups);
+ 
+   for (size_t i = 0; i < srcGroups.size(); i++)
+@@ -347,9 +355,13 @@ gst_mozza_set_property (GObject * object, guint property_id,
+       break;
+     case PROP_OE_BETA:
+       mozza->oe_beta = g_value_get_float(value);
++      if (mozza->oe_filter)
++        mozza->oe_filter->beta = mozza->oe_beta;
+       break;
+     case PROP_OE_FC:
+       mozza->oe_fc = g_value_get_float(value);
++      if (mozza->oe_filter)
++        mozza->oe_filter->fc = mozza->oe_fc;
+       break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);

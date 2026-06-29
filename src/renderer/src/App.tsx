@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import {
   renderDuckSoup,
+  applyMozzaControlChanges,
   applyMozzaControls,
   buildMozzaVideoFx,
   buildAudioFx,
   MOZZA_AUDIO_FX_NAME,
   type DuckSoupPlayer,
-  type DuckSoupCallbackMessage
+  type DuckSoupCallbackMessage,
+  type LiveMozzaFaceParams
 } from './ducksoup-client'
 import type {
   CallPeer,
@@ -26,6 +28,10 @@ import type {
 // DuckSoup interactions are capped server-side at 1200s (20 min). Lab conversations longer
 // than this must rejoin. Kept as a constant so it's easy to surface as a setting later.
 const DUCKSOUP_DURATION_SEC = 1200
+const DUCKSOUP_VIDEO_WIDTH = 480
+const DUCKSOUP_VIDEO_HEIGHT = 360
+const DUCKSOUP_VIDEO_FPS = 15
+const MOZZA_CONTROL_INTERVAL_MS = 75
 
 const hostedSignalUrl = 'https://nelf-call-signaling.onrender.com'
 
@@ -115,6 +121,43 @@ type RemoteTile = {
   stream: MediaStream
 }
 
+type DuckSoupRtpStats = {
+  jitter?: number
+  packetsLost?: number
+  framesDropped?: number
+  jitterBufferDelay?: number
+  jitterBufferEmittedCount?: number
+  roundTripTime?: number
+}
+
+type DuckSoupStatsPayload = {
+  videoUp?: string
+  videoDown?: string
+  audioUp?: string
+  audioDown?: string
+  inboundRTPVideo?: DuckSoupRtpStats
+  inboundRTPAudio?: DuckSoupRtpStats
+  remoteInboundRTPVideo?: DuckSoupRtpStats
+  remoteInboundRTPAudio?: DuckSoupRtpStats
+}
+
+type MediaQualitySample = {
+  timestamp: string
+  elapsedMs: number
+  videoUpKbps: string
+  videoDownKbps: string
+  audioUpKbps: string
+  audioDownKbps: string
+  videoJitterMs: number | null
+  audioJitterMs: number | null
+  videoRttMs: number | null
+  audioRttMs: number | null
+  videoPacketsLost: number
+  audioPacketsLost: number
+  framesDropped: number
+  videoJitterBufferMs: number | null
+}
+
 type DirectorPayload =
   | {
       kind: 'live-control'
@@ -146,6 +189,42 @@ const sessionLabels: Record<SessionFormat, string> = {
   dyad: 'Dyad',
   triad: 'Triad',
   quad: 'Quad'
+}
+
+const secondsToMs = (value: number | undefined): number | null =>
+  typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 1000 * 100) / 100 : null
+
+const meanJitterBufferMs = (stats?: DuckSoupRtpStats): number | null => {
+  if (
+    !stats ||
+    typeof stats.jitterBufferDelay !== 'number' ||
+    typeof stats.jitterBufferEmittedCount !== 'number' ||
+    stats.jitterBufferEmittedCount <= 0
+  ) {
+    return null
+  }
+  return Math.round((stats.jitterBufferDelay / stats.jitterBufferEmittedCount) * 1000 * 100) / 100
+}
+
+const mediaQualitySamplesToCsv = (samples: MediaQualitySample[]): string => {
+  const headers: Array<keyof MediaQualitySample> = [
+    'timestamp',
+    'elapsedMs',
+    'videoUpKbps',
+    'videoDownKbps',
+    'audioUpKbps',
+    'audioDownKbps',
+    'videoJitterMs',
+    'audioJitterMs',
+    'videoRttMs',
+    'audioRttMs',
+    'videoPacketsLost',
+    'audioPacketsLost',
+    'framesDropped',
+    'videoJitterBufferMs'
+  ]
+  const rows = samples.map((sample) => headers.map((header) => csvEscape(sample[header])).join(','))
+  return [headers.join(','), ...rows].join('\n')
 }
 
 const appTitle = 'Niedenthal Emotions Lab'
@@ -518,6 +597,10 @@ export default function App(): ReactElement {
   const callPeersRef = useRef<CallPeer[]>([])
   const duckSoupFilesRef = useRef<Record<string, string[]>>({})
   const controlEventsRef = useRef<ControlEvent[]>([])
+  const mediaQualitySamplesRef = useRef<MediaQualitySample[]>([])
+  const pendingMozzaControlsRef = useRef<{ face: LiveMozzaFaceParams; audioPitch: number } | null>(null)
+  const appliedMozzaControlsRef = useRef<{ face: LiveMozzaFaceParams; audioPitch: number } | null>(null)
+  const mozzaControlTimerRef = useRef<number | null>(null)
   const leaveLiveCallRef = useRef<(() => void) | null>(null)
   // True from the moment the user initiates a join until they leave. Late async callbacks
   // (DuckSoup teardown events like 'end'/'track', in-flight signaling) check this so pressing
@@ -685,18 +768,45 @@ export default function App(): ReactElement {
       applyMediaElementVolume(video, controls.partnerVolume)
     }
     applyAudioControlsToProcessor(liveMediaProcessorRef.current, controls)
-    // DuckSoup/Mozza path: push the face controls live onto this station's own pipeline.
-    // The transformed stream is what partners (and recordings) receive; self-view stays raw.
+    // Coalesce rapid slider events before they reach the GStreamer pipeline. The latest
+    // value is still applied live, but redundant beta/fc/threshold/pitch writes are skipped.
     if (duckSoupPlayerRef.current && !isController) {
-      applyMozzaControls(duckSoupPlayerRef.current, {
-        smileAlpha: controls.smileAlpha,
-        faceThreshold: controls.faceThreshold,
-        landmarkBeta: controls.landmarkBeta,
-        smoothingCutoff: controls.smoothingCutoff
-      })
-      duckSoupPlayerRef.current.controlFx(MOZZA_AUDIO_FX_NAME, 'pitch', controls.audioPitch)
+      pendingMozzaControlsRef.current = {
+        face: {
+          smileAlpha: controls.smileAlpha,
+          faceThreshold: controls.faceThreshold,
+          landmarkBeta: controls.landmarkBeta,
+          smoothingCutoff: controls.smoothingCutoff
+        },
+        audioPitch: controls.audioPitch
+      }
+      if (mozzaControlTimerRef.current === null) {
+        mozzaControlTimerRef.current = window.setTimeout(() => {
+          mozzaControlTimerRef.current = null
+          const player = duckSoupPlayerRef.current
+          const pending = pendingMozzaControlsRef.current
+          if (!player || !pending) return
+
+          const previous = appliedMozzaControlsRef.current
+          applyMozzaControlChanges(player, pending.face, previous?.face ?? null)
+          if (!previous || pending.audioPitch !== previous.audioPitch) {
+            player.controlFx(MOZZA_AUDIO_FX_NAME, 'pitch', pending.audioPitch)
+          }
+          appliedMozzaControlsRef.current = pending
+        }, MOZZA_CONTROL_INTERVAL_MS)
+      }
     }
   }, [controls, isController])
+
+  useEffect(
+    () => () => {
+      if (mozzaControlTimerRef.current !== null) {
+        window.clearTimeout(mozzaControlTimerRef.current)
+        mozzaControlTimerRef.current = null
+      }
+    },
+    []
+  )
 
   // Keep a ref of room presence fresh for DuckSoup callbacks, and refresh remote tile
   // labels (DuckSoup gives us userIds; display names come from the Render presence list).
@@ -1385,12 +1495,18 @@ export default function App(): ReactElement {
         },
         ppsPlaybackPlan,
         chatLog: { file: 'chat_log.csv', messageCount: chatMessagesRef.current.length },
+        mediaQuality: {
+          file: 'media_quality.csv',
+          sampleCount: mediaQualitySamplesRef.current.length,
+          sampleInterval: 'approximately 1 second'
+        },
         notes: [
           'Media + face/voice manipulation routed through DuckSoup (SFU) + Mozza (face-only smile warp).',
           'Server records clean (-dry) and altered (-wet) streams per participant under data/<namespace>/<interaction>/recordings/.',
           'For empathic accuracy ratings, use the participant-specific ppsPlaybackPlan: selfVideo is clean/dry; partnerVideo is altered/wet.',
           'manipulation_events.csv lists experimenter control changes, cue responses, and synchrony mode changes with timestamps relative to recording start.',
-          'chat_log.csv lists every chat message with its audience (everyone / role / direct), including private experimenter messages.'
+          'chat_log.csv lists every chat message with its audience (everyone / role / direct), including private experimenter messages.',
+          'media_quality.csv separates transport jitter, packet loss, frame drops, and jitter-buffer delay from visible Mozza landmark jitter.'
         ]
       }
       await Promise.all([
@@ -1425,6 +1541,11 @@ export default function App(): ReactElement {
           sessionDir: createdDir,
           filename: 'chat_log.csv',
           contents: chatMessagesToCsv(chatMessagesRef.current, callPeersRef.current)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'media_quality.csv',
+          contents: mediaQualitySamplesToCsv(mediaQualitySamplesRef.current)
         })
       ])
       addLog(`Saved session manifest + control log to ${createdDir}`, 'success')
@@ -1494,6 +1615,28 @@ export default function App(): ReactElement {
           setCallState('connected')
           break
         }
+        case 'stats': {
+          const stats = (payload ?? {}) as DuckSoupStatsPayload
+          const inboundVideo = stats.inboundRTPVideo
+          const inboundAudio = stats.inboundRTPAudio
+          mediaQualitySamplesRef.current.push({
+            timestamp: new Date().toISOString(),
+            elapsedMs: recordingStartRef.current ? Date.now() - recordingStartRef.current : 0,
+            videoUpKbps: stats.videoUp ?? '',
+            videoDownKbps: stats.videoDown ?? '',
+            audioUpKbps: stats.audioUp ?? '',
+            audioDownKbps: stats.audioDown ?? '',
+            videoJitterMs: secondsToMs(inboundVideo?.jitter),
+            audioJitterMs: secondsToMs(inboundAudio?.jitter),
+            videoRttMs: secondsToMs(stats.remoteInboundRTPVideo?.roundTripTime),
+            audioRttMs: secondsToMs(stats.remoteInboundRTPAudio?.roundTripTime),
+            videoPacketsLost: inboundVideo?.packetsLost ?? 0,
+            audioPacketsLost: inboundAudio?.packetsLost ?? 0,
+            framesDropped: inboundVideo?.framesDropped ?? 0,
+            videoJitterBufferMs: meanJitterBufferMs(inboundVideo)
+          })
+          break
+        }
         case 'start':
           setCallState('connected')
           recordingStartRef.current = Date.now()
@@ -1502,12 +1645,14 @@ export default function App(): ReactElement {
           appendControlEvent('recording', 'start', 'DuckSoup server-side recording (clean -dry + altered -wet).')
           addLog('Live interaction started. Server-side recording is running.', 'success')
           if (duckSoupPlayerRef.current && !isController) {
-            applyMozzaControls(duckSoupPlayerRef.current, {
+            const face = {
               smileAlpha: controlsRef.current.smileAlpha,
               faceThreshold: controlsRef.current.faceThreshold,
               landmarkBeta: controlsRef.current.landmarkBeta,
               smoothingCutoff: controlsRef.current.smoothingCutoff
-            })
+            }
+            applyMozzaControls(duckSoupPlayerRef.current, face)
+            appliedMozzaControlsRef.current = { face, audioPitch: controlsRef.current.audioPitch }
           }
           break
         case 'ending':
@@ -1547,10 +1692,13 @@ export default function App(): ReactElement {
     const baseUrl = form.duckSoupUrl.trim()
     streamUserMapRef.current.clear()
     duckSoupFilesRef.current = {}
+    mediaQualitySamplesRef.current = []
+    pendingMozzaControlsRef.current = null
+    appliedMozzaControlsRef.current = null
     const controls = controlsRef.current
     const player = await renderDuckSoup(
       baseUrl,
-      { stats: false, callback: handleDuckSoupEvent },
+      { stats: true, callback: handleDuckSoupEvent },
       {
         interactionName: form.roomId,
         userId: callUserIdRef.current,
@@ -1560,9 +1708,14 @@ export default function App(): ReactElement {
         videoFormat: 'H264',
         gpu: true, // use NVENC when the server has a GPU (DUCKSOUP_NVCODEC); falls back to x264 otherwise
         recordingMode: 'reenc',
-        width: 640,
-        height: 480,
-        framerate: 25,
+        width: DUCKSOUP_VIDEO_WIDTH,
+        height: DUCKSOUP_VIDEO_HEIGHT,
+        framerate: DUCKSOUP_VIDEO_FPS,
+        video: {
+          width: { ideal: DUCKSOUP_VIDEO_WIDTH },
+          height: { ideal: DUCKSOUP_VIDEO_HEIGHT },
+          frameRate: { ideal: DUCKSOUP_VIDEO_FPS, max: DUCKSOUP_VIDEO_FPS }
+        },
         logLevel: 2,
         videoFx: buildMozzaVideoFx({
           smileAlpha: controls.smileAlpha,
@@ -1673,6 +1826,12 @@ export default function App(): ReactElement {
 
   const leaveLiveCall = (): void => {
     inCallRef.current = false
+    if (mozzaControlTimerRef.current !== null) {
+      window.clearTimeout(mozzaControlTimerRef.current)
+      mozzaControlTimerRef.current = null
+    }
+    pendingMozzaControlsRef.current = null
+    appliedMozzaControlsRef.current = null
     if (duckSoupActiveRef.current) {
       if (duckSoupPlayerRef.current) {
         try {

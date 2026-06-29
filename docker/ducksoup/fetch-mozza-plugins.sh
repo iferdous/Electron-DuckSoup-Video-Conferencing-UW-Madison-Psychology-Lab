@@ -15,10 +15,18 @@ TAG="latest"
 case "$(uname -m)" in
   arm64 | aarch64) TAG="arm_latest" ;;
 esac
-IMAGE="ducksouplab/mozza:${TAG}"
+BASE_IMAGE="ducksouplab/mozza:${TAG}"
+IMAGE="nelf/mozza-patched:${TAG}"
 
-echo "==> Pulling ${IMAGE}"
-docker pull "${IMAGE}"
+echo "==> Pulling ${BASE_IMAGE}"
+docker pull "${BASE_IMAGE}"
+
+echo "==> Building the lab Mozza plugin with landmark smoothing and live control fixes"
+docker build \
+  --file Dockerfile.mozza-patched \
+  --build-arg "MOZZA_BASE_IMAGE=${BASE_IMAGE}" \
+  --tag "${IMAGE}" \
+  .
 
 echo "==> Extracting plugin + deform model from a throwaway container"
 docker rm -f mozza_runner >/dev/null 2>&1 || true

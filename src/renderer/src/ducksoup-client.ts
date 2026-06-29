@@ -178,6 +178,8 @@ export type MozzaFaceParams = {
   overlay: boolean
 }
 
+export type LiveMozzaFaceParams = Omit<MozzaFaceParams, 'overlay'>
+
 export const buildMozzaVideoFx = (p: MozzaFaceParams): string =>
   [
     'mozza',
@@ -199,11 +201,34 @@ export const buildAudioFx = (pitch: number): string => `pitch pitch=${pitch} nam
 // is a double, so it goes through polyControlFx; overlay is a bool set only at render.
 export const applyMozzaControls = (
   player: DuckSoupPlayer,
-  p: Omit<MozzaFaceParams, 'overlay'>,
+  p: LiveMozzaFaceParams,
   alphaTransitionMs = 300
 ): void => {
   player.controlFx(MOZZA_FX_NAME, 'alpha', p.smileAlpha, alphaTransitionMs)
   player.controlFx(MOZZA_FX_NAME, 'beta', p.landmarkBeta)
   player.controlFx(MOZZA_FX_NAME, 'fc', p.smoothingCutoff)
   player.polyControlFx(MOZZA_FX_NAME, 'face-thresh', 'double', p.faceThreshold)
+}
+
+// Slider drags can produce dozens of updates per second. Apply only changed values so
+// DuckSoup does not queue redundant control messages while it is decoding, tracking,
+// warping, recording, and re-encoding both dyad streams.
+export const applyMozzaControlChanges = (
+  player: DuckSoupPlayer,
+  current: LiveMozzaFaceParams,
+  previous: LiveMozzaFaceParams | null,
+  alphaTransitionMs = 150
+): void => {
+  if (!previous || current.smileAlpha !== previous.smileAlpha) {
+    player.controlFx(MOZZA_FX_NAME, 'alpha', current.smileAlpha, alphaTransitionMs)
+  }
+  if (!previous || current.landmarkBeta !== previous.landmarkBeta) {
+    player.controlFx(MOZZA_FX_NAME, 'beta', current.landmarkBeta)
+  }
+  if (!previous || current.smoothingCutoff !== previous.smoothingCutoff) {
+    player.controlFx(MOZZA_FX_NAME, 'fc', current.smoothingCutoff)
+  }
+  if (!previous || current.faceThreshold !== previous.faceThreshold) {
+    player.polyControlFx(MOZZA_FX_NAME, 'face-thresh', 'double', current.faceThreshold)
+  }
 }
