@@ -2457,9 +2457,9 @@ export default function App(): ReactElement {
               <p>{appSubtitle}</p>
             </div>
             <div className="setup-header-actions">
-              <div className="setup-pill">
-                {isController ? `Experimenter · ${sessionLabels[form.sessionFormat]}` : 'Participant'}
-              </div>
+              {isController && (
+                <InfoDot description="Reminder: bring the Advanced button back before the lab setup. We hid it for a cleaner screen, but the lab needs it — that's where you point the participants' computers at the right server address so they can connect." />
+              )}
               {isController ? (
                 <button onClick={returnToParticipantMode}>Exit experimenter mode</button>
               ) : (
@@ -2918,7 +2918,7 @@ export default function App(): ReactElement {
                 </div>
                 <RangeControl
                   label="Smile alpha"
-                  description="0 = neutral, positive = smile, negative = frown. Keep within about -1 to 1."
+                  description="0 = neutral, positive = smile, negative = frown. Keep within about -0.8 to 0.8 for best results."
                   value={controls.smileAlpha}
                   min={-1}
                   max={1}
@@ -3373,11 +3373,15 @@ function InfoButton({
 // the control panel's overflow (the bug with the old absolutely-positioned tooltip).
 function InfoDot({ description }: { description: string }): ReactElement {
   const ref = useRef<HTMLSpanElement>(null)
-  const [coords, setCoords] = useState<{ left: number; top: number } | null>(null)
+  const [coords, setCoords] = useState<{ left: number; top: number; below: boolean } | null>(null)
 
   const show = (): void => {
     const rect = ref.current?.getBoundingClientRect()
-    if (rect) setCoords({ left: rect.left + rect.width / 2, top: rect.top })
+    if (!rect) return
+    // Open upward by default, but flip below when the dot is near the top of the screen
+    // (e.g. the header heads-up) so the tooltip doesn't get clipped off the top edge.
+    const below = rect.top < 170
+    setCoords({ left: rect.left + rect.width / 2, top: below ? rect.bottom : rect.top, below })
   }
   const hide = (): void => setCoords(null)
 
@@ -3394,7 +3398,15 @@ function InfoDot({ description }: { description: string }): ReactElement {
     >
       i
       {coords && (
-        <span className="info-tooltip-fixed" role="tooltip" style={{ left: coords.left, top: coords.top }}>
+        <span
+          className="info-tooltip-fixed"
+          role="tooltip"
+          style={{
+            left: coords.left,
+            top: coords.top,
+            transform: coords.below ? 'translate(-50%, 10px)' : 'translate(-50%, calc(-100% - 10px))'
+          }}
+        >
           {description}
         </span>
       )}

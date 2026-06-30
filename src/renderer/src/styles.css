@@ -864,19 +864,22 @@ label {
 .segmented-row {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
+  gap: 4px;
 }
 
 .segmented-row button {
   min-width: 0;
-  padding: 0 6px;
-  font-size: 11px;
-  letter-spacing: 0.02em;
+  padding: 0 4px;
+  font-size: 9px;
+  letter-spacing: 0;
   white-space: nowrap;
   justify-content: center;
 }
 
 .segmented-row .button-label {
+  /* Override .mode-card span (11px), which otherwise also matches these label spans and
+     makes "Suppressed" overflow its box. 9px fits all three labels centered with margin. */
+  font-size: 9px;
   width: 100%;
   text-align: center;
 }
