@@ -3,7 +3,10 @@ FROM ${MOZZA_BASE_IMAGE}
 
 COPY mozza-jitter-fix.patch /tmp/mozza-jitter-fix.patch
 
-RUN cd /gstmozza \
+# Normalize line endings before applying: on Windows checkouts git's autocrlf can turn the
+# LF patch into CRLF, which `git apply` refuses to match against the LF source in the image.
+RUN sed -i 's/\r$//' /tmp/mozza-jitter-fix.patch \
+    && cd /gstmozza \
     && git apply --check /tmp/mozza-jitter-fix.patch \
     && git apply /tmp/mozza-jitter-fix.patch \
     && ninja -C build

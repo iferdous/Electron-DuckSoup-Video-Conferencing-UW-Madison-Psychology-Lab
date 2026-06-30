@@ -1706,7 +1706,9 @@ export default function App(): ReactElement {
         size: expectedParticipants,
         namespace: duckSoupNamespace(),
         videoFormat: 'H264',
-        gpu: true, // use NVENC when the server has a GPU (DUCKSOUP_NVCODEC); falls back to x264 otherwise
+        gpu: false, // CPU x264. NVENC needs the server's nvcodec GStreamer elements present (NVIDIA
+        // Container Toolkit in WSL2 + a GPU reservation in docker-compose.yml); without them gpu:true
+        // builds a broken nvh264dec/nvh264enc pipeline -> white video. CPU is fast enough for dyads.
         recordingMode: 'reenc',
         width: DUCKSOUP_VIDEO_WIDTH,
         height: DUCKSOUP_VIDEO_HEIGHT,

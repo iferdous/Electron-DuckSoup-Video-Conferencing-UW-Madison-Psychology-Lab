@@ -1,0 +1,3 @@
+# The Mozza patch is applied with `git apply` inside a Linux image; it must stay LF even
+# on Windows checkouts (autocrlf would otherwise rewrite it to CRLF and break `git apply`).
+mozza-jitter-fix.patch text eol=lf

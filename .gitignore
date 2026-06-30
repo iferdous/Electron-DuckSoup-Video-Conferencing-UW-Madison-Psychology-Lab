@@ -11,3 +11,6 @@ docker/ducksoup/data/
 docker/ducksoup/log/
 docker/ducksoup/plugins/*
 !docker/ducksoup/plugins/.gitkeep
+
+# Local working notes (single source of truth, but kept out of the shared repo — has names)
+/DEV_NOTES.md
