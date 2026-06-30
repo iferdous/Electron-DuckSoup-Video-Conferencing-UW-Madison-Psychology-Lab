@@ -121,6 +121,19 @@ type RemoteTile = {
   stream: MediaStream
 }
 
+// A single feed in the experimenter's 4-view monitor: one participant's clean or altered stream.
+type MonitorTile = {
+  key: string // `${userId}:${kind}`
+  kind: 'clean' | 'altered'
+  userId: string
+  displayName: string
+  stream: MediaStream
+}
+
+// Stream descriptor a participant sends with its monitor offer so the controller knows what each
+// forwarded MediaStream is, by its msid (stream.id), without inspecting the media.
+type MonitorStreamDescriptor = { streamId: string; kind: 'clean' | 'altered'; userId: string; displayName: string }
+
 type DuckSoupRtpStats = {
   jitter?: number
   packetsLost?: number
@@ -600,6 +613,17 @@ export default function App(): ReactElement {
   const appliedMozzaControlsRef = useRef<{ face: LiveMozzaFaceParams; audioPitch: number } | null>(null)
   const mozzaControlTimerRef = useRef<number | null>(null)
   const leaveLiveCallRef = useRef<(() => void) | null>(null)
+  // Experimenter 4-view monitor: a separate WebRTC channel (runs alongside the DuckSoup SFU)
+  // so the controller can see all four feeds. DuckSoup only relays each participant's ALTERED
+  // (wet) stream live; the CLEAN (dry) stream never leaves the participant's machine. So each
+  // participant forwards its OWN clean camera + the PARTNER's altered stream (which it already
+  // receives from the SFU) to the controller. Every forwarded stream is self-labelled with
+  // { kind: 'clean'|'altered', userId } so the controller can drop it in the right tile.
+  const monitorConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map())
+  const monitorStreamMetaRef = useRef<Map<string, { kind: 'clean' | 'altered'; userId: string; displayName: string }>>(new Map())
+  const monitorPendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map())
+  const publishedMonitorSigRef = useRef<string>('')
+  const monitorReceivedRef = useRef<Map<string, MonitorTile>>(new Map())
   // True from the moment the user initiates a join until they leave. Late async callbacks
   // (DuckSoup teardown events like 'end'/'track', in-flight signaling) check this so pressing
   // "Leave room" can't be undone by a stale event flipping callState back or re-adding tiles.
@@ -610,11 +634,7 @@ export default function App(): ReactElement {
   const [callState, setCallState] = useState<CallState>('idle')
   const [callPeers, setCallPeers] = useState<CallPeer[]>([])
   const [remoteTiles, setRemoteTiles] = useState<RemoteTile[]>([])
-  const [signalServer, setSignalServer] = useState<{ active: boolean; localUrl: string; lanUrl: string }>({
-    active: false,
-    localUrl: '',
-    lanUrl: ''
-  })
+  const [monitorTiles, setMonitorTiles] = useState<MonitorTile[]>([])
   const [roomPresence, setRoomPresence] = useState<RoomPresence | null>(null)
   const [form, setForm] = useState<SessionForm>(initialForm)
   const [controls, setControls] = useState<ManipulationControls>(initialControls)
@@ -630,7 +650,6 @@ export default function App(): ReactElement {
   const [sessionLinkInput, setSessionLinkInput] = useState('')
   const [appliedSessionLinkInput, setAppliedSessionLinkInput] = useState('')
   const [sessionLinkNotice, setSessionLinkNotice] = useState('')
-  const [showAdvancedConnection, setShowAdvancedConnection] = useState(false)
   const [experimenterLoginOpen, setExperimenterLoginOpen] = useState(false)
   const [experimenterCredentials, setExperimenterCredentials] = useState({ username: '', password: '' })
   const [experimenterLoginError, setExperimenterLoginError] = useState('')
@@ -639,6 +658,7 @@ export default function App(): ReactElement {
   const useDuckSoup = form.mediaTransport === 'ducksoup' && form.duckSoupUrl.trim().length > 0
   const expectedParticipants = sessionCapacity[form.sessionFormat]
   const participantPeers = useMemo(() => callPeers.filter((peer) => peer.role === 'participant'), [callPeers])
+  const monitorByKey = useMemo(() => new Map(monitorTiles.map((tile) => [tile.key, tile])), [monitorTiles])
   const selectedControlTarget = useMemo(
     () => participantPeers.find((peer) => peer.userId === form.targetUserId),
     [form.targetUserId, participantPeers]
@@ -872,6 +892,17 @@ export default function App(): ReactElement {
     if (changed) syncRemoteTiles()
   }, [callPeers])
 
+  // Participant: (re)publish the monitor feeds whenever peers or local/partner streams change
+  // (controller joins, partner's altered stream arrives, etc.). publishMonitorStreams is a no-op
+  // for the controller and dedupes via a stream-set signature, so extra runs are cheap.
+  useEffect(() => {
+    if (!useDuckSoup || isController) return
+    publishMonitorStreams().catch((error) =>
+      addLog(error instanceof Error ? error.message : 'Could not share view with the experimenter.', 'error')
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [callPeers, remoteTiles, callState, useDuckSoup, isController])
+
   const updateForm = <K extends keyof SessionForm>(field: K, value: SessionForm[K]): void => {
     setForm((prev) => ({ ...prev, [field]: value }))
   }
@@ -941,7 +972,6 @@ export default function App(): ReactElement {
 
   const startSignalServer = async (): Promise<{ ok: boolean; localUrl: string; lanUrl: string }> => {
     const result = await window.researchApi.startCallSignalServer(8765)
-    setSignalServer({ active: result.ok, localUrl: result.localUrl, lanUrl: result.lanUrl })
     updateForm('callSignalUrl', result.localUrl)
     addLog(`Call server running. Participants can use ${result.lanUrl}.`, 'success')
     return result
@@ -1254,6 +1284,149 @@ export default function App(): ReactElement {
     })
   }
 
+  // --- Experimenter 4-view monitor (separate WebRTC channel, DuckSoup mode) ----------------
+  const monitorIceServers = [{ urls: 'stun:stun.l.google.com:19302' }]
+
+  const syncMonitorTiles = (): void => setMonitorTiles([...monitorReceivedRef.current.values()])
+
+  const closeMonitorConnection = (userId: string): void => {
+    const pc = monitorConnectionsRef.current.get(userId)
+    if (pc) {
+      pc.onicecandidate = null
+      pc.ontrack = null
+      try {
+        pc.close()
+      } catch {
+        // already closed
+      }
+      monitorConnectionsRef.current.delete(userId)
+    }
+    monitorPendingIceRef.current.delete(userId)
+  }
+
+  const teardownMonitor = (): void => {
+    for (const userId of [...monitorConnectionsRef.current.keys()]) closeMonitorConnection(userId)
+    monitorStreamMetaRef.current.clear()
+    monitorPendingIceRef.current.clear()
+    publishedMonitorSigRef.current = ''
+    if (monitorReceivedRef.current.size > 0) {
+      monitorReceivedRef.current.clear()
+      syncMonitorTiles()
+    }
+  }
+
+  // Participant side: forward own clean camera + the partner's altered stream to the controller.
+  const publishMonitorStreams = async (): Promise<void> => {
+    if (!useDuckSoup || isController || !inCallRef.current) return
+    const controller = callPeersRef.current.find((peer) => peer.role === 'controller')
+    if (!controller) {
+      teardownMonitor()
+      return
+    }
+
+    const publish: Array<{ stream: MediaStream } & MonitorStreamDescriptor> = []
+    const clean = cleanStreamRef.current
+    if (clean && clean.getTracks().length > 0) {
+      publish.push({ stream: clean, streamId: clean.id, kind: 'clean', userId: callUserIdRef.current, displayName: callDisplayName() })
+    }
+    for (const tile of remoteStreamsRef.current.values()) {
+      if (tile.role !== 'participant' || tile.userId === callUserIdRef.current) continue
+      if (tile.stream.getTracks().length === 0) continue
+      publish.push({ stream: tile.stream, streamId: tile.stream.id, kind: 'altered', userId: tile.userId, displayName: tile.displayName })
+    }
+    if (publish.length === 0) return
+
+    const signature =
+      controller.userId +
+      '|' +
+      publish.map((item) => `${item.kind}:${item.userId}:${item.stream.id}:${item.stream.getTracks().map((track) => track.id).join(',')}`).join('|')
+    if (signature === publishedMonitorSigRef.current && monitorConnectionsRef.current.has(controller.userId)) return
+    publishedMonitorSigRef.current = signature
+
+    closeMonitorConnection(controller.userId)
+    const pc = new RTCPeerConnection({ iceServers: monitorIceServers })
+    monitorConnectionsRef.current.set(controller.userId, pc)
+    pc.onicecandidate = (event) => {
+      if (event.candidate) postSignal('monitor-candidate', event.candidate.toJSON(), controller.userId).catch(() => undefined)
+    }
+    for (const item of publish) {
+      for (const track of item.stream.getTracks()) pc.addTrack(track, item.stream)
+    }
+    const streamMap: MonitorStreamDescriptor[] = publish.map(({ streamId, kind, userId, displayName }) => ({ streamId, kind, userId, displayName }))
+    const offer = await pc.createOffer()
+    await pc.setLocalDescription(offer)
+    await postSignal('monitor-offer', { sdp: offer, streamMap }, controller.userId)
+    addLog('Sharing this station view with the experimenter monitor.', 'info')
+  }
+
+  const handleMonitorSignal = async (payload: NonNullable<SignalEnvelope['payload']>): Promise<void> => {
+    const from = payload.from
+    const kind = payload.type
+    if (!from || !kind) return
+    if (payload.to && payload.to !== callUserIdRef.current) return
+
+    if (kind === 'monitor-offer') {
+      // Controller side: receive a participant's clean + partner-altered streams.
+      const body = payload.payload as { sdp: RTCSessionDescriptionInit; streamMap: MonitorStreamDescriptor[] }
+      for (const descriptor of body.streamMap ?? []) {
+        monitorStreamMetaRef.current.set(descriptor.streamId, {
+          kind: descriptor.kind,
+          userId: descriptor.userId,
+          displayName: descriptor.displayName
+        })
+      }
+      closeMonitorConnection(from)
+      const pc = new RTCPeerConnection({ iceServers: monitorIceServers })
+      monitorConnectionsRef.current.set(from, pc)
+      pc.ontrack = (event) => {
+        const stream = event.streams[0]
+        if (!stream) return
+        const meta = monitorStreamMetaRef.current.get(stream.id)
+        if (!meta) return
+        const key = `${meta.userId}:${meta.kind}`
+        monitorReceivedRef.current.set(key, { key, kind: meta.kind, userId: meta.userId, displayName: meta.displayName, stream })
+        syncMonitorTiles()
+      }
+      pc.onicecandidate = (event) => {
+        if (event.candidate) postSignal('monitor-candidate', event.candidate.toJSON(), from).catch(() => undefined)
+      }
+      await pc.setRemoteDescription(body.sdp)
+      const pending = monitorPendingIceRef.current.get(from)
+      if (pending) {
+        for (const candidate of pending) await pc.addIceCandidate(candidate).catch(() => undefined)
+        monitorPendingIceRef.current.delete(from)
+      }
+      const answer = await pc.createAnswer()
+      await pc.setLocalDescription(answer)
+      await postSignal('monitor-answer', answer, from)
+      return
+    }
+
+    if (kind === 'monitor-answer') {
+      const pc = monitorConnectionsRef.current.get(from)
+      if (!pc) return
+      await pc.setRemoteDescription(payload.payload as RTCSessionDescriptionInit)
+      const pending = monitorPendingIceRef.current.get(from)
+      if (pending) {
+        for (const candidate of pending) await pc.addIceCandidate(candidate).catch(() => undefined)
+        monitorPendingIceRef.current.delete(from)
+      }
+      return
+    }
+
+    if (kind === 'monitor-candidate') {
+      const candidate = payload.payload as RTCIceCandidateInit
+      const pc = monitorConnectionsRef.current.get(from)
+      if (pc && pc.remoteDescription) {
+        await pc.addIceCandidate(candidate).catch(() => undefined)
+      } else {
+        const pending = monitorPendingIceRef.current.get(from) ?? []
+        pending.push(candidate)
+        monitorPendingIceRef.current.set(from, pending)
+      }
+    }
+  }
+
   const handleSignalEvent = async (event: MessageEvent<string>): Promise<void> => {
     if (!inCallRef.current) return
     const envelope = JSON.parse(event.data) as SignalEnvelope
@@ -1285,6 +1458,10 @@ export default function App(): ReactElement {
         remoteStreamsRef.current.get(userId)?.stream.getTracks().forEach((track) => track.stop())
         remoteStreamsRef.current.delete(userId)
         syncRemoteTiles()
+        // A leaver can feed tiles for more than one userId (its own clean + its partner's
+        // altered), so clear the monitor and let the remaining participants re-publish.
+        closeMonitorConnection(userId)
+        teardownMonitor()
         setCallPeers((prev) => prev.filter((peer) => peer.userId !== userId))
       }
       addLog('Someone left the room.', 'warn')
@@ -1302,6 +1479,14 @@ export default function App(): ReactElement {
       if (envelope.payload?.id && envelope.payload.text && envelope.payload.from) {
         addChatMessage(envelope.payload as ChatMessage)
       }
+      return
+    }
+
+    // Experimenter-monitor WebRTC runs on its own signal types, alongside the SFU.
+    if (envelope.type === 'signal' && typeof envelope.payload?.type === 'string' && envelope.payload.type.startsWith('monitor-')) {
+      await handleMonitorSignal(envelope.payload).catch((error) =>
+        addLog(error instanceof Error ? error.message : 'Monitor connection error.', 'error')
+      )
       return
     }
 
@@ -1870,6 +2055,7 @@ export default function App(): ReactElement {
     }
     for (const peer of peerConnectionsRef.current.values()) peer.close()
     for (const tile of remoteStreamsRef.current.values()) tile.stream.getTracks().forEach((track) => track.stop())
+    teardownMonitor()
     cleanupLiveMediaProcessor()
     callEventsRef.current = null
     callLocalStreamRef.current = null
@@ -2380,56 +2566,6 @@ export default function App(): ReactElement {
                   {sessionLinkNotice && <p className="setup-notice">{sessionLinkNotice}</p>}
                 </label>
               )}
-              <div className="button-row">
-                <button onClick={() => setShowAdvancedConnection((prev) => !prev)}>
-                  {showAdvancedConnection ? 'Hide advanced' : 'Advanced'}
-                </button>
-              </div>
-              {showAdvancedConnection && (
-                <div className="advanced-connection">
-                  <label>
-                    Signal server URL
-                    <input
-                      value={form.callSignalUrl}
-                      onChange={(event) => updateForm('callSignalUrl', event.target.value)}
-                      placeholder={hostedSignalUrl}
-                    />
-                  </label>
-                  {isController && (
-                    <>
-                      <label>
-                        Media server (DuckSoup/Mozza) URL
-                        <input
-                          value={form.duckSoupUrl}
-                          onChange={(event) => updateForm('duckSoupUrl', event.target.value)}
-                          placeholder="http://localhost:8100"
-                        />
-                      </label>
-                      <label className="toggle-row">
-                        <span>Face-only smile via DuckSoup/Mozza</span>
-                        <input
-                          type="checkbox"
-                          checked={form.mediaTransport === 'ducksoup'}
-                          onChange={(event) =>
-                            updateForm('mediaTransport', event.target.checked ? 'ducksoup' : 'mesh')
-                          }
-                        />
-                      </label>
-                    </>
-                  )}
-                  {isController && isLocalSignalUrl(form.callSignalUrl) && (
-                    <div className="button-row no-margin">
-                      <button onClick={startSignalServer}>Start local server</button>
-                    </div>
-                  )}
-                  {signalServer.active && (
-                    <div className="host-summary">
-                      <span>This computer is hosting the room</span>
-                      <strong>{signalServer.lanUrl}</strong>
-                    </div>
-                  )}
-                </div>
-              )}
             </section>
 
             <section className={isController ? 'panel setup-wide' : 'panel'}>
@@ -2647,16 +2783,33 @@ export default function App(): ReactElement {
           <section className="panel call-panel">
             {isController && <div className="section-title accent">Live Video Conference</div>}
             {isController ? (
-              remoteTiles.length > 0 ? (
+              useDuckSoup ? (
+                // Experimenter 4-view monitor: each participant's unaltered (clean) + altered
+                // feed, forwarded from the participants over the monitor WebRTC channel.
+                <div className="conference-grid tiles-4">
+                  {Array.from({ length: expectedParticipants }).map((_, index) => {
+                    const peer = participantPeers[index]
+                    const who = peer ? peer.displayName : `Participant ${index + 1}`
+                    return (['Unaltered', 'Altered'] as const).map((label) => {
+                      const monKind = label === 'Unaltered' ? 'clean' : 'altered'
+                      const tile = peer ? monitorByKey.get(`${peer.userId}:${monKind}`) : undefined
+                      return (
+                        <MonitorVideoCard
+                          key={`${index}-${label}`}
+                          label={`${who} · ${label}`}
+                          stream={tile?.stream ?? null}
+                        />
+                      )
+                    })
+                  })}
+                </div>
+              ) : remoteTiles.length > 0 ? (
                 <div className={`conference-grid tiles-${Math.min(remoteTiles.length, 4)}`}>
                   {remoteTiles.map((tile) => (
                     <RemoteVideoCard key={tile.userId} tile={tile} volume={controls.partnerVolume} />
                   ))}
                 </div>
               ) : (
-                // Placeholder for the experimenter monitor (To-Do #4): each participant's
-                // unaltered + altered feed. Live video appears here once the hidden observer
-                // peer is wired; for now these are layout placeholders.
                 <div className="conference-grid tiles-4">
                   {Array.from({ length: expectedParticipants }).map((_, index) => {
                     const peer = participantPeers[index]
@@ -2664,7 +2817,7 @@ export default function App(): ReactElement {
                     return (['Unaltered', 'Altered'] as const).map((kind) => (
                       <div className="video-panel" key={`${index}-${kind}`}>
                         <div className="video-label">{`${who} · ${kind}`}</div>
-                        <div className="video-empty">(not wired)</div>
+                        <div className="video-empty">(waiting)</div>
                       </div>
                     ))
                   })}
@@ -2949,6 +3102,30 @@ export default function App(): ReactElement {
           </div>
         </aside>
       </main>
+    </div>
+  )
+}
+
+// One tile of the experimenter monitor. Video only (muted) — the experimenter watches all four
+// feeds, so playing four audio tracks would be chaos. Shows a placeholder until the feed arrives.
+function MonitorVideoCard({ label, stream }: { label: string; stream: MediaStream | null }): ReactElement {
+  const videoRef = useRef<HTMLVideoElement>(null)
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    video.srcObject = stream
+    if (stream) video.play().catch(() => undefined)
+  }, [stream])
+
+  return (
+    <div className="video-panel">
+      <div className="video-label">{label}</div>
+      {stream ? (
+        <video ref={videoRef} autoPlay playsInline muted className="video-surface" />
+      ) : (
+        <div className="video-empty">(waiting)</div>
+      )}
     </div>
   )
 }
