@@ -597,6 +597,7 @@ export default function App(): ReactElement {
   const logListRef = useRef<HTMLDivElement | null>(null)
   const autoJoinedRef = useRef(false)
   const recordingStartRef = useRef<number | null>(null)
+  const sessionSavedRef = useRef(false)
   const cleanRecorderRef = useRef<MediaRecorder | null>(null)
   const alteredRecorderRef = useRef<MediaRecorder | null>(null)
   const cleanChunksRef = useRef<Blob[]>([])
@@ -637,6 +638,8 @@ export default function App(): ReactElement {
   const [monitorTiles, setMonitorTiles] = useState<MonitorTile[]>([])
   const [roomPresence, setRoomPresence] = useState<RoomPresence | null>(null)
   const [storagePaths, setStoragePaths] = useState<{ serverDataDir: string; sessionsDir: string } | null>(null)
+  const [experimenterNotes, setExperimenterNotes] = useState('')
+  const experimenterNotesRef = useRef('')
   const [form, setForm] = useState<SessionForm>(initialForm)
   const [controls, setControls] = useState<ManipulationControls>(initialControls)
   const [recordingState, setRecordingState] = useState<RecordingState>('idle')
@@ -1635,8 +1638,10 @@ export default function App(): ReactElement {
   // Write the session audit trail (manifest + ms-stamped control CSV) and best-effort copy
   // the server-recorded clean (-dry) + altered (-wet) webm/mp4 files into the output folder.
   const finalizeDuckSoupSession = useCallback(async (): Promise<void> => {
-    if (!recordingStartRef.current) return
-    recordingStartRef.current = null
+    // The experimenter is the authoritative saver: it holds the full event log + all chat and runs
+    // on the media-server machine, so it can also collect both participants' videos. Runs once.
+    if (!isController || sessionSavedRef.current) return
+    sessionSavedRef.current = true
     setRecordingState('saving')
     try {
       const { sessionDir: createdDir } = await window.researchApi.createSessionDirectory(form)
@@ -1647,16 +1652,17 @@ export default function App(): ReactElement {
       let copiedPaths: string[] = []
       let serverDataDir: string | null = null
       try {
-        const result = await window.researchApi.collectDuckSoupRecordings({
-          destDir: createdDir,
-          namespace,
-          interaction
-        })
-        copied = result.copied
-        copiedPaths = result.copiedPaths
-        serverDataDir = result.dataDir
-        if (copied.length > 0) addLog(`Copied ${copied.length} server recording(s) into the session folder.`, 'success')
-        else addLog('Server recordings stay on the media server (data/' + namespace + '/' + interaction + '/recordings). Copy them manually if the server is on another computer.', 'info')
+        // DuckSoup finishes muxing each .mp4 a moment after the interaction ends, so retry a few times.
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          const result = await window.researchApi.collectDuckSoupRecordings({ destDir: createdDir, namespace, interaction })
+          copied = result.copied
+          copiedPaths = result.copiedPaths
+          serverDataDir = result.dataDir
+          if (copied.length > 0 || attempt === 3) break
+          await new Promise((resolve) => setTimeout(resolve, 1500))
+        }
+        if (copied.length > 0) addLog(`Copied ${copied.length} recording file(s) into the session folder.`, 'success')
+        else addLog(`No recordings found yet under data/${namespace}/${interaction}/recordings (still writing, or the media server is on another computer).`, 'info')
       } catch {
         addLog('Could not auto-copy server recordings. They remain in the media server data folder.', 'warn')
       }
@@ -1686,6 +1692,7 @@ export default function App(): ReactElement {
           copiedPaths
         },
         ppsPlaybackPlan,
+        experimenterNotes: experimenterNotesRef.current,
         chatLog: { file: 'chat_log.csv', messageCount: chatMessagesRef.current.length },
         mediaQuality: {
           file: 'media_quality.csv',
@@ -1738,15 +1745,20 @@ export default function App(): ReactElement {
           sessionDir: createdDir,
           filename: 'media_quality.csv',
           contents: mediaQualitySamplesToCsv(mediaQualitySamplesRef.current)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'experimenter_notes.txt',
+          contents: experimenterNotesRef.current
         })
       ])
-      addLog(`Saved session manifest + control log to ${createdDir}`, 'success')
+      addLog(`Saved session files (manifests, logs, chat, notes) to ${createdDir}`, 'success')
     } catch (error) {
       addLog(error instanceof Error ? error.message : 'Could not finalize the session files.', 'error')
     } finally {
       setRecordingState('idle')
     }
-  }, [addLog, form, participantPeers])
+  }, [addLog, form, participantPeers, isController])
 
   const handleDuckSoupEvent = useCallback(
     (message: DuckSoupCallbackMessage): void => {
@@ -1855,8 +1867,9 @@ export default function App(): ReactElement {
           addLog('Server finished writing recordings.', 'success')
           break
         case 'end':
+          // Participant side only (the experimenter has no media player). Saving is done by the
+          // experimenter on Conclude/Leave, so participants no longer write session files here.
           addLog('The media interaction ended.', 'info')
-          void finalizeDuckSoupSession()
           setCallState('waiting')
           break
         case 'closed':
@@ -1877,7 +1890,7 @@ export default function App(): ReactElement {
           }
       }
     },
-    [addLog, appendControlEvent, finalizeDuckSoupSession, isController]
+    [addLog, appendControlEvent, isController]
   )
 
   const startDuckSoupMedia = useCallback(async (): Promise<void> => {
@@ -2011,6 +2024,13 @@ export default function App(): ReactElement {
         }
       }
       setCallState('waiting')
+      // Experimenter is the saver: stamp a session start (so event-log timings are relative to it)
+      // and re-arm the one-shot save guard for this session.
+      if (isController) {
+        recordingStartRef.current = Date.now()
+        sessionSavedRef.current = false
+        setRecordingState('recording')
+      }
       addLog(`${callDisplayName()} joined ${form.roomId}.`, 'success')
     } catch (error) {
       setCallState('error')
@@ -2142,7 +2162,10 @@ export default function App(): ReactElement {
   const concludeStudy = (): void => {
     appendControlEvent('study', 'conclude', 'Experimenter concluded the study for all participant stations.')
     sendDirectorPayload({ kind: 'session-conclude' })
-    addLog('Study conclusion sent. Participant stations will save/finalize and leave.', 'warn')
+    addLog('Study concluded. Participants will leave; saving session files + recordings here.', 'warn')
+    // The experimenter saves the authoritative session folder (logs, chat, manifests) and collects
+    // the videos. finalize retries the video copy so the participants' .mp4s have time to finish.
+    void finalizeDuckSoupSession()
   }
 
   const applyAudioPreset = (preset: (typeof audioPresets)[number]): void => {
@@ -2694,6 +2717,20 @@ export default function App(): ReactElement {
             </div>
           </section>
 
+          <section className="panel">
+            <div className="section-title">Experimenter Notes</div>
+            <textarea
+              className="notes-area"
+              value={experimenterNotes}
+              onChange={(event) => {
+                setExperimenterNotes(event.target.value)
+                experimenterNotesRef.current = event.target.value
+              }}
+              placeholder="Optional notes about this session (saved with the session files on Conclude)."
+              rows={5}
+            />
+          </section>
+
           {isController && (
             <section className="panel">
               <div className="section-title">Recording</div>
@@ -2714,7 +2751,7 @@ export default function App(): ReactElement {
                         : `docker\\ducksoup\\data\\${duckSoupNamespace()}\\${form.roomId}\\recordings`}
                     </code>
                     <br />
-                    Session files (manifests, logs) go to:{' '}
+                    Manifests, Logs, Chat, Notes go to:{' '}
                     <code className="path-text">
                       {form.outputFolder || storagePaths?.sessionsDir || 'Documents\\Niedenthal Emotions Lab Sessions'}
                     </code>

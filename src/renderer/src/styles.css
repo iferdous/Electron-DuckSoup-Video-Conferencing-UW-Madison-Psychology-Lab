@@ -485,6 +485,25 @@ label {
   justify-content: space-between;
 }
 
+.notes-area {
+  width: 100%;
+  resize: vertical;
+  min-height: 84px;
+  border: 1px solid var(--line);
+  background: var(--surface-3);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 10px;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.notes-area:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .path-text {
   display: inline-block;
   margin: 3px 0;
@@ -752,6 +771,7 @@ label {
 
 .participant-workspace .center-stage {
   padding: 12px;
+  justify-content: center;
 }
 
 .participant-workspace .controls {
@@ -766,6 +786,10 @@ label {
   background: transparent;
   border: 0;
   box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex: 1;
 }
 
 .participant-workspace .chat-panel {
@@ -785,7 +809,8 @@ label {
    a fixed 4:3 box (matching the DuckSoup 640x480 stream) so the video fills them with
    no crop and no black bars, centered in the stage. */
 .participant-workspace .participant-grid {
-  height: calc(100vh - 140px);
+  height: auto;
+  max-height: calc(100vh - 140px);
   min-height: 0;
   display: grid;
   gap: 12px;
@@ -1604,11 +1629,15 @@ label {
     var(--bg);
   padding: 24px;
   overflow-y: auto;
+  display: flex;
 }
 
 .setup-card {
   max-width: 1180px;
-  margin: 0 auto;
+  width: 100%;
+  /* margin: auto centers the card vertically + horizontally in the flex shell, and still lets
+     it scroll if the content is ever taller than the viewport. */
+  margin: auto;
   border: 1px solid var(--line);
   background: rgb(23 23 23 / 0.98);
   border-radius: 8px;
