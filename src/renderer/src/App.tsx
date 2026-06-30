@@ -230,8 +230,6 @@ const mediaQualitySamplesToCsv = (samples: MediaQualitySample[]): string => {
 const appTitle = 'Niedenthal Emotions Lab'
 const appSubtitle = 'Live emotion study session'
 
-const roleLabel = (role: CallRole): string => (role === 'controller' ? 'Experimenter' : 'Participant')
-
 // "Alice · P001" once the participant's study ID has been relayed; otherwise just the name.
 const peerStripLabel = (peer: CallPeer): string => {
   const id = peer.role === 'participant' ? peer.participantId : ''
@@ -2331,7 +2329,7 @@ export default function App(): ReactElement {
             </div>
           )}
 
-          <div className="setup-grid">
+          <div className={isController ? 'setup-grid' : 'setup-grid setup-grid--even'}>
             {isController && (
               <section className="panel">
                 <div className="section-title accent">Study Setup</div>
@@ -2432,24 +2430,11 @@ export default function App(): ReactElement {
                   )}
                 </div>
               )}
-              {isController && roomPresence && (
-                <div className="room-status-card">
-                  <div>
-                    <span>Room status</span>
-                    <strong>{roomPresence.peers.length} in room</strong>
-                  </div>
-                  <p>
-                    {roomPresence.peers.length === 0
-                      ? 'The server is reachable. No one has joined this meeting ID yet.'
-                      : roomPresence.peers.map((peer) => `${peer.displayName} (${roleLabel(peer.role)})`).join(', ')}
-                  </p>
-                </div>
-              )}
             </section>
 
-            <section className="panel setup-wide">
+            <section className={isController ? 'panel setup-wide' : 'panel'}>
               <div className="section-title accent">Session Details</div>
-              <div className="field-grid two">
+              <div className={isController ? 'field-grid two' : 'field-grid'}>
                 {!isController && (
                   <label>
                     Display name
@@ -2470,31 +2455,42 @@ export default function App(): ReactElement {
                 )}
                 {isController && (
                   <label>
+                    Left machine
+                    <input
+                      value={form.participantId}
+                      onChange={(event) => updateForm('participantId', event.target.value)}
+                      placeholder="e.g. P001"
+                    />
+                  </label>
+                )}
+                {isController && (
+                  <label>
+                    Right machine
+                    <input
+                      value={form.partnerId}
+                      onChange={(event) => updateForm('partnerId', event.target.value)}
+                      placeholder="e.g. P002"
+                    />
+                  </label>
+                )}
+                {isController && (
+                  <label>
                     Dyad/session ID
                     <input value={form.dyadId} onChange={(event) => updateForm('dyadId', event.target.value)} />
                   </label>
                 )}
-                {!isController && (
+                {isController && (
                   <label>
-                    This station ID
-                    <input value={form.participantId} onChange={(event) => updateForm('participantId', event.target.value)} />
-                  </label>
-                )}
-                {!isController && (
-                  <label>
-                    Partner/group ID
-                    <input value={form.partnerId} onChange={(event) => updateForm('partnerId', event.target.value)} />
+                    Output folder
+                    <div className="input-action-row">
+                      <input value={form.outputFolder} readOnly placeholder="Choose output folder for recordings" />
+                      <button className="browse-button" onClick={pickFolder}>
+                        Browse
+                      </button>
+                    </div>
                   </label>
                 )}
               </div>
-              {isController && (
-                <div className="folder-row">
-                  <input value={form.outputFolder} readOnly placeholder="Choose output folder for recordings" />
-                  <button className="browse-button" onClick={pickFolder}>
-                    Browse
-                  </button>
-                </div>
-              )}
             </section>
           </div>
 
@@ -2631,6 +2627,14 @@ export default function App(): ReactElement {
                 <strong>{form.dyadId || 'not set'}</strong>
               </div>
               <div className="metric">
+                <span>Left machine</span>
+                <strong>{form.participantId || 'not set'}</strong>
+              </div>
+              <div className="metric">
+                <span>Right machine</span>
+                <strong>{form.partnerId || 'not set'}</strong>
+              </div>
+              <div className="metric">
                 <span>Format</span>
                 <strong>{sessionLabels[form.sessionFormat]}</strong>
               </div>
@@ -2738,21 +2742,21 @@ export default function App(): ReactElement {
                   <div className="segmented-row">
                     <InfoButton
                       className={controls.synchronyMode === 'aligned' ? 'active' : ''}
-                      description="Returns the selected participant or room to the neutral/baseline expression. Use this when you want normal expressive synchrony."
+                      description="Return the target to a neutral baseline expression."
                       onClick={() => setSynchronyMode('aligned')}
                     >
                       Aligned
                     </InfoButton>
                     <InfoButton
                       className={controls.synchronyMode === 'suppressed' ? 'active' : ''}
-                      description="Applies the suppressed smile alpha live. Use this to dampen or pull down the target participant's smile during the conversation."
+                      description="Dampen or pull down the target's smile, live."
                       onClick={() => setSynchronyMode('suppressed')}
                     >
                       Suppressed
                     </InfoButton>
                     <InfoButton
                       className={controls.synchronyMode === 'reactive' ? 'active' : ''}
-                      description="Keeps the session ready for cue-based responses. Cue buttons can briefly change expression, then return to baseline."
+                      description="Arm the cue buttons: brief expression changes that snap back to baseline."
                       onClick={() => setSynchronyMode('reactive')}
                     >
                       Reactive
@@ -2761,7 +2765,7 @@ export default function App(): ReactElement {
                 </div>
                 <RangeControl
                   label="Smile alpha"
-                  description="Live smile/frown deformation sent to participant machines. 0.00 is neutral (no warp); positive = smile, negative = frown. Kept within Mozza's natural range (about -1 to 1) — beyond that the face distorts unnaturally."
+                  description="0 = neutral, positive = smile, negative = frown. Keep within about -1 to 1."
                   value={controls.smileAlpha}
                   min={-1}
                   max={1}
@@ -2772,7 +2776,7 @@ export default function App(): ReactElement {
                 />
                 <RangeControl
                   label="Suppressed smile alpha"
-                  description="The smile setting used when synchrony is suppressed. 0 is neutral; negative values dampen smiles or pull the mouth toward frown."
+                  description="Smile level used in Suppressed mode. 0 = neutral; negative dampens or frowns."
                   value={controls.suppressSmileAlpha}
                   min={-1}
                   max={0}
@@ -2783,7 +2787,7 @@ export default function App(): ReactElement {
                 />
                 <RangeControl
                   label="Reactive pulse (ms)"
-                  description="How long a cue-triggered response should last before returning to the current baseline."
+                  description="How long a cue response lasts before returning to baseline."
                   value={controls.reactivePulseMs}
                   min={300}
                   max={5000}
@@ -2794,25 +2798,25 @@ export default function App(): ReactElement {
                 />
                 <div className="cue-grid">
                   <InfoButton
-                    description="Manual cue for when the partner smiles. Briefly dampens or pulls down the selected participant's mouth, then returns to baseline."
+                    description="Partner smiled: briefly dampen the target's smile, then return."
                     onClick={() => triggerCueResponse('partner-smile', controls.suppressSmileAlpha, 'Partner smile cue -> dampen/frown response')}
                   >
                     Partner smile cue
                   </InfoButton>
                   <InfoButton
-                    description="Manual cue for when the partner laughs. Uses a stronger suppression response than the regular smile cue."
+                    description="Partner laughed: stronger brief suppression."
                     onClick={() => triggerCueResponse('partner-laugh', Math.min(-0.75, controls.suppressSmileAlpha), 'Partner laugh cue -> stronger suppression')}
                   >
                     Partner laugh cue
                   </InfoButton>
                   <InfoButton
-                    description="Briefly increases the selected participant's smile. Use as a repair or affiliative response cue."
+                    description="Briefly raise the target's smile (affiliative / repair cue)."
                     onClick={() => triggerCueResponse('repair-smile', 0.4, 'Repair cue -> brief affiliative smile')}
                   >
                     Repair smile cue
                   </InfoButton>
                   <InfoButton
-                    description="Returns the selected participant to neutral smile alpha. Use this to clear a cue response."
+                    description="Clear any cue: return the target to neutral."
                     onClick={() => triggerCueResponse('neutral-reset', 0, 'Neutral reset cue')}
                   >
                     Neutral reset
@@ -2820,7 +2824,7 @@ export default function App(): ReactElement {
                 </div>
                 <RangeControl
                   label="Detection threshold"
-                  description="How strict the face effect should be before applying. Lower is more forgiving in poor lighting; higher can reduce accidental background warping."
+                  description="Face-detect strictness. Lower = better in dim light; higher = less stray warping."
                   value={controls.faceThreshold}
                   min={0}
                   max={1}
@@ -2831,7 +2835,7 @@ export default function App(): ReactElement {
                 />
                 <RangeControl
                   label="Landmark beta"
-                  description="How quickly the face warp follows movement. Lower is steadier (less jitter, slight lag); higher reacts faster but looks jumpier. ~0.02 is the validated smooth value."
+                  description="Tracking speed. Lower = steadier; higher = snappier but jumpier. ~0.02 is smooth."
                   value={controls.landmarkBeta}
                   min={0}
                   max={0.5}
@@ -2842,7 +2846,7 @@ export default function App(): ReactElement {
                 />
                 <RangeControl
                   label="Smoothing cutoff"
-                  description="One-Euro min cutoff (fc): how much the warp is smoothed over time. Lower is smoother/less jitter (slight lag); higher is more immediate but jitterier. ~0.3 is the validated smooth value."
+                  description="Warp smoothing. Lower = smoother (slight lag); higher = more immediate. ~0.3 is smooth."
                   value={controls.smoothingCutoff}
                   min={0.1}
                   max={3}
@@ -2868,7 +2872,7 @@ export default function App(): ReactElement {
                 </div>
                 <RangeControl
                   label="Partner playback volume (not wired)"
-                  description="Changes how loud the other people sound on this computer only. It does not change what they hear and is not sent across the room."
+                  description="How loud others sound on this computer only. Not sent to anyone else."
                   value={controls.partnerVolume}
                   min={0}
                   max={1}
@@ -2879,7 +2883,7 @@ export default function App(): ReactElement {
                 />
                 <RangeControl
                   label="Outgoing voice tone"
-                  description="Changes participant outgoing microphone tone. Lower sounds warmer/deeper, higher sounds brighter."
+                  description="Participant mic tone. Lower = warmer/deeper; higher = brighter."
                   value={controls.audioPitch}
                   min={0.6}
                   max={1.4}
@@ -2896,7 +2900,7 @@ export default function App(): ReactElement {
                 />
                 <RangeControl
                   label="Outgoing voice gain (not wired)"
-                  description="Changes how loud participant microphones are for others. This is the louder/quieter voice control."
+                  description="How loud participant mics are for others."
                   value={controls.audioGain}
                   min={0}
                   max={2}
@@ -3143,7 +3147,6 @@ function ChatPanel({
               >
                 <div className="chat-message-head">
                   <strong>{message.fromName}</strong>
-                  {message.fromRole === 'controller' && <span className="chat-role-tag">Experimenter</span>}
                   <span className={`chat-audience chat-audience-${audience.tone}`}>{audience.label}</span>
                   <span className="chat-time">{new Date(message.sentAt).toLocaleTimeString()}</span>
                 </div>
@@ -3182,12 +3185,43 @@ function InfoButton({
   onClick: () => void
 }): ReactElement {
   return (
-    <button className={`info-button ${className}`.trim()} onClick={onClick} aria-label={description}>
+    <button className={`info-button ${className}`.trim()} onClick={onClick} title={description}>
       <span className="button-label">{children}</span>
-      <span className="button-info-tooltip" role="tooltip">
-        {description}
-      </span>
     </button>
+  )
+}
+
+// A small "i" affordance that shows a styled tooltip on hover/focus. The tooltip is
+// position: fixed and positioned from the dot's screen rect, so it can't be clipped by
+// the control panel's overflow (the bug with the old absolutely-positioned tooltip).
+function InfoDot({ description }: { description: string }): ReactElement {
+  const ref = useRef<HTMLSpanElement>(null)
+  const [coords, setCoords] = useState<{ left: number; top: number } | null>(null)
+
+  const show = (): void => {
+    const rect = ref.current?.getBoundingClientRect()
+    if (rect) setCoords({ left: rect.left + rect.width / 2, top: rect.top })
+  }
+  const hide = (): void => setCoords(null)
+
+  return (
+    <span
+      ref={ref}
+      className="info-dot"
+      tabIndex={0}
+      aria-label={description}
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={hide}
+    >
+      i
+      {coords && (
+        <span className="info-tooltip-fixed" role="tooltip" style={{ left: coords.left, top: coords.top }}>
+          {description}
+        </span>
+      )}
+    </span>
   )
 }
 
@@ -3219,14 +3253,7 @@ function RangeControl({
       <div className="range-header">
         <span className="label-with-info">
           {label}
-          {description && (
-            <span className="info-dot" title={description} aria-label={description} tabIndex={0}>
-              i
-              <span className="info-tooltip" role="tooltip">
-                {description}
-              </span>
-            </span>
-          )}
+          {description && <InfoDot description={description} />}
         </span>
         <strong>{Number.isInteger(value) ? value : value.toFixed(2)}</strong>
       </div>
