@@ -736,6 +736,15 @@ app.whenReady().then(() => {
     }
   })
 
+  // Absolute paths so the UI can show exactly where recordings land on this computer:
+  // the DuckSoup server-side recordings (dry/wet .mp4) and the default session output folder.
+  ipcMain.handle('get-storage-paths', () => {
+    return {
+      serverDataDir: join(process.cwd(), 'docker', 'ducksoup', 'data'),
+      sessionsDir: join(app.getPath('documents'), 'Niedenthal Emotions Lab Sessions')
+    }
+  })
+
   ipcMain.handle('advertise-ducksoup-host', async (_, payload: HostAdvertisement) => {
     return startAdvertisement(payload)
   })

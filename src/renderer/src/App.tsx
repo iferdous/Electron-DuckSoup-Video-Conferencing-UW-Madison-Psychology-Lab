@@ -636,6 +636,7 @@ export default function App(): ReactElement {
   const [remoteTiles, setRemoteTiles] = useState<RemoteTile[]>([])
   const [monitorTiles, setMonitorTiles] = useState<MonitorTile[]>([])
   const [roomPresence, setRoomPresence] = useState<RoomPresence | null>(null)
+  const [storagePaths, setStoragePaths] = useState<{ serverDataDir: string; sessionsDir: string } | null>(null)
   const [form, setForm] = useState<SessionForm>(initialForm)
   const [controls, setControls] = useState<ManipulationControls>(initialControls)
   const [recordingState, setRecordingState] = useState<RecordingState>('idle')
@@ -891,6 +892,14 @@ export default function App(): ReactElement {
     }
     if (changed) syncRemoteTiles()
   }, [callPeers])
+
+  // Ask the main process for the exact on-disk save locations (so the Recording panel can show them).
+  useEffect(() => {
+    window.researchApi
+      ?.getStoragePaths?.()
+      .then(setStoragePaths)
+      .catch(() => undefined)
+  }, [])
 
   // Participant: (re)publish the monitor feeds whenever peers or local/partner streams change
   // (controller joins, partner's altered stream arrives, etc.). publishMonitorStreams is a no-op
@@ -2697,7 +2706,18 @@ export default function App(): ReactElement {
                     </div>
                   </div>
                   <p className="plain-text compact-copy">
-                    Saving recordings to {form.outputFolder || 'the default lab folder in Documents'} (not wired).
+                    The videos (clean + altered) go to:
+                    <br />
+                    <code className="path-text">
+                      {storagePaths
+                        ? `${storagePaths.serverDataDir}\\${duckSoupNamespace()}\\${form.roomId}\\recordings`
+                        : `docker\\ducksoup\\data\\${duckSoupNamespace()}\\${form.roomId}\\recordings`}
+                    </code>
+                    <br />
+                    Session files (manifests, logs) go to:{' '}
+                    <code className="path-text">
+                      {form.outputFolder || storagePaths?.sessionsDir || 'Documents\\Niedenthal Emotions Lab Sessions'}
+                    </code>
                   </p>
                   <button
                     className="danger wide-button"
@@ -2781,7 +2801,12 @@ export default function App(): ReactElement {
 
         <section className="center-stage">
           <section className="panel call-panel">
-            {isController && <div className="section-title accent">Live Video Conference</div>}
+            {isController && (
+              <div className="section-title accent conference-title">
+                <span>Live Video Conference</span>
+                <LiveClock running={callState !== 'idle' && callState !== 'error'} />
+              </div>
+            )}
             {isController ? (
               useDuckSoup ? (
                 // Experimenter 4-view monitor: each participant's unaltered (clean) + altered
@@ -3104,6 +3129,40 @@ export default function App(): ReactElement {
       </main>
     </div>
   )
+}
+
+// Elapsed-time clock shown top-right of the Live Video Conference. Runs while `running` (in the
+// room), pauses on Leave, and resumes from where it stopped on Rejoin (it banks elapsed ms across
+// segments rather than restarting). It survives leave/rejoin because the panel stays mounted.
+function LiveClock({ running }: { running: boolean }): ReactElement {
+  const [seconds, setSeconds] = useState(0)
+  const bankedMsRef = useRef(0)
+  const segmentStartRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (!running) return undefined
+    segmentStartRef.current = Date.now()
+    const tick = (): void => {
+      const segMs = segmentStartRef.current ? Date.now() - segmentStartRef.current : 0
+      setSeconds(Math.floor((bankedMsRef.current + segMs) / 1000))
+    }
+    tick()
+    const id = window.setInterval(tick, 250)
+    return () => {
+      window.clearInterval(id)
+      if (segmentStartRef.current) {
+        bankedMsRef.current += Date.now() - segmentStartRef.current
+        segmentStartRef.current = null
+      }
+      setSeconds(Math.floor(bankedMsRef.current / 1000))
+    }
+  }, [running])
+
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const hh = Math.floor(seconds / 3600)
+  const mm = Math.floor((seconds % 3600) / 60)
+  const ss = seconds % 60
+  return <span className="live-clock">{hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`}</span>
 }
 
 // One tile of the experimenter monitor. Video only (muted) — the experimenter watches all four

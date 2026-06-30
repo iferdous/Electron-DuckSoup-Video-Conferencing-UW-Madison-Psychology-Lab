@@ -19,6 +19,8 @@ const researchApi = {
     ipcRenderer.invoke('check-ducksoup', baseUrl),
   getNetworkInfo: (): Promise<{ hostname: string; addresses: string[] }> =>
     ipcRenderer.invoke('get-network-info'),
+  getStoragePaths: (): Promise<{ serverDataDir: string; sessionsDir: string }> =>
+    ipcRenderer.invoke('get-storage-paths'),
   advertiseDuckSoupHost: (payload: {
     serverName: string
     duckSoupUrl: string
