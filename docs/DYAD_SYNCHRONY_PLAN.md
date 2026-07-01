@@ -19,7 +19,14 @@ study validates them against self-report or another measure.
 - The experimenter can target one participant or the whole room.
 - Reactive cue buttons send a temporary alpha pulse and then return to the current baseline.
 - Commands and timing are written to `manipulation_events.csv`.
-- These cues are manual. There is no automatic detector-to-manipulation loop yet.
+- Automatic smile onset is implemented for internal dyad validation in `Off`, `Detect`, and `Live
+  aligned` modes. Detection and decisions occur locally from each participant's clean camera; the
+  experimenter does not evaluate individual cues.
+- Each participant completes an 8-second neutral calibration and three prompted natural smiles.
+- A validated onset can send a direct participant-to-partner cue. The target applies a fixed
+  `0 -> +0.25 -> 0` Mozza envelope (350 ms ramp, 700 ms hold, 500 ms return).
+- Automatic events are written centrally to `smile_onset_events.csv`. This implementation is not
+  research-ready until the cue, timing, manipulation, and research validation gates below pass.
 
 ## Recommended cue model
 
@@ -57,9 +64,9 @@ Use two thresholds instead of one. An onset threshold starts an event; a lower r
 it. Require a minimum dwell (for example 150-250 ms) and a refractory period (for example 1-2 seconds).
 This hysteresis prevents frame-level noise from repeatedly firing the manipulation.
 
-Thresholds should be participant-relative:
+Thresholds are participant-relative:
 
-`normalized score = (current score - baseline median) / baseline variability`
+`normalized score = (current score - neutral median) / (prompted smile reference - neutral median)`
 
 Keep the raw score, normalized score, face confidence, and decision in the log. Do not silently replace
 missing detections with zero; missing is its own state.
@@ -119,5 +126,9 @@ information. Analyze altered streams separately as a manipulation check.
 3. Hold still for 30 seconds, move quickly for 30 seconds, leave frame, and return.
 4. Confirm `face-thresh`, `beta`, and `fc` visibly change behavior.
 5. Run a two-computer dyad for 10 minutes and retain `media_quality.csv`, dry/wet recordings, and logs.
-6. Only after that baseline passes, implement the clean-stream cue detector behind an experimenter-only
-   feature flag.
+6. Run automatic mode in **Detect** first: 20 intentional smiles plus two neutral/talking minutes.
+7. Require at least 18/20 detected smiles, no more than two neutral false detections, no duplicate
+   event for one continuous smile, and no event while the face is missing.
+8. Test P1-to-P2 and P2-to-P1 separately before enabling **Live aligned** in both directions.
+9. Run a 10-minute bidirectional internal dyad and review clean/wet recordings,
+   `smile_onset_events.csv`, `manipulation_events.csv`, and `media_quality.csv`.

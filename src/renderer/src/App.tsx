@@ -6,11 +6,21 @@ import {
   applyMozzaControls,
   buildMozzaVideoFx,
   buildAudioFx,
+  MOZZA_FX_NAME,
   MOZZA_AUDIO_FX_NAME,
   type DuckSoupPlayer,
   type DuckSoupCallbackMessage,
   type LiveMozzaFaceParams
 } from './ducksoup-client'
+import { getSmileFaceLandmarker, sampleSmileFrame } from './smile-landmarker'
+import {
+  SmileOnsetDetector,
+  smileCueRejectionReason,
+  type SmileDetectorEvent,
+  type SmileDetectorSnapshot,
+  type SmileOnsetAuditEvent,
+  type SmileOnsetCue
+} from './smile-onset'
 import type {
   CallPeer,
   CallRole,
@@ -32,6 +42,12 @@ const DUCKSOUP_VIDEO_WIDTH = 480
 const DUCKSOUP_VIDEO_HEIGHT = 360
 const DUCKSOUP_VIDEO_FPS = 15
 const MOZZA_CONTROL_INTERVAL_MS = 75
+const SMILE_DETECTOR_INTERVAL_MS = Math.round(1000 / 15)
+const SMILE_RESPONSE_ALPHA = 0.25
+const SMILE_RESPONSE_RAMP_MS = 350
+const SMILE_RESPONSE_HOLD_MS = 700
+const SMILE_RESPONSE_RETURN_MS = 500
+const SMILE_CUE_MAX_AGE_MS = 2_000
 
 const hostedSignalUrl = 'https://nelf-call-signaling.onrender.com'
 
@@ -74,7 +90,8 @@ const initialControls: ManipulationControls = {
   audioPitch: 1,
   audioGain: 1,
   partnerVolume: 1,
-  synchronyDelayMs: 0
+  synchronyDelayMs: 0,
+  automaticSmileOnsetMode: 'off'
 }
 
 type SignalEnvelope = {
@@ -238,6 +255,33 @@ const mediaQualitySamplesToCsv = (samples: MediaQualitySample[]): string => {
   ]
   const rows = samples.map((sample) => headers.map((header) => csvEscape(sample[header])).join(','))
   return [headers.join(','), ...rows].join('\n')
+}
+
+const smileOnsetEventsToCsv = (events: SmileOnsetAuditEvent[]): string => {
+  const header: Array<keyof SmileOnsetAuditEvent> = [
+    'eventId',
+    'timestamp',
+    'elapsedMs',
+    'roomId',
+    'sourceUserId',
+    'sourceParticipantId',
+    'targetUserId',
+    'targetParticipantId',
+    'stage',
+    'mode',
+    'rawSmile',
+    'normalizedSmile',
+    'mouthSmileLeft',
+    'mouthSmileRight',
+    'jawOpen',
+    'reason',
+    'videoRttMs',
+    'videoJitterMs',
+    'videoPacketsLost',
+    'framesDropped'
+  ]
+  const rows = events.map((event) => header.map((key) => csvEscape(event[key])).join(','))
+  return [header.join(','), ...rows].join('\n') + '\n'
 }
 
 const appTitle = 'Niedenthal Emotions Lab'
@@ -582,6 +626,7 @@ export default function App(): ReactElement {
   const callEventsRef = useRef<EventSource | null>(null)
   const callLocalStreamRef = useRef<MediaStream | null>(null)
   const callUserIdRef = useRef<string>(`station-${makeId()}`)
+  const formRef = useRef<SessionForm>(initialForm)
   const controlsRef = useRef<ManipulationControls>(initialControls)
   const liveMediaProcessorRef = useRef<LiveMediaProcessor | null>(null)
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map())
@@ -614,6 +659,20 @@ export default function App(): ReactElement {
   const appliedMozzaControlsRef = useRef<{ face: LiveMozzaFaceParams; audioPitch: number } | null>(null)
   const mozzaControlTimerRef = useRef<number | null>(null)
   const leaveLiveCallRef = useRef<(() => void) | null>(null)
+  // Automatic smile onset runs only on each participant's clean local camera. It uses
+  // its own detector/timers so it cannot alter DuckSoup negotiation or the monitor path.
+  const smileDetectorRef = useRef<SmileOnsetDetector | null>(null)
+  const smileDetectorVideoRef = useRef<HTMLVideoElement | null>(null)
+  const smileDetectorTimerRef = useRef<number | null>(null)
+  const smileDetectorBusyRef = useRef(false)
+  const smileDetectorGenerationRef = useRef(0)
+  const smileDetectorStreamRef = useRef<MediaStream | null>(null)
+  const activeLocalSmileEventIdRef = useRef<string>('')
+  const processedSmileCueIdsRef = useRef<Set<string>>(new Set())
+  const activeSmileEnvelopeRef = useRef<{ eventId: string; sourceUserId: string } | null>(null)
+  const smileEnvelopeReturnTimerRef = useRef<number | null>(null)
+  const smileEnvelopeDoneTimerRef = useRef<number | null>(null)
+  const smileOnsetAuditEventsRef = useRef<SmileOnsetAuditEvent[]>([])
   // Experimenter 4-view monitor: a separate WebRTC channel (runs alongside the DuckSoup SFU)
   // so the controller can see all four feeds. DuckSoup only relays each participant's ALTERED
   // (wet) stream live; the CLEAN (dry) stream never leaves the participant's machine. So each
@@ -657,6 +716,9 @@ export default function App(): ReactElement {
   const [experimenterLoginOpen, setExperimenterLoginOpen] = useState(false)
   const [experimenterCredentials, setExperimenterCredentials] = useState({ username: '', password: '' })
   const [experimenterLoginError, setExperimenterLoginError] = useState('')
+  const [smileDetectorSnapshot, setSmileDetectorSnapshot] = useState<SmileDetectorSnapshot | null>(null)
+  const [smileOnsetAuditEvents, setSmileOnsetAuditEvents] = useState<SmileOnsetAuditEvent[]>([])
+  const [cleanStreamVersion, setCleanStreamVersion] = useState(0)
 
   const isController = form.role === 'controller'
   const useDuckSoup = form.mediaTransport === 'ducksoup' && form.duckSoupUrl.trim().length > 0
@@ -785,6 +847,10 @@ export default function App(): ReactElement {
   }, [])
 
   useEffect(() => {
+    formRef.current = form
+  }, [form])
+
+  useEffect(() => {
     controlsRef.current = controls
     for (const video of document.querySelectorAll<HTMLVideoElement>('video[data-remote-call-video="true"]')) {
       applyMediaElementVolume(video, controls.partnerVolume)
@@ -835,6 +901,10 @@ export default function App(): ReactElement {
   useEffect(() => {
     controlEventsRef.current = controlEvents
   }, [controlEvents])
+
+  useEffect(() => {
+    smileOnsetAuditEventsRef.current = smileOnsetAuditEvents
+  }, [smileOnsetAuditEvents])
 
   // Keep a fresh ref of chat messages so session finalize (which runs from refs) can
   // write the full chat_log.csv without re-creating the callback on every message.
@@ -1148,7 +1218,11 @@ export default function App(): ReactElement {
       if (!update.key || !(update.key in initialControls)) return
       if (update.key === 'partnerVolume') return
 
-      setControls((prev) => ({ ...prev, [update.key!]: update.value as never }))
+      setControls((prev) => {
+        const next = { ...prev, [update.key!]: update.value as never }
+        controlsRef.current = next
+        return next
+      })
       const loggedValue =
         typeof update.value === 'string' || typeof update.value === 'number' || typeof update.value === 'boolean'
           ? update.value
@@ -1159,7 +1233,7 @@ export default function App(): ReactElement {
     [addLog, appendControlEvent]
   )
 
-  const postSignal = async (type: string, payload?: unknown, to?: string): Promise<void> => {
+  const postSignal = useCallback(async (type: string, payload?: unknown, to?: string): Promise<void> => {
     await fetch(`${signalBaseUrl()}/signal`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1173,6 +1247,416 @@ export default function App(): ReactElement {
         displayName: callDisplayName()
       })
     })
+  }, [form.callSignalUrl, form.role, form.roomId])
+
+  const appendSmileOnsetAudit = useCallback((event: SmileOnsetAuditEvent): void => {
+    setSmileOnsetAuditEvents((previous) => {
+      const key = `${event.eventId}:${event.stage}:${event.timestamp}`
+      if (previous.some((item) => `${item.eventId}:${item.stage}:${item.timestamp}` === key)) return previous
+      const next = [...previous, event].slice(-2_000)
+      smileOnsetAuditEventsRef.current = next
+      return next
+    })
+  }, [])
+
+  const currentSmileQuality = (): Pick<
+    SmileOnsetAuditEvent,
+    'videoRttMs' | 'videoJitterMs' | 'videoPacketsLost' | 'framesDropped'
+  > => {
+    const quality = mediaQualitySamplesRef.current.at(-1)
+    return {
+      videoRttMs: quality?.videoRttMs ?? '',
+      videoJitterMs: quality?.videoJitterMs ?? '',
+      videoPacketsLost: quality?.videoPacketsLost ?? '',
+      framesDropped: quality?.framesDropped ?? ''
+    }
+  }
+
+  const sendSmileAuditToExperimenter = useCallback(
+    (event: SmileOnsetAuditEvent): void => {
+      if (isController) {
+        appendSmileOnsetAudit(event)
+        return
+      }
+      const controllers = callPeersRef.current.filter((peer) => peer.role === 'controller')
+      for (const controller of controllers) {
+        postSignal('smile-onset-audit', event, controller.userId).catch(() => undefined)
+      }
+    },
+    [appendSmileOnsetAudit, isController, postSignal]
+  )
+
+  const makeSmileAuditEvent = (
+    cue: Partial<SmileOnsetCue> & { eventId: string },
+    stage: SmileOnsetAuditEvent['stage'],
+    reason: string
+  ): SmileOnsetAuditEvent => {
+    const currentForm = formRef.current
+    const targetPeer = callPeersRef.current.find((peer) => peer.userId === cue.targetUserId)
+    return {
+      eventId: cue.eventId,
+      timestamp: new Date().toISOString(),
+      elapsedMs: recordingStartRef.current ? Date.now() - recordingStartRef.current : 0,
+      roomId: currentForm.roomId,
+      sourceUserId: cue.sourceUserId ?? callUserIdRef.current,
+      sourceParticipantId: cue.sourceParticipantId ?? currentForm.participantId,
+      targetUserId: cue.targetUserId ?? '',
+      targetParticipantId: targetPeer?.participantId ?? '',
+      stage,
+      mode: controlsRef.current.automaticSmileOnsetMode,
+      rawSmile: cue.rawSmile ?? '',
+      normalizedSmile: cue.normalizedSmile ?? '',
+      mouthSmileLeft: cue.mouthSmileLeft ?? '',
+      mouthSmileRight: cue.mouthSmileRight ?? '',
+      jawOpen: cue.jawOpen ?? '',
+      reason,
+      ...currentSmileQuality()
+    }
+  }
+
+  const clearSmileEnvelopeTimers = (): void => {
+    if (smileEnvelopeReturnTimerRef.current !== null) {
+      window.clearTimeout(smileEnvelopeReturnTimerRef.current)
+      smileEnvelopeReturnTimerRef.current = null
+    }
+    if (smileEnvelopeDoneTimerRef.current !== null) {
+      window.clearTimeout(smileEnvelopeDoneTimerRef.current)
+      smileEnvelopeDoneTimerRef.current = null
+    }
+  }
+
+  const applyAutomaticSmileAlpha = (alpha: number, transitionMs: number): boolean => {
+    const player = duckSoupPlayerRef.current
+    if (!player || !duckSoupActiveRef.current) return false
+
+    player.controlFx(MOZZA_FX_NAME, 'alpha', alpha, transitionMs)
+    const previousApplied = appliedMozzaControlsRef.current
+    const currentControls = controlsRef.current
+    const nextFace: LiveMozzaFaceParams = {
+      smileAlpha: alpha,
+      faceThreshold: currentControls.faceThreshold,
+      landmarkBeta: currentControls.landmarkBeta,
+      smoothingCutoff: currentControls.smoothingCutoff
+    }
+    appliedMozzaControlsRef.current = {
+      face: nextFace,
+      audioPitch: previousApplied?.audioPitch ?? currentControls.audioPitch
+    }
+    setControls((previous) => {
+      const next = { ...previous, smileAlpha: alpha }
+      controlsRef.current = next
+      return next
+    })
+    return true
+  }
+
+  const returnAutomaticSmileToNeutral = useCallback(
+    (reason: string, audit = true): void => {
+      const active = activeSmileEnvelopeRef.current
+      clearSmileEnvelopeTimers()
+      if (!active) return
+
+      applyAutomaticSmileAlpha(0, SMILE_RESPONSE_RETURN_MS)
+      if (audit) {
+        const event = makeSmileAuditEvent(
+          {
+            eventId: active.eventId,
+            sourceUserId: active.sourceUserId,
+            targetUserId: callUserIdRef.current
+          },
+          'cancelled',
+          reason
+        )
+        sendSmileAuditToExperimenter(event)
+      }
+      activeSmileEnvelopeRef.current = null
+    },
+    [sendSmileAuditToExperimenter]
+  )
+
+  const applyAutomaticSmileCue = useCallback(
+    (cue: SmileOnsetCue): void => {
+      const mode = controlsRef.current.automaticSmileOnsetMode
+      const sourcePeer = callPeersRef.current.find(
+        (peer) => peer.userId === cue.sourceUserId && peer.role === 'participant'
+      )
+      const ageMs = Date.now() - cue.observedAtEpochMs
+      const localDetectorSnapshot = smileDetectorRef.current?.snapshot(performance.now())
+      const localFaceReady =
+        Boolean(localDetectorSnapshot?.facePresent) &&
+        Boolean(
+          localDetectorSnapshot &&
+            ['ready', 'onset-candidate', 'cue-active', 'cooldown'].includes(localDetectorSnapshot.phase)
+        )
+      const rejection = smileCueRejectionReason({
+        mode,
+        cueTargetUserId: cue.targetUserId,
+        localUserId: callUserIdRef.current,
+        sourceIsParticipant: Boolean(sourcePeer),
+        ageMs,
+        maxAgeMs: SMILE_CUE_MAX_AGE_MS,
+        duplicate: processedSmileCueIdsRef.current.has(cue.eventId),
+        responseAlreadyActive: Boolean(activeSmileEnvelopeRef.current),
+        duckSoupActive: duckSoupActiveRef.current && Boolean(duckSoupPlayerRef.current),
+        localFaceReady
+      })
+
+      if (rejection) {
+        sendSmileAuditToExperimenter(makeSmileAuditEvent(cue, 'rejected', rejection))
+        return
+      }
+
+      processedSmileCueIdsRef.current.add(cue.eventId)
+      if (processedSmileCueIdsRef.current.size > 500) {
+        const oldest = processedSmileCueIdsRef.current.values().next().value
+        if (oldest) processedSmileCueIdsRef.current.delete(oldest)
+      }
+
+      activeSmileEnvelopeRef.current = { eventId: cue.eventId, sourceUserId: cue.sourceUserId }
+      if (!applyAutomaticSmileAlpha(SMILE_RESPONSE_ALPHA, SMILE_RESPONSE_RAMP_MS)) {
+        activeSmileEnvelopeRef.current = null
+        sendSmileAuditToExperimenter(makeSmileAuditEvent(cue, 'rejected', 'Mozza did not accept the response.'))
+        return
+      }
+      sendSmileAuditToExperimenter(makeSmileAuditEvent(cue, 'applied', 'Aligned smile envelope started.'))
+
+      smileEnvelopeReturnTimerRef.current = window.setTimeout(() => {
+        smileEnvelopeReturnTimerRef.current = null
+        if (activeSmileEnvelopeRef.current?.eventId !== cue.eventId) return
+        applyAutomaticSmileAlpha(0, SMILE_RESPONSE_RETURN_MS)
+        smileEnvelopeDoneTimerRef.current = window.setTimeout(() => {
+          smileEnvelopeDoneTimerRef.current = null
+          if (activeSmileEnvelopeRef.current?.eventId !== cue.eventId) return
+          activeSmileEnvelopeRef.current = null
+          sendSmileAuditToExperimenter(
+            makeSmileAuditEvent(cue, 'returned', 'Aligned smile envelope returned to neutral.')
+          )
+        }, SMILE_RESPONSE_RETURN_MS)
+      }, SMILE_RESPONSE_RAMP_MS + SMILE_RESPONSE_HOLD_MS)
+    },
+    [sendSmileAuditToExperimenter]
+  )
+
+  const handleLocalSmileDetectorEvent = useCallback(
+    (event: SmileDetectorEvent): void => {
+      const currentForm = formRef.current
+      const target = callPeersRef.current.find(
+        (peer) => peer.role === 'participant' && peer.userId !== callUserIdRef.current
+      )
+      const mode = controlsRef.current.automaticSmileOnsetMode
+
+      if (event.kind === 'calibration-ready') {
+        addLog('Local smile-onset calibration is ready.', 'success')
+        sendSmileAuditToExperimenter(
+          makeSmileAuditEvent(
+            {
+              eventId: `calibration-${callUserIdRef.current}-${Date.now()}`,
+              sourceUserId: callUserIdRef.current,
+              sourceParticipantId: currentForm.participantId,
+              targetUserId: target?.userId ?? ''
+            },
+            'calibration-ready',
+            `Neutral ${event.calibration.neutralMedian.toFixed(3)}; range ${event.calibration.smileRange.toFixed(3)}.`
+          )
+        )
+        return
+      }
+
+      if (event.kind === 'calibration-failed') {
+        addLog(`Smile-onset calibration needs another try: ${event.reason}`, 'warn')
+        sendSmileAuditToExperimenter(
+          makeSmileAuditEvent(
+            {
+              eventId: `calibration-${callUserIdRef.current}-${Date.now()}`,
+              sourceUserId: callUserIdRef.current,
+              sourceParticipantId: currentForm.participantId,
+              targetUserId: target?.userId ?? ''
+            },
+            'calibration-failed',
+            event.reason
+          )
+        )
+        return
+      }
+
+      if (event.kind === 'face-lost') {
+        returnAutomaticSmileToNeutral('Local target face left the valid tracking area.')
+        const eventId = activeLocalSmileEventIdRef.current
+        if (eventId && target) {
+          postSignal(
+            'smile-onset-cancel',
+            { eventId, sourceUserId: callUserIdRef.current, reason: 'Source face left the valid tracking area.' },
+            target.userId
+          ).catch(() => undefined)
+        }
+        activeLocalSmileEventIdRef.current = ''
+        return
+      }
+
+      if (event.kind === 'smile-reset') {
+        activeLocalSmileEventIdRef.current = ''
+        return
+      }
+
+      if (event.kind !== 'smile-onset') return
+      const eventId = `smile-${callUserIdRef.current}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+      const cue: SmileOnsetCue = {
+        eventId,
+        cue: 'smile-onset',
+        sourceUserId: callUserIdRef.current,
+        sourceParticipantId: currentForm.participantId,
+        targetUserId: target?.userId ?? '',
+        observedAtIso: new Date().toISOString(),
+        observedAtEpochMs: Date.now(),
+        observedAtMonotonicMs: event.timestampMs,
+        rawSmile: event.rawSmile,
+        normalizedSmile: event.normalizedSmile,
+        mouthSmileLeft: event.mouthSmileLeft,
+        mouthSmileRight: event.mouthSmileRight,
+        jawOpen: event.jawOpen
+      }
+      activeLocalSmileEventIdRef.current = eventId
+      sendSmileAuditToExperimenter(makeSmileAuditEvent(cue, 'detected', 'Participant clean feed detected smile onset.'))
+
+      if (mode !== 'live') return
+      if (!target || currentForm.sessionFormat !== 'dyad') {
+        sendSmileAuditToExperimenter(
+          makeSmileAuditEvent(cue, 'rejected', 'Live smile onset requires exactly one dyad partner.')
+        )
+        return
+      }
+      postSignal('smile-onset-cue', cue, target.userId)
+        .then(() =>
+          sendSmileAuditToExperimenter(makeSmileAuditEvent(cue, 'sent', 'Cue sent directly to the partner station.'))
+        )
+        .catch((error) =>
+          sendSmileAuditToExperimenter(
+            makeSmileAuditEvent(
+              cue,
+              'rejected',
+              error instanceof Error ? error.message : 'Cue could not be sent to the partner.'
+            )
+          )
+        )
+    },
+    [addLog, postSignal, returnAutomaticSmileToNeutral, sendSmileAuditToExperimenter]
+  )
+
+  const stopSmileDetector = useCallback((): void => {
+    smileDetectorGenerationRef.current += 1
+    if (smileDetectorTimerRef.current !== null) {
+      window.clearInterval(smileDetectorTimerRef.current)
+      smileDetectorTimerRef.current = null
+    }
+    const video = smileDetectorVideoRef.current
+    if (video) {
+      video.pause()
+      video.srcObject = null
+    }
+    smileDetectorVideoRef.current = null
+    smileDetectorStreamRef.current = null
+    smileDetectorBusyRef.current = false
+    smileDetectorRef.current?.reset()
+    smileDetectorRef.current = null
+    setSmileDetectorSnapshot(null)
+    activeLocalSmileEventIdRef.current = ''
+  }, [])
+
+  const startSmileDetector = useCallback(async (): Promise<void> => {
+    const stream = cleanStreamRef.current
+    if (
+      isController ||
+      !inCallRef.current ||
+      controlsRef.current.automaticSmileOnsetMode === 'off' ||
+      formRef.current.sessionFormat !== 'dyad' ||
+      !stream ||
+      stream.getVideoTracks().length === 0
+    ) {
+      return
+    }
+    if (smileDetectorRef.current && smileDetectorStreamRef.current === stream) return
+
+    stopSmileDetector()
+    const generation = smileDetectorGenerationRef.current
+    const detector = new SmileOnsetDetector()
+    const video = document.createElement('video')
+    video.muted = true
+    video.playsInline = true
+    video.srcObject = stream
+    smileDetectorRef.current = detector
+    smileDetectorVideoRef.current = video
+    smileDetectorStreamRef.current = stream
+    detector.startCalibration(performance.now())
+    setSmileDetectorSnapshot(detector.snapshot(performance.now()))
+
+    try {
+      await video.play()
+      const landmarker = await getSmileFaceLandmarker()
+      if (
+        generation !== smileDetectorGenerationRef.current ||
+        !inCallRef.current ||
+        String(controlsRef.current.automaticSmileOnsetMode) === 'off'
+      ) {
+        return
+      }
+
+      let lastSnapshotAt = 0
+      smileDetectorTimerRef.current = window.setInterval(() => {
+        if (smileDetectorBusyRef.current || !smileDetectorRef.current || !smileDetectorVideoRef.current) return
+        smileDetectorBusyRef.current = true
+        try {
+          const timestampMs = performance.now()
+          const sample = sampleSmileFrame(landmarker, smileDetectorVideoRef.current, timestampMs)
+          const events = smileDetectorRef.current.ingest(sample)
+          for (const event of events) handleLocalSmileDetectorEvent(event)
+          if (timestampMs - lastSnapshotAt >= 250) {
+            lastSnapshotAt = timestampMs
+            setSmileDetectorSnapshot(smileDetectorRef.current.snapshot(timestampMs))
+          }
+        } catch (error) {
+          addLog(error instanceof Error ? `Smile detector error: ${error.message}` : 'Smile detector error.', 'error')
+          stopSmileDetector()
+        } finally {
+          smileDetectorBusyRef.current = false
+        }
+      }, SMILE_DETECTOR_INTERVAL_MS)
+    } catch (error) {
+      addLog(
+        error instanceof Error ? `Could not start local smile detection: ${error.message}` : 'Could not start local smile detection.',
+        'error'
+      )
+      stopSmileDetector()
+    }
+  }, [addLog, handleLocalSmileDetectorEvent, isController, stopSmileDetector])
+
+  useEffect(() => {
+    const mode = controls.automaticSmileOnsetMode
+    if (isController || mode === 'off' || callState === 'idle' || callState === 'error') {
+      stopSmileDetector()
+      if (!isController) returnAutomaticSmileToNeutral('Automatic smile onset was disabled.', false)
+      return
+    }
+    if (mode !== 'live') returnAutomaticSmileToNeutral('Automatic smile onset changed to detection-only mode.', false)
+    void startSmileDetector()
+  }, [
+    callState,
+    cleanStreamVersion,
+    controls.automaticSmileOnsetMode,
+    isController,
+    returnAutomaticSmileToNeutral,
+    startSmileDetector,
+    stopSmileDetector
+  ])
+
+  const retrySmileCalibration = (): void => {
+    const detector = smileDetectorRef.current
+    if (!detector) {
+      void startSmileDetector()
+      return
+    }
+    const now = performance.now()
+    detector.startCalibration(now)
+    setSmileDetectorSnapshot(detector.snapshot(now))
   }
 
   const syncRemoteTiles = (): void => {
@@ -1453,12 +1937,33 @@ export default function App(): ReactElement {
     }
 
     if (envelope.type === 'peer-joined' && envelope.payload?.peer) {
+      const joinedPeer = envelope.payload.peer
       setCallPeers((prev) => {
-        const next = prev.filter((peer) => peer.userId !== envelope.payload!.peer!.userId)
-        return [...next, envelope.payload!.peer!]
+        const next = prev.filter((peer) => peer.userId !== joinedPeer.userId)
+        return [...next, joinedPeer]
       })
-      addLog(`${envelope.payload.peer.displayName} joined the room.`, 'success')
-      maybeOfferToPeer(envelope.payload.peer)
+      addLog(`${joinedPeer.displayName} joined the room.`, 'success')
+      maybeOfferToPeer(joinedPeer)
+      // A participant may join after the experimenter selected Detect or Live. Send the
+      // current automatic-session state directly so late joiners never silently stay Off.
+      if (isController && joinedPeer.role === 'participant') {
+        window.setTimeout(() => {
+          sendDirectorPayload({
+            kind: 'live-control',
+            key: 'automaticSmileOnsetMode',
+            value: controlsRef.current.automaticSmileOnsetMode,
+            targetUserId: joinedPeer.userId,
+            label: 'Current automatic smile-onset mode'
+          })
+          sendDirectorPayload({
+            kind: 'live-control',
+            key: 'smileAlpha',
+            value: 0,
+            targetUserId: joinedPeer.userId,
+            label: 'Automatic smile-onset neutral baseline'
+          })
+        }, 250)
+      }
       return
     }
 
@@ -1499,6 +2004,39 @@ export default function App(): ReactElement {
       await handleMonitorSignal(envelope.payload).catch((error) =>
         addLog(error instanceof Error ? error.message : 'Monitor connection error.', 'error')
       )
+      return
+    }
+
+    if (envelope.type === 'signal' && envelope.payload?.type === 'smile-onset-audit') {
+      if (isController && envelope.payload.payload) {
+        appendSmileOnsetAudit(envelope.payload.payload as SmileOnsetAuditEvent)
+      }
+      return
+    }
+
+    if (envelope.type === 'signal' && envelope.payload?.type === 'smile-onset-cue') {
+      if (!isController && envelope.payload.payload) {
+        applyAutomaticSmileCue(envelope.payload.payload as SmileOnsetCue)
+      }
+      return
+    }
+
+    if (envelope.type === 'signal' && envelope.payload?.type === 'smile-onset-cancel') {
+      if (!isController && envelope.payload.payload && typeof envelope.payload.payload === 'object') {
+        const cancellation = envelope.payload.payload as {
+          eventId?: string
+          sourceUserId?: string
+          reason?: string
+        }
+        const active = activeSmileEnvelopeRef.current
+        if (
+          active &&
+          cancellation.eventId === active.eventId &&
+          cancellation.sourceUserId === active.sourceUserId
+        ) {
+          returnAutomaticSmileToNeutral(cancellation.reason || 'Source tracking was lost.')
+        }
+      }
       return
     }
 
@@ -1699,13 +2237,26 @@ export default function App(): ReactElement {
           sampleCount: mediaQualitySamplesRef.current.length,
           sampleInterval: 'approximately 1 second'
         },
+        smileOnset: {
+          file: 'smile_onset_events.csv',
+          eventCount: smileOnsetAuditEventsRef.current.length,
+          detectionSource: 'participant clean local camera',
+          experimenterEvaluatesCues: false,
+          alignedResponse: {
+            alpha: SMILE_RESPONSE_ALPHA,
+            rampMs: SMILE_RESPONSE_RAMP_MS,
+            holdMs: SMILE_RESPONSE_HOLD_MS,
+            returnMs: SMILE_RESPONSE_RETURN_MS
+          }
+        },
         notes: [
           'Media + face/voice manipulation routed through DuckSoup (SFU) + Mozza (face-only smile warp).',
           'Server records clean (-dry) and altered (-wet) streams per participant under data/<namespace>/<interaction>/recordings/.',
           'For empathic accuracy ratings, use the participant-specific ppsPlaybackPlan: selfVideo is clean/dry; partnerVideo is altered/wet.',
           'manipulation_events.csv lists experimenter control changes, cue responses, and synchrony mode changes with timestamps relative to recording start.',
           'chat_log.csv lists every chat message with its audience (everyone / role / direct), including private experimenter messages.',
-          'media_quality.csv separates transport jitter, packet loss, frame drops, and jitter-buffer delay from visible Mozza landmark jitter.'
+          'media_quality.csv separates transport jitter, packet loss, frame drops, and jitter-buffer delay from visible Mozza landmark jitter.',
+          'smile_onset_events.csv records participant-driven clean-feed detections and partner-response timing. The experimenter does not evaluate individual cues.'
         ]
       }
       await Promise.all([
@@ -1748,6 +2299,11 @@ export default function App(): ReactElement {
         }),
         window.researchApi.writeTextFile({
           sessionDir: createdDir,
+          filename: 'smile_onset_events.csv',
+          contents: smileOnsetEventsToCsv(smileOnsetAuditEventsRef.current)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
           filename: 'experimenter_notes.txt',
           contents: experimenterNotesRef.current
         })
@@ -1774,6 +2330,7 @@ export default function App(): ReactElement {
         case 'local-stream': {
           const stream = payload as MediaStream
           cleanStreamRef.current = stream
+          setCleanStreamVersion((version) => version + 1)
           callLocalStreamRef.current = stream
           if (callLocalVideoRef.current) {
             callLocalVideoRef.current.srcObject = stream
@@ -1947,6 +2504,9 @@ export default function App(): ReactElement {
 
     inCallRef.current = true
     setCallState('starting')
+    smileOnsetAuditEventsRef.current = []
+    setSmileOnsetAuditEvents([])
+    processedSmileCueIdsRef.current.clear()
     try {
       const roomReachable = await checkRoomStatus(true)
       if (!roomReachable) {
@@ -1964,6 +2524,7 @@ export default function App(): ReactElement {
           })
           const processor = await createLiveMediaProcessor(rawStream)
           cleanStreamRef.current = rawStream
+          setCleanStreamVersion((version) => version + 1)
           alteredStreamRef.current = processor.processedStream
           callLocalStreamRef.current = processor.processedStream
           if (callLocalVideoRef.current) {
@@ -2040,6 +2601,11 @@ export default function App(): ReactElement {
 
   const leaveLiveCall = (): void => {
     inCallRef.current = false
+    stopSmileDetector()
+    returnAutomaticSmileToNeutral('Station left the room.', false)
+    clearSmileEnvelopeTimers()
+    processedSmileCueIdsRef.current.clear()
+    activeLocalSmileEventIdRef.current = ''
     if (mozzaControlTimerRef.current !== null) {
       window.clearTimeout(mozzaControlTimerRef.current)
       mozzaControlTimerRef.current = null
@@ -2126,6 +2692,11 @@ export default function App(): ReactElement {
       return
     }
 
+    if (controlsRef.current.automaticSmileOnsetMode === 'live' && key === 'smileAlpha') {
+      addLog('Turn automatic smile onset off before changing Smile Alpha manually.', 'warn')
+      return
+    }
+
     setControls((prev) => ({ ...prev, [key]: value }))
     appendControlEvent(String(key), value, notes || `Applied to ${controlTargetLabel}.`)
     broadcastLiveControl(key, value)
@@ -2133,6 +2704,10 @@ export default function App(): ReactElement {
   }
 
   const setSynchronyMode = (mode: ManipulationControls['synchronyMode']): void => {
+    if (controlsRef.current.automaticSmileOnsetMode === 'live') {
+      addLog('Turn automatic smile onset off before changing manual synchrony mode.', 'warn')
+      return
+    }
     const nextAlpha =
       mode === 'aligned' ? 0 : mode === 'suppressed' ? controls.suppressSmileAlpha : controls.smileAlpha
     setControls((prev) => ({ ...prev, synchronyMode: mode, smileAlpha: nextAlpha }))
@@ -2143,6 +2718,10 @@ export default function App(): ReactElement {
   }
 
   const triggerCueResponse = (cue: string, alpha: number, label: string): void => {
+    if (controlsRef.current.automaticSmileOnsetMode === 'live') {
+      addLog('Manual cue buttons are disabled while automatic smile onset is live.', 'warn')
+      return
+    }
     const returnAlpha = controls.synchronyMode === 'suppressed' ? controls.suppressSmileAlpha : 0
     const durationMs = controls.reactivePulseMs
     setControls((prev) => ({ ...prev, synchronyMode: 'reactive' }))
@@ -2157,6 +2736,53 @@ export default function App(): ReactElement {
       label
     })
     addLog(`${label} sent to ${controlTargetLabel}.`, 'info')
+  }
+
+  const setAutomaticSmileOnsetMode = (
+    mode: ManipulationControls['automaticSmileOnsetMode']
+  ): void => {
+    setControls((previous) => ({
+      ...previous,
+      automaticSmileOnsetMode: mode,
+      synchronyMode: 'aligned',
+      smileAlpha: 0
+    }))
+    controlsRef.current = {
+      ...controlsRef.current,
+      automaticSmileOnsetMode: mode,
+      synchronyMode: 'aligned',
+      smileAlpha: 0
+    }
+    appendControlEvent(
+      'automaticSmileOnsetMode',
+      mode,
+      mode === 'off'
+        ? 'Automatic participant-driven smile onset disabled.'
+        : mode === 'detect'
+          ? 'Participants detect and log clean-feed smile onsets without manipulation.'
+          : 'Participants automatically align partner smiles from clean-feed smile onsets.'
+    )
+    // Automatic onset is a dyad-level condition and intentionally ignores the manual
+    // Control target dropdown. Both participant detectors must receive the same mode.
+    sendDirectorPayload({
+      kind: 'live-control',
+      key: 'automaticSmileOnsetMode',
+      value: mode,
+      label: `Automatic smile onset: ${mode}`
+    })
+    sendDirectorPayload({
+      kind: 'live-control',
+      key: 'synchronyMode',
+      value: 'aligned',
+      label: 'Automatic smile onset requires neutral aligned baseline.'
+    })
+    sendDirectorPayload({
+      kind: 'live-control',
+      key: 'smileAlpha',
+      value: 0,
+      label: 'Automatic smile onset reset baseline to neutral.'
+    })
+    addLog(`Automatic smile onset mode set to ${mode}.`, mode === 'live' ? 'warn' : 'info')
   }
 
   const concludeStudy = (): void => {
@@ -2886,7 +3512,37 @@ export default function App(): ReactElement {
                 </div>
               )
             ) : (
-              <div className={`participant-grid count-${Math.min(remoteTiles.length === 0 ? 2 : remoteTiles.length + 1, 4)}`}>
+              <>
+                {controls.automaticSmileOnsetMode !== 'off' &&
+                  smileDetectorSnapshot &&
+                  !['ready', 'onset-candidate', 'cue-active', 'cooldown'].includes(smileDetectorSnapshot.phase) && (
+                    <div className={`smile-calibration-notice ${smileDetectorSnapshot.phase === 'failed' ? 'failed' : ''}`}>
+                      {smileDetectorSnapshot.phase === 'calibrating-neutral' && (
+                        <span>
+                          Camera calibration: look naturally toward the camera and relax your face for{' '}
+                          {Math.max(1, Math.ceil(smileDetectorSnapshot.neutralRemainingMs / 1000))} seconds.
+                        </span>
+                      )}
+                      {smileDetectorSnapshot.phase === 'calibrating-smiles' && (
+                        <span>
+                          Camera calibration: smile naturally, relax, and repeat.{' '}
+                          {smileDetectorSnapshot.promptedSmiles}/3 complete.
+                        </span>
+                      )}
+                      {smileDetectorSnapshot.phase === 'face-missing' && (
+                        <span>Camera calibration paused. Center your full face in the camera.</span>
+                      )}
+                      {smileDetectorSnapshot.phase === 'failed' && (
+                        <>
+                          <span>{smileDetectorSnapshot.calibrationFailure}</span>
+                          <button className="secondary" onClick={retrySmileCalibration}>
+                            Retry calibration
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                <div className={`participant-grid count-${Math.min(remoteTiles.length === 0 ? 2 : remoteTiles.length + 1, 4)}`}>
                 <div className="video-panel">
                   <div className="video-label">Self view</div>
                   <video
@@ -2912,6 +3568,7 @@ export default function App(): ReactElement {
                   </div>
                 )}
               </div>
+              </>
             )}
           </section>
 
@@ -2950,6 +3607,41 @@ export default function App(): ReactElement {
                     ))}
                   </select>
                 </label>
+                <div className="mode-card automatic-smile-card">
+                  <div>
+                    <span>Automatic smile onset</span>
+                    <InfoDot description="Participant clean feeds detect their own smile onset automatically. Detect logs only; Live adds a subtle aligned smile to the partner. The experimenter does not judge individual cues." />
+                  </div>
+                  <div className="segmented-row automatic-smile-modes">
+                    <InfoButton
+                      className={controls.automaticSmileOnsetMode === 'off' ? 'active' : ''}
+                      description="Stop automatic detection and return both participant streams to neutral."
+                      onClick={() => setAutomaticSmileOnsetMode('off')}
+                    >
+                      Off
+                    </InfoButton>
+                    <InfoButton
+                      className={controls.automaticSmileOnsetMode === 'detect' ? 'active' : ''}
+                      description="Detect and timestamp participant smile onsets, but do not alter the partner."
+                      onClick={() => setAutomaticSmileOnsetMode('detect')}
+                    >
+                      Detect
+                    </InfoButton>
+                    <InfoButton
+                      className={controls.automaticSmileOnsetMode === 'live' ? 'active' : ''}
+                      description="Participant smile onsets automatically produce a subtle aligned smile on the partner stream."
+                      onClick={() => setAutomaticSmileOnsetMode('live')}
+                    >
+                      Live aligned
+                    </InfoButton>
+                  </div>
+                  <button
+                    className="secondary wide-button emergency-neutral"
+                    onClick={() => setAutomaticSmileOnsetMode('off')}
+                  >
+                    Emergency neutral reset
+                  </button>
+                </div>
                 <div className="mode-card">
                   <div>
                     <span>Synchrony mode</span>

@@ -10,6 +10,9 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()]
   },
   renderer: {
+    // MediaPipe's model and WASM runtime are bundled locally so smile detection works
+    // without an internet dependency in the lab.
+    publicDir: resolve('public'),
     // Pin the dev server origin so it matches DUCKSOUP_ALLOWED_WS_ORIGINS (the DuckSoup
     // SFU validates the WebSocket Origin header by exact match). Keep these ports in sync
     // with docker/ducksoup/.env.
@@ -25,4 +28,3 @@ export default defineConfig({
     plugins: [react()]
   }
 })
-

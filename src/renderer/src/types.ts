@@ -56,6 +56,7 @@ export type ManipulationControls = {
   audioGain: number
   partnerVolume: number
   synchronyDelayMs: number
+  automaticSmileOnsetMode: 'off' | 'detect' | 'live'
 }
 
 export type LatencyStats = {
