@@ -23,9 +23,11 @@ study validates them against self-report or another measure.
   aligned` modes. Detection and decisions occur locally from each participant's clean camera; the
   experimenter does not evaluate individual cues.
 - Each participant completes an 8-second neutral calibration and three prompted natural smiles.
-- A validated onset can send a direct participant-to-partner cue. The target applies a fixed
-  `0 -> +0.25 -> 0` Mozza envelope (350 ms ramp, 700 ms hold, 500 ms return).
-- Automatic events are written centrally to `smile_onset_events.csv`. This implementation is not
+- A validated onset sends a direct participant-to-partner cue. The target ramps `0 -> +0.25` over
+  350 ms. A matched participant-driven offset then returns the added alpha to `0` over 650 ms after a
+  400 ms minimum peak hold. A five-second watchdog prevents a lost offset from leaving the effect on.
+- Automatic events are written centrally to `smile_synchrony_events.csv`; the former
+  `smile_onset_events.csv` is retained as a compatibility copy. This implementation is not
   research-ready until the cue, timing, manipulation, and research validation gates below pass.
 
 ## Recommended cue model

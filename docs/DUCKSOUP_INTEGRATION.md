@@ -103,11 +103,13 @@ beforehand:
 
 Controls are target-aware: choose one live participant in **Control target**, or leave it on **All
 participants**. Every synchrony mode change and cue response is written to `manipulation_events.csv`.
-The original cue buttons remain manual experimenter triggers. The separate automatic smile-onset module
-runs from participant clean feeds and supports **Off**, **Detect**, and **Live aligned** modes. It never
-detects from altered video, and the experimenter does not approve individual events. Live mode sends the
-validated event directly to the dyad partner and applies a fixed, non-stacking Mozza envelope. Automatic
-events and response stages are written to `smile_onset_events.csv`. Keep this feature in internal testing
+The original cue buttons remain manual experimenter triggers. The separate automatic smile-synchrony
+module runs from participant clean feeds and supports **Off**, **Detect**, and **Live aligned** modes. It
+never detects from altered video, and the experimenter does not approve individual events. Live mode sends
+validated onset and matched offset events directly to the dyad partner. The target applies a non-stacking
+Mozza smile addition and returns it to alpha `0` after the participant-driven offset; a watchdog prevents
+stuck effects. Automatic events and response stages are written to `smile_synchrony_events.csv`, with
+`smile_onset_events.csv` retained for compatibility. Keep this feature in internal testing
 until lighting, camera angle, speech false positives, target routing, timing, face loss, and awareness have
 passed the validation gates in `DYAD_SYNCHRONY_PLAN.md`.
 

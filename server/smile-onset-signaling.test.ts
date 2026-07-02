@@ -70,8 +70,8 @@ afterEach(() => {
   for (const child of processes.splice(0)) child.kill('SIGTERM')
 })
 
-describe('smile-onset signaling', () => {
-  it('delivers a participant cue directly to the intended partner', async () => {
+describe('smile synchrony signaling', () => {
+  it('delivers matched participant onset and offset cues directly to the intended partner', async () => {
     const port = 18_000 + Math.floor(Math.random() * 1_000)
     const baseUrl = `http://127.0.0.1:${port}`
     const child = spawn(process.execPath, ['server/signaling-server.mjs'], {
@@ -115,6 +115,36 @@ describe('smile-onset signaling', () => {
     expect(delivered.payload?.from).toBe('p1')
     expect(delivered.payload?.to).toBe('p2')
     expect(delivered.payload?.payload).toMatchObject(cue)
+
+    const offset = {
+      eventId: cue.eventId,
+      cue: 'smile-offset',
+      sourceUserId: 'p1',
+      sourceParticipantId: 'P001',
+      targetUserId: 'p2',
+      observedAtEpochMs: Date.now(),
+      normalizedSmile: 0.08,
+      smoothedNormalizedSmile: 0.1
+    }
+    const offsetResponse = await fetch(`${baseUrl}/signal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roomId: 'smile-room',
+        from: 'p1',
+        to: 'p2',
+        type: 'smile-offset-cue',
+        payload: offset,
+        role: 'participant',
+        displayName: 'P1'
+      })
+    })
+    expect(offsetResponse.ok).toBe(true)
+
+    const deliveredOffset = await waitForSignal(p2Reader, 'smile-offset-cue')
+    expect(deliveredOffset.payload?.from).toBe('p1')
+    expect(deliveredOffset.payload?.to).toBe('p2')
+    expect(deliveredOffset.payload?.payload).toMatchObject(offset)
 
     p1Abort.abort()
     p2Abort.abort()

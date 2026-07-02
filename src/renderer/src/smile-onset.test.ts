@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   SmileOnsetDetector,
   smileCueRejectionReason,
+  smileOffsetMatchRejectionReason,
+  smileOffsetRejectionReason,
+  smileOffsetReturnDelayMs,
   type SmileDetectorEvent,
   type SmileFrame
 } from './smile-onset'
@@ -76,7 +79,7 @@ describe('SmileOnsetDetector', () => {
     expect(events.some((event) => event.kind === 'smile-onset')).toBe(true)
     cursor += 550
     events = feed(detector, cursor, cursor + 500, 0.05)
-    expect(events.some((event) => event.kind === 'smile-reset')).toBe(true)
+    expect(events.some((event) => event.kind === 'smile-offset')).toBe(true)
     cursor += 550
     events = feed(detector, cursor, cursor + 600, 0.6)
     expect(events.some((event) => event.kind === 'smile-onset')).toBe(false)
@@ -96,6 +99,43 @@ describe('SmileOnsetDetector', () => {
     expect(feed(detector, cursor + 600, cursor + 1_500, 0.8, false)).toHaveLength(0)
   })
 
+  it('uses a three-frame median and dwell before confirming smile offset', () => {
+    const detector = new SmileOnsetDetector()
+    const cursor = calibrate(detector)
+    feed(detector, cursor + 50, cursor + 500, 0.6)
+
+    const briefDip = [
+      ...detector.ingest(frame(cursor + 550, 0.05)),
+      ...detector.ingest(frame(cursor + 600, 0.6)),
+      ...detector.ingest(frame(cursor + 650, 0.6))
+    ]
+    expect(briefDip.some((event) => event.kind === 'smile-offset')).toBe(false)
+
+    const offsetEvents = feed(detector, cursor + 700, cursor + 1_150, 0.05)
+    const offset = offsetEvents.find((event) => event.kind === 'smile-offset')
+    expect(offset).toBeDefined()
+    if (offset?.kind === 'smile-offset') {
+      expect(offset.smoothedNormalizedSmile).toBeLessThanOrEqual(0.2)
+      expect(offset.normalizedSmile).toBeLessThanOrEqual(0.2)
+    }
+  })
+
+  it('does not emit an offset while a smile remains active', () => {
+    const detector = new SmileOnsetDetector()
+    const cursor = calibrate(detector)
+    const activeEvents = feed(detector, cursor + 50, cursor + 5_500, 0.6)
+    expect(activeEvents.filter((event) => event.kind === 'smile-onset')).toHaveLength(1)
+    expect(activeEvents.some((event) => event.kind === 'smile-offset')).toBe(false)
+  })
+
+  it('emits only one offset for one onset', () => {
+    const detector = new SmileOnsetDetector()
+    const cursor = calibrate(detector)
+    feed(detector, cursor + 50, cursor + 500, 0.6)
+    const offsetEvents = feed(detector, cursor + 550, cursor + 2_500, 0.05)
+    expect(offsetEvents.filter((event) => event.kind === 'smile-offset')).toHaveLength(1)
+  })
+
   it('fails calibration when smile movement is not distinguishable from neutral', () => {
     const detector = new SmileOnsetDetector({ provisionalSmileDelta: 0.01 })
     detector.startCalibration(0)
@@ -111,11 +151,51 @@ describe('SmileOnsetDetector', () => {
   })
 })
 
+describe('smile offset validation', () => {
+  const valid = {
+    mode: 'live' as const,
+    cueTargetUserId: 'p2',
+    localUserId: 'p2',
+    cueSourceUserId: 'p1',
+    senderUserId: 'p1',
+    sourceIsParticipant: true,
+    ageMs: 120,
+    maxAgeMs: 2_000,
+    duplicate: false,
+    activeEventId: 'smile-p1-1',
+    activeSourceUserId: 'p1',
+    returnAlreadyStarted: false,
+    duckSoupActive: true
+  }
+
+  it('accepts a fresh participant offset for an active response', () => {
+    expect(smileOffsetRejectionReason(valid)).toBe('')
+    expect(smileOffsetMatchRejectionReason('smile-p1-1', 'p1', 'smile-p1-1', 'p1')).toBe('')
+  })
+
+  it('rejects stale, duplicate, spoofed, inactive, and mismatched offsets', () => {
+    expect(smileOffsetRejectionReason({ ...valid, ageMs: 2_500 })).toContain('Stale')
+    expect(smileOffsetRejectionReason({ ...valid, duplicate: true })).toContain('Duplicate')
+    expect(smileOffsetRejectionReason({ ...valid, senderUserId: 'other' })).toContain('sender')
+    expect(smileOffsetRejectionReason({ ...valid, activeEventId: '' })).toContain('No smile response')
+    expect(smileOffsetRejectionReason({ ...valid, returnAlreadyStarted: true })).toContain('already returning')
+    expect(smileOffsetMatchRejectionReason('other-event', 'p1', 'smile-p1-1', 'p1')).toContain('event')
+    expect(smileOffsetMatchRejectionReason('smile-p1-1', 'other', 'smile-p1-1', 'p1')).toContain('source')
+  })
+
+  it('queues an early offset until ramp and minimum peak hold complete', () => {
+    expect(smileOffsetReturnDelayMs(1_000, 1_300, 350, 400)).toBe(450)
+    expect(smileOffsetReturnDelayMs(1_000, 1_900, 350, 400)).toBe(0)
+  })
+})
+
 describe('smileCueRejectionReason', () => {
   const valid = {
     mode: 'live' as const,
     cueTargetUserId: 'p2',
     localUserId: 'p2',
+    cueSourceUserId: 'p1',
+    senderUserId: 'p1',
     sourceIsParticipant: true,
     ageMs: 150,
     maxAgeMs: 2_000,
@@ -134,6 +214,7 @@ describe('smileCueRejectionReason', () => {
     expect(smileCueRejectionReason({ ...valid, duplicate: true })).toContain('Duplicate')
     expect(smileCueRejectionReason({ ...valid, responseAlreadyActive: true })).toContain('stacking')
     expect(smileCueRejectionReason({ ...valid, cueTargetUserId: 'p1' })).toContain('target')
+    expect(smileCueRejectionReason({ ...valid, senderUserId: 'other' })).toContain('sender')
     expect(smileCueRejectionReason({ ...valid, localFaceReady: false })).toContain('not calibrated')
   })
 })

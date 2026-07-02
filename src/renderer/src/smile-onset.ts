@@ -48,8 +48,14 @@ export type SmileDetectorEvent =
       jawOpen: number
     }
   | {
-      kind: 'smile-reset'
+      kind: 'smile-offset'
       timestampMs: number
+      rawSmile: number
+      normalizedSmile: number
+      smoothedNormalizedSmile: number
+      mouthSmileLeft: number
+      mouthSmileRight: number
+      jawOpen: number
     }
   | {
       kind: 'face-lost'
@@ -61,6 +67,7 @@ export type SmileDetectorSnapshot = {
   facePresent: boolean
   rawSmile: number
   normalizedSmile: number
+  smoothedNormalizedSmile: number
   calibration: SmileCalibration | null
   neutralRemainingMs: number
   promptedSmiles: number
@@ -83,20 +90,47 @@ export type SmileOnsetCue = {
   jawOpen: number
 }
 
+export type SmileOffsetCue = {
+  eventId: string
+  cue: 'smile-offset'
+  sourceUserId: string
+  sourceParticipantId: string
+  targetUserId: string
+  observedAtIso: string
+  observedAtEpochMs: number
+  observedAtMonotonicMs: number
+  rawSmile: number
+  normalizedSmile: number
+  smoothedNormalizedSmile: number
+  mouthSmileLeft: number
+  mouthSmileRight: number
+  jawOpen: number
+}
+
+export type SmileSynchronyCue = SmileOnsetCue | SmileOffsetCue
+
 export type SmileOnsetAuditEvent = {
   eventId: string
   timestamp: string
   elapsedMs: number
+  observedAtIso: string
+  observedAtEpochMs: number | ''
+  observedAtMonotonicMs: number | ''
   roomId: string
   sourceUserId: string
   sourceParticipantId: string
   targetUserId: string
   targetParticipantId: string
+  cueType: 'smile-onset' | 'smile-offset' | 'system'
   stage:
     | 'detected'
     | 'sent'
     | 'applied'
+    | 'offset-received'
+    | 'return-queued'
+    | 'return-started'
     | 'returned'
+    | 'watchdog-return'
     | 'cancelled'
     | 'rejected'
     | 'calibration-ready'
@@ -104,6 +138,7 @@ export type SmileOnsetAuditEvent = {
   mode: SmileOnsetMode
   rawSmile: number | ''
   normalizedSmile: number | ''
+  smoothedNormalizedSmile: number | ''
   mouthSmileLeft: number | ''
   mouthSmileRight: number | ''
   jawOpen: number | ''
@@ -118,6 +153,8 @@ export type SmileCueValidation = {
   mode: SmileOnsetMode
   cueTargetUserId: string
   localUserId: string
+  cueSourceUserId: string
+  senderUserId: string
   sourceIsParticipant: boolean
   ageMs: number
   maxAgeMs: number
@@ -130,6 +167,7 @@ export type SmileCueValidation = {
 export const smileCueRejectionReason = (validation: SmileCueValidation): string => {
   if (validation.mode !== 'live') return 'Automatic smile onset is not in live mode.'
   if (validation.cueTargetUserId !== validation.localUserId) return 'Cue target does not match this station.'
+  if (validation.cueSourceUserId !== validation.senderUserId) return 'Cue sender does not match its source.'
   if (!validation.sourceIsParticipant) return 'Cue source is not a participant in this room.'
   if (validation.ageMs < -1_000 || validation.ageMs > validation.maxAgeMs) {
     return `Stale cue (${validation.ageMs} ms old).`
@@ -140,6 +178,55 @@ export const smileCueRejectionReason = (validation: SmileCueValidation): string 
   if (!validation.localFaceReady) return 'Target face is not calibrated and visible.'
   return ''
 }
+
+export type SmileOffsetValidation = {
+  mode: SmileOnsetMode
+  cueTargetUserId: string
+  localUserId: string
+  cueSourceUserId: string
+  senderUserId: string
+  sourceIsParticipant: boolean
+  ageMs: number
+  maxAgeMs: number
+  duplicate: boolean
+  activeEventId: string
+  activeSourceUserId: string
+  returnAlreadyStarted: boolean
+  duckSoupActive: boolean
+}
+
+export const smileOffsetRejectionReason = (validation: SmileOffsetValidation): string => {
+  if (validation.mode !== 'live') return 'Automatic smile synchrony is not in live mode.'
+  if (validation.cueTargetUserId !== validation.localUserId) return 'Offset target does not match this station.'
+  if (validation.cueSourceUserId !== validation.senderUserId) return 'Offset sender does not match its source.'
+  if (!validation.sourceIsParticipant) return 'Offset source is not a participant in this room.'
+  if (validation.ageMs < -1_000 || validation.ageMs > validation.maxAgeMs) {
+    return `Stale offset (${validation.ageMs} ms old).`
+  }
+  if (validation.duplicate) return 'Duplicate offset ignored.'
+  if (!validation.activeEventId) return 'No smile response is active.'
+  if (validation.returnAlreadyStarted) return 'The active smile response is already returning to baseline.'
+  if (!validation.duckSoupActive) return 'DuckSoup/Mozza is not active.'
+  return ''
+}
+
+export const smileOffsetMatchRejectionReason = (
+  cueEventId: string,
+  cueSourceUserId: string,
+  activeEventId: string,
+  activeSourceUserId: string
+): string => {
+  if (cueEventId !== activeEventId) return 'Offset does not match the active smile event.'
+  if (cueSourceUserId !== activeSourceUserId) return 'Offset source does not match the active smile source.'
+  return ''
+}
+
+export const smileOffsetReturnDelayMs = (
+  appliedAtEpochMs: number,
+  receivedAtEpochMs: number,
+  rampMs: number,
+  minimumPeakHoldMs: number
+): number => Math.max(0, appliedAtEpochMs + rampMs + minimumPeakHoldMs - receivedAtEpochMs)
 
 export type SmileDetectorConfig = {
   neutralCalibrationMs: number
@@ -207,6 +294,8 @@ export class SmileOnsetDetector {
   private calibrationFailure = ''
   private lastRawSmile = 0
   private lastNormalizedSmile = 0
+  private lastSmoothedNormalizedSmile = 0
+  private normalizedSmileWindow: number[] = []
   private lastFacePresent = false
 
   constructor(config: Partial<SmileDetectorConfig> = {}) {
@@ -229,6 +318,11 @@ export class SmileOnsetDetector {
     this.cooldownUntil = 0
     this.faceStableSince = null
     this.calibrationFailure = ''
+    this.lastRawSmile = 0
+    this.lastNormalizedSmile = 0
+    this.lastSmoothedNormalizedSmile = 0
+    this.normalizedSmileWindow = []
+    this.lastFacePresent = false
   }
 
   reset(): void {
@@ -247,6 +341,8 @@ export class SmileOnsetDetector {
     this.calibrationFailure = ''
     this.lastRawSmile = 0
     this.lastNormalizedSmile = 0
+    this.lastSmoothedNormalizedSmile = 0
+    this.normalizedSmileWindow = []
     this.lastFacePresent = false
   }
 
@@ -257,6 +353,14 @@ export class SmileOnsetDetector {
     this.lastRawSmile = rawSmile
     this.lastFacePresent = validFace
     this.lastNormalizedSmile = this.normalize(rawSmile)
+    if (validFace && this.calibration) {
+      this.normalizedSmileWindow.push(this.lastNormalizedSmile)
+      this.normalizedSmileWindow = this.normalizedSmileWindow.slice(-3)
+      this.lastSmoothedNormalizedSmile = median(this.normalizedSmileWindow)
+    } else {
+      this.normalizedSmileWindow = []
+      this.lastSmoothedNormalizedSmile = this.lastNormalizedSmile
+    }
 
     if (this.phase === 'idle' || this.phase === 'failed') return events
 
@@ -317,6 +421,7 @@ export class SmileOnsetDetector {
       this.faceStableSince = null
       this.onsetCandidateSince = null
       this.releaseCandidateSince = null
+      this.normalizedSmileWindow = []
       if (enteredFaceMissing) events.push({ kind: 'face-lost', timestampMs: frame.timestampMs })
       return events
     }
@@ -329,6 +434,7 @@ export class SmileOnsetDetector {
     }
 
     const normalized = this.lastNormalizedSmile
+    const smoothedNormalized = this.lastSmoothedNormalizedSmile
 
     if (this.phase === 'cooldown') {
       if (frame.timestampMs >= this.cooldownUntil && normalized <= this.config.releaseThreshold) {
@@ -338,10 +444,19 @@ export class SmileOnsetDetector {
     }
 
     if (this.phase === 'cue-active') {
-      if (normalized <= this.config.releaseThreshold) {
+      if (smoothedNormalized <= this.config.releaseThreshold) {
         this.releaseCandidateSince ??= frame.timestampMs
         if (frame.timestampMs - this.releaseCandidateSince >= this.config.releaseDwellMs) {
-          events.push({ kind: 'smile-reset', timestampMs: frame.timestampMs })
+          events.push({
+            kind: 'smile-offset',
+            timestampMs: frame.timestampMs,
+            rawSmile,
+            normalizedSmile: normalized,
+            smoothedNormalizedSmile: smoothedNormalized,
+            mouthSmileLeft: frame.mouthSmileLeft,
+            mouthSmileRight: frame.mouthSmileRight,
+            jawOpen: frame.jawOpen
+          })
           this.phase = 'cooldown'
           this.cooldownUntil = frame.timestampMs + this.config.refractoryMs
           this.releaseCandidateSince = null
@@ -387,6 +502,7 @@ export class SmileOnsetDetector {
       facePresent: this.lastFacePresent,
       rawSmile: this.lastRawSmile,
       normalizedSmile: this.lastNormalizedSmile,
+      smoothedNormalizedSmile: this.lastSmoothedNormalizedSmile,
       calibration: this.calibration,
       neutralRemainingMs:
         this.phase === 'calibrating-neutral'
@@ -416,6 +532,8 @@ export class SmileOnsetDetector {
     this.calibration = { neutralMedian, neutralMad, smileReference, smileRange }
     this.phase = 'ready'
     this.lastNormalizedSmile = this.normalize(this.lastRawSmile)
+    this.normalizedSmileWindow = [this.lastNormalizedSmile]
+    this.lastSmoothedNormalizedSmile = this.lastNormalizedSmile
     return [{ kind: 'calibration-ready', timestampMs, calibration: this.calibration }]
   }
 
