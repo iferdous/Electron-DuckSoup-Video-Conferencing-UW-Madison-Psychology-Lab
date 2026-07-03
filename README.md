@@ -2,7 +2,7 @@
 
 Desktop app for running live emotion-study video sessions.
 
-The app supports participant rooms, an Experimenter-only control view, dyad/triad/quad meeting sizes, hosted room links, live chat, self-view hide/show, simple latency display, `.webm` recordings, and session timing logs.
+The app supports participant rooms, an Experimenter-only control view, 2-person (dyad) sessions, hosted room links, live chat, self-view hide/show, simple latency display, dual clean + altered `.mp4` recordings, and session timing logs.
 
 ## Install
 
@@ -46,10 +46,9 @@ On the Experimenter computer:
 1. Open the app.
 2. Click `Experimenter login`.
 3. Login with `admin` / `admin`.
-4. Choose `Dyad`, `Triad`, or `Quad`.
-5. Click `Copy link`.
-6. Send that session link to participants.
-7. Click `Continue to room`, then `Join room`.
+4. Click `Copy link` (sessions are 2-person / dyad).
+5. Send that session link to participants.
+6. Click `Continue to room`, then `Join room`.
 
 On each participant computer:
 
@@ -65,7 +64,8 @@ Participants should see each other after they join the same session link. The Ex
 The media/effects server (DuckSoup SFU + Mozza face-only smile warp) carries the live A/V and the
 face/voice manipulation. See `docs/DUCKSOUP_INTEGRATION.md` for the full picture.
 
-One-time, fetch the Mozza plugin + models (gitignored binaries) via Docker:
+One-time, fetch/build the Mozza plugin + models (gitignored binaries) via Docker. This builds a patched
+plugin, so it can take a few minutes:
 
 ```bash
 cd docker/ducksoup && bash fetch-mozza-plugins.sh
@@ -86,6 +86,15 @@ npm run media:down
 
 This Docker server runs on the computer that starts it. The hosted Render signaling server is separate.
 
+**Where the media server runs — read before a multi-computer lab install.** The app currently connects
+to the media/effects server at `localhost:8100`, so out of the box that server must run on the **same
+computer** as each app instance (this is why the single-machine test setup "just works"). To run **one
+shared** media server — e.g. on the lab's NVIDIA "gaming PC" — that the participant machines reach over
+the LAN, the app has to point at that machine's LAN IP instead of `localhost`, and the field for that is
+**not currently in the UI** (a known to-do). Coordinate with Aditya before the multi-machine install. On
+the Windows/NVIDIA media-server machine, also set `docker/ducksoup/.env`
+(`DUCKSOUP_IMAGE=ducksouplab/ducksoup:latest`, GPU flags off → CPU x264); see `docs/DUCKSOUP_INTEGRATION.md`.
+
 ## Local Signaling Test
 
 If Render is unavailable and you need a local-only fallback:
@@ -98,20 +107,25 @@ Then use `http://localhost:8765` on the same computer, or the host computer LAN 
 
 ## Recording
 
-Recordings are saved as `.webm`.
+In the default DuckSoup mode, each participant is recorded server-side as a clean (`-dry.mp4`) and an
+altered (`-wet.mp4`) file. The Experimenter collects these plus the session files on **Conclude study**.
 
 Each saved session can include:
 
-- `clean.webm`
-- `altered.webm`
+- a clean `-dry.mp4` and an altered `-wet.mp4` per participant
 - `session_manifest.json`
 - `pps_playback_manifest.json`
 - `manipulation_events.csv`
+- `chat_log.csv`
+- `media_quality.csv`
 
 For PPS/empathic accuracy ratings, use `pps_playback_manifest.json`. It tells the RA which clean
 self video and altered partner video should be shown together for each participant.
 
-If no output folder is selected, the app saves sessions to the default lab sessions folder in Documents.
+The `-dry`/`-wet` videos are written by the media server under
+`docker/ducksoup/data/<namespace>/<room>/recordings/`, and are copied to the chosen output folder when
+the media server runs on the same machine as the Experimenter app. If no output folder is selected, the
+app saves session files to the default lab sessions folder in Documents.
 
 ## Update The App
 
