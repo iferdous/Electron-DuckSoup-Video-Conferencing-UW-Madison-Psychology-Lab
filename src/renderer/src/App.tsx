@@ -3785,32 +3785,35 @@ export default function App(): ReactElement {
                       )}
                     </div>
                   )}
-                <div className={`participant-grid count-${Math.min(remoteTiles.length === 0 ? 2 : remoteTiles.length + 1, 4)}`}>
-                <div className="video-panel">
-                  <div className="video-label">Self view</div>
-                  <video
-                    ref={callLocalVideoRef}
-                    autoPlay
-                    muted
-                    playsInline
-                    className={showSelfView ? 'video-surface' : 'video-surface hidden-preview'}
-                  />
-                  {!showSelfView && <div className="video-empty">Self view is hidden. Camera and mic are still on.</div>}
-                  {callState === 'idle' && <div className="video-empty">Join the room to start your camera.</div>}
-                  <button className="overlay-button" onClick={() => setShowSelfView((prev) => !prev)}>
-                    {showSelfView ? 'Hide self view' : 'Show self view'}
-                  </button>
-                </div>
-                {remoteTiles.map((tile) => (
-                  <RemoteVideoCard key={tile.userId} tile={tile} volume={controls.partnerVolume} />
-                ))}
-                {remoteTiles.length === 0 && (
-                  <div className="video-panel">
-                    <div className="video-label">Waiting room</div>
-                    <div className="video-empty">Waiting for another participant to join this meeting ID…</div>
+                <div className="participant-stage">
+                  {remoteTiles.length > 0 ? (
+                    <RemoteVideoCard
+                      key={remoteTiles[0].userId}
+                      tile={remoteTiles[0]}
+                      volume={controls.partnerVolume}
+                    />
+                  ) : (
+                    <div className="video-panel">
+                      <div className="video-label">Waiting room</div>
+                      <div className="video-empty">Waiting for another participant to join this meeting ID…</div>
+                    </div>
+                  )}
+                  <div className="self-pip">
+                    <video
+                      ref={callLocalVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className={showSelfView ? 'video-surface' : 'video-surface hidden-preview'}
+                    />
+                    {showSelfView && <div className="self-pip-label">You</div>}
+                    {!showSelfView && <div className="video-empty">Self view hidden.</div>}
+                    {callState === 'idle' && <div className="video-empty">Join to start your camera.</div>}
+                    <button className="overlay-button" onClick={() => setShowSelfView((prev) => !prev)}>
+                      {showSelfView ? 'Hide' : 'Show'}
+                    </button>
                   </div>
-                )}
-              </div>
+                </div>
               </>
             )}
           </section>
