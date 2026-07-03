@@ -726,6 +726,74 @@ label {
   background: var(--surface-4);
 }
 
+/* Timed manipulation schedule (experimenter): "at mm:ss, set smile alpha to X". */
+.timed-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.timed-add input[type='number']::-webkit-inner-spin-button,
+.timed-add input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.timed-add label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted, #94a3b8);
+}
+.timed-add input {
+  width: 68px;
+  min-height: 34px;
+}
+.timed-add button {
+  min-height: 34px;
+}
+.timed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.timed-row {
+  display: grid;
+  grid-template-columns: 52px 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+.timed-when {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.timed-status {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.timed-status.pending {
+  color: var(--muted, #94a3b8);
+}
+.timed-status.done {
+  color: #34d399;
+}
+.timed-remove {
+  min-height: 0;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
 .call-panel {
   margin-bottom: 0;
 }
@@ -1046,11 +1114,6 @@ label {
   gap: 4px;
 }
 
-/* The automatic-smile row has two buttons (Detect / Live aligned) — the off action lives
-   on the "Reset / Off" button below — so it uses two columns, not the default three. */
-.segmented-row.automatic-smile-modes {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
 
 .segmented-row button {
   min-width: 0;

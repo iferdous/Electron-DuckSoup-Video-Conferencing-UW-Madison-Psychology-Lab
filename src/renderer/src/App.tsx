@@ -413,6 +413,19 @@ const csvEscape = (value: unknown): string => {
   return /[",\n\r]/.test(text) ? `"${text.replace(/\r?\n|\r/g, ' ').replace(/"/g, '""')}"` : text
 }
 
+type TimedPreset = {
+  id: string
+  atSeconds: number
+  smileAlpha: number
+  fired: boolean
+}
+
+const secondsToMmSs = (total: number): string => {
+  const m = Math.floor(total / 60)
+  const s = Math.floor(total % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
 const controlEventsToCsv = (events: ControlEvent[], recordingStartMs?: number | null): string => {
   const header = [
     'timestamp',
@@ -733,6 +746,12 @@ export default function App(): ReactElement {
   const [sessionDir, setSessionDir] = useState<string>('')
   const [showSelfView, setShowSelfView] = useState(true)
   const [monitorView, setMonitorView] = useState<'all' | 'altered' | 'clean'>('all')
+  const [timedSchedule, setTimedSchedule] = useState<TimedPreset[]>([])
+  const [timedAtMin, setTimedAtMin] = useState(0)
+  const [timedAtSec, setTimedAtSec] = useState(0)
+  const [timedAlpha, setTimedAlpha] = useState('0')
+  const timedScheduleRef = useRef<TimedPreset[]>([])
+  const fireTimedPresetRef = useRef<(preset: TimedPreset) => void>(() => {})
   const [logs, setLogs] = useState<LogEvent[]>([])
   const [controlEvents, setControlEvents] = useState<ControlEvent[]>([])
   const [recordingSeconds, setRecordingSeconds] = useState(0)
@@ -753,6 +772,10 @@ export default function App(): ReactElement {
   const useDuckSoup = form.mediaTransport === 'ducksoup' && form.duckSoupUrl.trim().length > 0
   const expectedParticipants = sessionCapacity[form.sessionFormat]
   const participantPeers = useMemo(() => callPeers.filter((peer) => peer.role === 'participant'), [callPeers])
+  // True only while every expected participant is in the room. Drives the call timer (and mirrors
+  // the recording anchor / timed schedule, which both key off both participants being present), so
+  // the clock starts when both join and pauses the moment either one leaves.
+  const bothParticipantsPresent = expectedParticipants > 0 && participantPeers.length >= expectedParticipants
   const monitorByKey = useMemo(() => new Map(monitorTiles.map((tile) => [tile.key, tile])), [monitorTiles])
   const selectedControlTarget = useMemo(
     () => participantPeers.find((peer) => peer.userId === form.targetUserId),
@@ -936,8 +959,36 @@ export default function App(): ReactElement {
       recordingStartRef.current = Date.now()
       recordingReanchoredRef.current = true
       setRecordingSeconds(0)
+      // New recording window: let the timed schedule fire again from this t=0.
+      setTimedSchedule((prev) => prev.map((preset) => ({ ...preset, fired: false })))
     }
   }, [isController, participantPeers.length, expectedParticipants])
+
+  // Keep a fresh ref of the timed schedule for the scheduler interval below.
+  useEffect(() => {
+    timedScheduleRef.current = timedSchedule
+  }, [timedSchedule])
+
+  // Timed manipulation schedule (experimenter): once recording is anchored, fire each preset when the
+  // conversation reaches its time (e.g. "at 3:00, set smile alpha to 0.8"). One-shot per recording window.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const startedAt = recordingStartRef.current
+      if (!startedAt || !recordingReanchoredRef.current || formRef.current?.role !== 'controller') return
+      const elapsedMs = Date.now() - startedAt
+      const due = timedScheduleRef.current.filter(
+        (preset) => !preset.fired && elapsedMs >= preset.atSeconds * 1000
+      )
+      if (due.length === 0) return
+      const dueIds = new Set(due.map((preset) => preset.id))
+      timedScheduleRef.current = timedScheduleRef.current.map((preset) =>
+        dueIds.has(preset.id) ? { ...preset, fired: true } : preset
+      )
+      setTimedSchedule(timedScheduleRef.current)
+      due.forEach((preset) => fireTimedPresetRef.current(preset))
+    }, 500)
+    return () => window.clearInterval(id)
+  }, [])
 
   useEffect(() => {
     smileOnsetAuditEventsRef.current = smileOnsetAuditEvents
@@ -2987,6 +3038,28 @@ export default function App(): ReactElement {
     addLog(`${String(key)} = ${value} sent to ${controlTargetLabel}.`, 'info')
   }
 
+  // Keep the timed-preset firing function pointed at the latest setControl closure.
+  useEffect(() => {
+    fireTimedPresetRef.current = (preset: TimedPreset): void => {
+      setControl(
+        'smileAlpha',
+        preset.smileAlpha,
+        `Timed preset: smile alpha ${preset.smileAlpha} at ${secondsToMmSs(preset.atSeconds)}.`
+      )
+    }
+  })
+
+  const addTimedPreset = (): void => {
+    const atSeconds = Math.max(0, Math.round(timedAtMin) * 60 + Math.round(timedAtSec))
+    const smileAlpha = Math.max(-1, Math.min(1, Number(timedAlpha) || 0))
+    setTimedSchedule((prev) =>
+      [...prev, { id: makeId(), atSeconds, smileAlpha, fired: false }].sort((a, b) => a.atSeconds - b.atSeconds)
+    )
+  }
+  const removeTimedPreset = (id: string): void => {
+    setTimedSchedule((prev) => prev.filter((preset) => preset.id !== id))
+  }
+
   const setSynchronyMode = (mode: ManipulationControls['synchronyMode']): void => {
     if (controlsRef.current.automaticSmileOnsetMode === 'live') {
       addLog('Turn automatic smile synchrony off before changing manual synchrony mode.', 'warn')
@@ -3731,7 +3804,7 @@ export default function App(): ReactElement {
             {isController && (
               <div className="section-title accent conference-title">
                 <span>Live Video Conference</span>
-                <LiveClock running={callState !== 'idle' && callState !== 'error'} />
+                <LiveClock running={bothParticipantsPresent} />
               </div>
             )}
             {isController ? (
@@ -3910,6 +3983,13 @@ export default function App(): ReactElement {
                   </div>
                   <div className="segmented-row automatic-smile-modes">
                     <InfoButton
+                      className={controls.automaticSmileOnsetMode === 'off' ? 'active' : ''}
+                      description="Turn automatic detection off and return all faces to neutral."
+                      onClick={() => setAutomaticSmileOnsetMode('off')}
+                    >
+                      Off
+                    </InfoButton>
+                    <InfoButton
                       className={controls.automaticSmileOnsetMode === 'detect' ? 'active' : ''}
                       description="Detect and timestamp participant smile onsets and offsets without altering the partner."
                       onClick={() => setAutomaticSmileOnsetMode('detect')}
@@ -3921,15 +4001,9 @@ export default function App(): ReactElement {
                       description="A participant smile onset adds a subtle partner smile; the matched offset smoothly returns Mozza to the partner's physical baseline."
                       onClick={() => setAutomaticSmileOnsetMode('live')}
                     >
-                      Live aligned
+                      Live
                     </InfoButton>
                   </div>
-                  <button
-                    className="secondary wide-button emergency-neutral"
-                    onClick={() => setAutomaticSmileOnsetMode('off')}
-                  >
-                    Reset / Off
-                  </button>
                 </div>
                 <RangeControl
                   label="Smile alpha"
@@ -4059,6 +4133,65 @@ export default function App(): ReactElement {
               </section>
 
               <section className="panel">
+                <div className="section-title accent">
+                  Timed schedule
+                  <InfoDot description="Sets smile alpha at a set time into the call, timed from when both participants join. Fires automatically." />
+                </div>
+                <div className="timed-add">
+                  <label>
+                    Min
+                    <input
+                      type="number"
+                      min={0}
+                      value={timedAtMin}
+                      onChange={(event) => setTimedAtMin(Number(event.target.value))}
+                    />
+                  </label>
+                  <label>
+                    Sec
+                    <input
+                      type="number"
+                      min={0}
+                      max={59}
+                      value={timedAtSec}
+                      onChange={(event) => setTimedAtSec(Number(event.target.value))}
+                    />
+                  </label>
+                  <label>
+                    Smile alpha
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={timedAlpha}
+                      onChange={(event) => setTimedAlpha(event.target.value)}
+                      onBlur={() => setTimedAlpha(String(Math.max(-1, Math.min(1, Number(timedAlpha) || 0))))}
+                    />
+                  </label>
+                  <button className="secondary" onClick={addTimedPreset}>
+                    Add
+                  </button>
+                </div>
+                <div className="timed-list">
+                  {timedSchedule.length === 0 ? (
+                    <span className="muted">No timed changes scheduled.</span>
+                  ) : (
+                    timedSchedule.map((preset) => (
+                      <div className="timed-row" key={preset.id}>
+                        <span className="timed-when">{secondsToMmSs(preset.atSeconds)}</span>
+                        <span className="timed-what">smile alpha {preset.smileAlpha}</span>
+                        <span className={preset.fired ? 'timed-status done' : 'timed-status pending'}>
+                          {preset.fired ? 'done' : 'pending'}
+                        </span>
+                        <button className="timed-remove" onClick={() => removeTimedPreset(preset.id)}>
+                          ×
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
+
+              <section className="panel">
                 <div className="section-title">Voice / Synchrony</div>
                 <div className="preset-list compact">
                   {audioPresets
@@ -4144,9 +4277,10 @@ export default function App(): ReactElement {
   )
 }
 
-// Elapsed-time clock shown top-right of the Live Video Conference. Runs while `running` (in the
-// room), pauses on Leave, and resumes from where it stopped on Rejoin (it banks elapsed ms across
-// segments rather than restarting). It survives leave/rejoin because the panel stays mounted.
+// Elapsed-time clock shown top-right of the Live Video Conference. Runs while `running` — i.e.
+// while both participants are in the room — pauses the moment either one leaves, and resumes from
+// where it stopped when both are back (it banks elapsed ms across segments rather than restarting).
+// It survives those gaps because the panel stays mounted for the whole experimenter session.
 function LiveClock({ running }: { running: boolean }): ReactElement {
   const [seconds, setSeconds] = useState(0)
   const bankedMsRef = useRef(0)
