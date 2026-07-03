@@ -417,6 +417,11 @@ type TimedPreset = {
   id: string
   atSeconds: number
   smileAlpha: number
+  // The control target snapshotted when the preset was scheduled, so it fires against the
+  // participant the experimenter had selected then — not whoever happens to be selected at fire
+  // time. Empty targetUserId = all participants.
+  targetUserId: string
+  targetLabel: string
   fired: boolean
 }
 
@@ -680,6 +685,9 @@ export default function App(): ReactElement {
   // DuckSoup (SFU + Mozza) media path
   const duckSoupPlayerRef = useRef<DuckSoupPlayer | null>(null)
   const duckSoupActiveRef = useRef(false)
+  // Set when the DuckSoup interaction ends normally ('end'/'ending'), so a following 'closed'
+  // event isn't misread as an unexpected mid-call media drop. Reset on each (re)join.
+  const interactionEndedRef = useRef(false)
   const streamUserMapRef = useRef<Map<string, string>>(new Map())
   const callPeersRef = useRef<CallPeer[]>([])
   const duckSoupFilesRef = useRef<Record<string, string[]>>({})
@@ -743,6 +751,9 @@ export default function App(): ReactElement {
   const [form, setForm] = useState<SessionForm>(initialForm)
   const [controls, setControls] = useState<ManipulationControls>(initialControls)
   const [recordingState, setRecordingState] = useState<RecordingState>('idle')
+  // Controller-only: the DuckSoup interaction hit its server-side duration cap, so the recordings
+  // stopped even though both people are still in the room. Freezes the call timer + warns.
+  const [interactionCapReached, setInteractionCapReached] = useState(false)
   const [sessionDir, setSessionDir] = useState<string>('')
   const [showSelfView, setShowSelfView] = useState(true)
   const [monitorView, setMonitorView] = useState<'all' | 'altered' | 'clean'>('all')
@@ -959,10 +970,27 @@ export default function App(): ReactElement {
       recordingStartRef.current = Date.now()
       recordingReanchoredRef.current = true
       setRecordingSeconds(0)
+      setInteractionCapReached(false)
       // New recording window: let the timed schedule fire again from this t=0.
       setTimedSchedule((prev) => prev.map((preset) => ({ ...preset, fired: false })))
     }
   }, [isController, participantPeers.length, expectedParticipants])
+
+  // Controller-only: DuckSoup ends the interaction (and its recording) at DUCKSOUP_DURATION_SEC.
+  // The experimenter owns no media player, so it never receives the 'end' event — detect the cap
+  // from the recording clock, freeze the call timer, and warn once. Without this the timer runs
+  // past 20:00 and "Conclude" stays armed as if recording were still live.
+  useEffect(() => {
+    // Only DuckSoup enforces the server-side duration cap; the legacy mesh path has no such limit.
+    if (!isController || !useDuckSoup || interactionCapReached || !recordingReanchoredRef.current) return
+    if (recordingSeconds >= DUCKSOUP_DURATION_SEC) {
+      setInteractionCapReached(true)
+      addLog(
+        'Reached the media server duration limit — the recording has stopped. Conclude the study to save, or have both participants rejoin to start a new interaction.',
+        'warn'
+      )
+    }
+  }, [isController, useDuckSoup, recordingSeconds, interactionCapReached, addLog])
 
   // Keep a fresh ref of the timed schedule for the scheduler interval below.
   useEffect(() => {
@@ -1006,6 +1034,18 @@ export default function App(): ReactElement {
     if (chatTarget === 'room' || chatTarget === 'controllers' || chatTarget === 'participants') return
     if (!callPeers.some((peer) => peer.userId === chatTarget)) setChatTarget('room')
   }, [callPeers, chatTarget])
+
+  // Same guard for the manipulation Control target: if the selected participant leaves or
+  // reconnects with a new station id, fall back to All participants. Otherwise every slider /
+  // timed change would broadcast to a dead userId and silently reach nobody, while the log and
+  // manipulation_events.csv still claim the manipulation was applied.
+  useEffect(() => {
+    if (!form.targetUserId) return
+    if (!participantPeers.some((peer) => peer.userId === form.targetUserId)) {
+      updateForm('targetUserId', '')
+      addLog('Control target left or reconnected — reset to All participants.', 'warn')
+    }
+  }, [participantPeers, form.targetUserId])
 
   // Keep the newest event in view as the log grows.
   useEffect(() => {
@@ -1207,7 +1247,7 @@ export default function App(): ReactElement {
   }
 
   const appendControlEvent = useCallback(
-    (control: string, value: string | number | boolean, notes = '') => {
+    (control: string, value: string | number | boolean, notes = '', targetOverride?: string) => {
       const event: ControlEvent = {
         id: makeId(),
         timestamp: new Date().toISOString(),
@@ -1215,7 +1255,7 @@ export default function App(): ReactElement {
         roomId: form.roomId,
         participantId: form.participantId,
         partnerId: form.partnerId,
-        targetUserId: form.targetUserId || 'all-participants',
+        targetUserId: (targetOverride !== undefined ? targetOverride : form.targetUserId) || 'all-participants',
         condition: form.condition,
         control,
         value,
@@ -1253,13 +1293,17 @@ export default function App(): ReactElement {
     (
       key: keyof ManipulationControls,
       value: ManipulationControls[keyof ManipulationControls],
-      label?: string
+      label?: string,
+      // Explicit routing override. Pass a userId to target one participant, '' to target all,
+      // or leave undefined to use the current Control-target dropdown (form.targetUserId).
+      targetOverride?: string
     ): void => {
+      const target = targetOverride !== undefined ? targetOverride : form.targetUserId
       sendDirectorPayload({
         kind: 'live-control',
         key,
         value,
-        targetUserId: form.targetUserId || undefined,
+        targetUserId: target || undefined,
         label
       })
     },
@@ -1921,7 +1965,11 @@ export default function App(): ReactElement {
 
   useEffect(() => {
     const mode = controls.automaticSmileOnsetMode
-    if (isController || mode === 'off' || callState === 'idle' || callState === 'error') {
+    // A signaling (SSE) blip flips callState to 'error' even though the DuckSoup media pipeline is
+    // separate and still live — don't tear the manipulation down to neutral in that case. Only stop
+    // on 'error' when the media path itself is actually down.
+    const callDown = callState === 'idle' || (callState === 'error' && !duckSoupActiveRef.current)
+    if (isController || mode === 'off' || callDown) {
       stopSmileDetector()
       if (!isController) returnAutomaticSmileToNeutral('Automatic smile synchrony was disabled.', false)
       return
@@ -2743,6 +2791,7 @@ export default function App(): ReactElement {
           }
           break
         case 'ending':
+          interactionEndedRef.current = true
           addLog('The session will end soon (media server duration limit).', 'warn')
           break
         case 'files':
@@ -2752,11 +2801,30 @@ export default function App(): ReactElement {
         case 'end':
           // Participant side only (the experimenter has no media player). Saving is done by the
           // experimenter on Conclude/Leave, so participants no longer write session files here.
+          interactionEndedRef.current = true
           addLog('The media interaction ended.', 'info')
           setCallState('waiting')
           break
         case 'closed':
-          addLog('Media server connection closed.', 'warn')
+          if (interactionEndedRef.current) {
+            // Expected: the socket closes after a normal 'end'/'ending'. Nothing to recover.
+            addLog('Media server connection closed.', 'info')
+          } else {
+            // Unexpected mid-call drop (SFU restart, Wi-Fi flap): the video freezes but nothing
+            // else signalled it. Surface a recoverable error and release the dead player so a
+            // Rejoin starts a clean interaction instead of leaving the UI stuck on "connected".
+            addLog('Media server connection lost. Rejoin to reconnect the video.', 'error')
+            if (duckSoupPlayerRef.current) {
+              try {
+                duckSoupPlayerRef.current.stop()
+              } catch {
+                // already closed
+              }
+              duckSoupPlayerRef.current = null
+            }
+            duckSoupActiveRef.current = false
+            setCallState('error')
+          }
           break
         default:
           if (typeof kind === 'string' && kind.startsWith('error')) {
@@ -2769,6 +2837,17 @@ export default function App(): ReactElement {
                     ? 'This station ID is already connected to the media server.'
                     : `Media server error (${kind}).`
             addLog(detail, 'error')
+            // Release the aborted/failed player so the next attempt starts clean instead of
+            // colliding (a lingering player triggers error-duplicate on the same station id).
+            if (duckSoupPlayerRef.current) {
+              try {
+                duckSoupPlayerRef.current.stop()
+              } catch {
+                // already stopped
+              }
+              duckSoupPlayerRef.current = null
+            }
+            duckSoupActiveRef.current = false
             setCallState('error')
           }
       }
@@ -2783,6 +2862,7 @@ export default function App(): ReactElement {
     mediaQualitySamplesRef.current = []
     pendingMozzaControlsRef.current = null
     appliedMozzaControlsRef.current = null
+    interactionEndedRef.current = false
     const controls = controlsRef.current
     const player = await renderDuckSoup(
       baseUrl,
@@ -2828,8 +2908,17 @@ export default function App(): ReactElement {
       return
     }
 
+    // The header Join/Rejoin button reaches here from the 'error' state without going through
+    // Leave, and a prior attempt (aborted join, dropped media, signaling error) can leave a live
+    // player / EventSource attached. Tear that down first so we don't leak a second camera capture
+    // and a duplicate SSE channel (which the server rejects as error-duplicate).
+    if (callEventsRef.current || duckSoupActiveRef.current || duckSoupPlayerRef.current) {
+      leaveLiveCall()
+    }
+
     inCallRef.current = true
     setCallState('starting')
+    setInteractionCapReached(false)
     smileOnsetAuditEventsRef.current = []
     setSmileOnsetAuditEvents([])
     processedSmileCueIdsRef.current.clear()
@@ -3000,17 +3089,33 @@ export default function App(): ReactElement {
     setChatMessages([])
     setChatText('')
     setChatTarget('room')
+    // Reset the recording flags. These were previously left stuck: a participant's recordingState
+    // stayed 'recording' forever (its only reset paths are controller-only) which permanently
+    // blocked "Back to setup"; and recordingStartRef kept the recording clock ticking after leave.
+    setRecordingState('idle')
+    setInteractionCapReached(false)
+    recordingStartRef.current = null
     setCallState('idle')
     addLog('Left the room.', 'info')
   }
   leaveLiveCallRef.current = leaveLiveCall
 
   const returnToSetup = (): void => {
-    if (recordingState === 'recording') {
-      addLog('Stop the recording before returning to setup.', 'error')
+    // Only the experimenter has anything to lose by leaving mid-recording (it's the authoritative
+    // saver). A participant can't stop/save the server-side recording anyway, so it must not be
+    // blocked here — otherwise it can never get back to setup once the interaction has started.
+    if (isController && recordingState === 'recording') {
+      addLog('Conclude the study (or stop the recording) before returning to setup, so the session is saved.', 'error')
       return
     }
     if (callState !== 'idle') leaveLiveCall()
+    // Returning to setup starts a fresh session. Clear the accumulators that otherwise bleed into
+    // the next session's outputs: manipulation events (would corrupt manipulation_events.csv),
+    // the timed schedule (would silently re-fire against a different dyad), and the control target.
+    setControlEvents([])
+    controlEventsRef.current = []
+    setTimedSchedule([])
+    updateForm('targetUserId', '')
     setSetupComplete(false)
     addLog('Returned to setup.', 'info')
   }
@@ -3038,13 +3143,38 @@ export default function App(): ReactElement {
     addLog(`${String(key)} = ${value} sent to ${controlTargetLabel}.`, 'info')
   }
 
-  // Keep the timed-preset firing function pointed at the latest setControl closure.
+  // Keep the timed-preset firing function pointed at the latest control closures.
   useEffect(() => {
     fireTimedPresetRef.current = (preset: TimedPreset): void => {
-      setControl(
+      // Automatic smile synchrony owns the smile alpha in Live mode; a scheduled change would fight
+      // it. Skip and warn — the preset is still consumed by the scheduler, so it won't retry every
+      // tick and spam the log.
+      if (controlsRef.current.automaticSmileOnsetMode === 'live') {
+        addLog(
+          `Timed preset at ${secondsToMmSs(preset.atSeconds)} skipped — turn off automatic smile synchrony to run scheduled smile-alpha changes.`,
+          'warn'
+        )
+        return
+      }
+      // Reflect it on the experimenter's own slider + event log, and broadcast to the target that
+      // was snapshotted when the preset was scheduled (dyad-wide if none was selected) — not
+      // whatever the Control-target dropdown happens to be at fire time.
+      setControls((prev) => ({ ...prev, smileAlpha: preset.smileAlpha }))
+      appendControlEvent(
         'smileAlpha',
         preset.smileAlpha,
-        `Timed preset: smile alpha ${preset.smileAlpha} at ${secondsToMmSs(preset.atSeconds)}.`
+        `Timed preset at ${secondsToMmSs(preset.atSeconds)} → ${preset.targetLabel}.`,
+        preset.targetUserId
+      )
+      broadcastLiveControl(
+        'smileAlpha',
+        preset.smileAlpha,
+        `Timed preset ${secondsToMmSs(preset.atSeconds)}`,
+        preset.targetUserId
+      )
+      addLog(
+        `Timed preset: smile alpha ${preset.smileAlpha} → ${preset.targetLabel} at ${secondsToMmSs(preset.atSeconds)}.`,
+        'info'
       )
     }
   })
@@ -3052,8 +3182,14 @@ export default function App(): ReactElement {
   const addTimedPreset = (): void => {
     const atSeconds = Math.max(0, Math.round(timedAtMin) * 60 + Math.round(timedAtSec))
     const smileAlpha = Math.max(-1, Math.min(1, Number(timedAlpha) || 0))
+    // Snapshot the current control target so the preset fires against the participant the
+    // experimenter has selected now, regardless of what's selected later.
+    const targetUserId = form.targetUserId
+    const targetLabel = controlTargetLabel
     setTimedSchedule((prev) =>
-      [...prev, { id: makeId(), atSeconds, smileAlpha, fired: false }].sort((a, b) => a.atSeconds - b.atSeconds)
+      [...prev, { id: makeId(), atSeconds, smileAlpha, targetUserId, targetLabel, fired: false }].sort(
+        (a, b) => a.atSeconds - b.atSeconds
+      )
     )
   }
   const removeTimedPreset = (id: string): void => {
@@ -3804,7 +3940,7 @@ export default function App(): ReactElement {
             {isController && (
               <div className="section-title accent conference-title">
                 <span>Live Video Conference</span>
-                <LiveClock running={bothParticipantsPresent} />
+                <LiveClock running={bothParticipantsPresent && !interactionCapReached} />
               </div>
             )}
             {isController ? (
@@ -4135,7 +4271,7 @@ export default function App(): ReactElement {
               <section className="panel">
                 <div className="section-title accent">
                   Timed schedule
-                  <InfoDot description="Sets smile alpha at a set time into the call, timed from when both participants join. Fires automatically." />
+                  <InfoDot description="Sets smile alpha at a set time into the call, timed from when both participants join. Each entry remembers the Control target selected when you added it, and fires automatically at its time." />
                 </div>
                 <div className="timed-add">
                   <label>
@@ -4178,7 +4314,9 @@ export default function App(): ReactElement {
                     timedSchedule.map((preset) => (
                       <div className="timed-row" key={preset.id}>
                         <span className="timed-when">{secondsToMmSs(preset.atSeconds)}</span>
-                        <span className="timed-what">smile alpha {preset.smileAlpha}</span>
+                        <span className="timed-what">
+                          smile alpha {preset.smileAlpha} → {preset.targetLabel}
+                        </span>
                         <span className={preset.fired ? 'timed-status done' : 'timed-status pending'}>
                           {preset.fired ? 'done' : 'pending'}
                         </span>
