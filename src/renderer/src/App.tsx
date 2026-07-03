@@ -717,7 +717,7 @@ export default function App(): ReactElement {
   const [callPeers, setCallPeers] = useState<CallPeer[]>([])
   const [remoteTiles, setRemoteTiles] = useState<RemoteTile[]>([])
   const [monitorTiles, setMonitorTiles] = useState<MonitorTile[]>([])
-  const [roomPresence, setRoomPresence] = useState<RoomPresence | null>(null)
+  const [, setRoomPresence] = useState<RoomPresence | null>(null)
   const [storagePaths, setStoragePaths] = useState<{ serverDataDir: string; sessionsDir: string } | null>(null)
   const [experimenterNotes, setExperimenterNotes] = useState('')
   const experimenterNotesRef = useRef('')
@@ -726,6 +726,7 @@ export default function App(): ReactElement {
   const [recordingState, setRecordingState] = useState<RecordingState>('idle')
   const [sessionDir, setSessionDir] = useState<string>('')
   const [showSelfView, setShowSelfView] = useState(true)
+  const [monitorView, setMonitorView] = useState<'all' | 'altered' | 'clean'>('all')
   const [logs, setLogs] = useState<LogEvent[]>([])
   const [controlEvents, setControlEvents] = useState<ControlEvent[]>([])
   const [recordingSeconds, setRecordingSeconds] = useState(0)
@@ -756,11 +757,6 @@ export default function App(): ReactElement {
     : form.targetUserId
       ? form.targetUserId
       : 'all participants'
-  const activeRoomPeers = callState === 'idle' || callState === 'error' ? roomPresence?.peers ?? [] : callPeers
-  const visibleRoomPeers = useMemo(
-    () => (isController ? activeRoomPeers : activeRoomPeers.filter((peer) => peer.role !== 'controller')),
-    [activeRoomPeers, isController]
-  )
   const sessionLink = useMemo(() => {
     let url: URL
     try {
@@ -3575,15 +3571,6 @@ export default function App(): ReactElement {
             <div className="button-row">
               <button onClick={() => copySessionLink()}>Copy link</button>
             </div>
-            <div className="participant-strip">
-              {visibleRoomPeers.length === 0 ? (
-                <span>No one else is in this room yet.</span>
-              ) : (
-                visibleRoomPeers.map((peer) => (
-                  <span key={`${peer.userId}-${peer.role}`}>{peerStripLabel(peer)}</span>
-                ))
-              )}
-            </div>
           </section>
 
           <section className="panel">
@@ -3715,25 +3702,54 @@ export default function App(): ReactElement {
             )}
             {isController ? (
               useDuckSoup ? (
-                // Experimenter 4-view monitor: each participant's unaltered (clean) + altered
-                // feed, forwarded from the participants over the monitor WebRTC channel.
-                <div className="conference-grid tiles-4">
-                  {Array.from({ length: expectedParticipants }).map((_, index) => {
-                    const peer = participantPeers[index]
-                    const who = peer ? peer.displayName : `Participant ${index + 1}`
-                    return (['Unaltered', 'Altered'] as const).map((label) => {
-                      const monKind = label === 'Unaltered' ? 'clean' : 'altered'
-                      const tile = peer ? monitorByKey.get(`${peer.userId}:${monKind}`) : undefined
-                      return (
-                        <MonitorVideoCard
-                          key={`${index}-${label}`}
-                          label={`${who} · ${label}`}
-                          stream={tile?.stream ?? null}
-                        />
-                      )
-                    })
-                  })}
-                </div>
+                // Experimenter monitor: each participant's unaltered (clean) + altered feed,
+                // forwarded from the participants over the monitor WebRTC channel. The view
+                // toggle drops to a 2-tile view (only mounting those videos) to cut GPU/RAM load.
+                <>
+                  <div className="monitor-view-toggle">
+                    <button
+                      className={monitorView === 'all' ? 'active' : ''}
+                      onClick={() => setMonitorView('all')}
+                    >
+                      All 4
+                    </button>
+                    <button
+                      className={monitorView === 'clean' ? 'active' : ''}
+                      onClick={() => setMonitorView('clean')}
+                    >
+                      Unaltered
+                    </button>
+                    <button
+                      className={monitorView === 'altered' ? 'active' : ''}
+                      onClick={() => setMonitorView('altered')}
+                    >
+                      Altered
+                    </button>
+                  </div>
+                  <div className={`conference-grid tiles-${monitorView === 'all' ? 4 : 2}`}>
+                    {Array.from({ length: expectedParticipants }).map((_, index) => {
+                      const peer = participantPeers[index]
+                      const who = peer ? peer.displayName : `Participant ${index + 1}`
+                      const labels: ('Unaltered' | 'Altered')[] =
+                        monitorView === 'all'
+                          ? ['Unaltered', 'Altered']
+                          : monitorView === 'altered'
+                            ? ['Altered']
+                            : ['Unaltered']
+                      return labels.map((label) => {
+                        const monKind = label === 'Unaltered' ? 'clean' : 'altered'
+                        const tile = peer ? monitorByKey.get(`${peer.userId}:${monKind}`) : undefined
+                        return (
+                          <MonitorVideoCard
+                            key={`${index}-${label}`}
+                            label={`${who} · ${label}`}
+                            stream={tile?.stream ?? null}
+                          />
+                        )
+                      })
+                    })}
+                  </div>
+                </>
               ) : remoteTiles.length > 0 ? (
                 <div className={`conference-grid tiles-${Math.min(remoteTiles.length, 4)}`}>
                   {remoteTiles.map((tile) => (
@@ -3855,10 +3871,8 @@ export default function App(): ReactElement {
                 </label>
                 <div className="mode-card automatic-smile-card">
                   <div>
-                    <span className="label-with-info">
-                      Automatic smile synchrony
-                      <InfoDot description="Auto-detects each participant's smile and briefly mirrors it onto their partner. Detect = log only; Live = apply." />
-                    </span>
+                    <span>Automatic smile synchrony</span>
+                    <InfoDot description="Auto-detects each participant's smile and briefly mirrors it onto their partner. Detect = log only; Live = apply." />
                   </div>
                   <div className="segmented-row automatic-smile-modes">
                     <InfoButton

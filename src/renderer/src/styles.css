@@ -708,6 +708,24 @@ label {
   grid-template-columns: repeat(2, minmax(300px, 1fr));
 }
 
+/* Experimenter monitor view toggle: All 4 / Altered / Clean. The 2-tile modes mount
+   fewer videos, cutting GPU/RAM load (per lab feedback that 4 feeds is too busy). */
+.monitor-view-toggle {
+  display: inline-flex;
+  gap: 4px;
+  align-self: flex-start;
+  margin-bottom: 12px;
+}
+.monitor-view-toggle button {
+  min-height: 30px;
+  padding: 0 14px;
+  font-size: 11px;
+}
+.monitor-view-toggle button.active {
+  border-color: var(--accent);
+  background: var(--surface-4);
+}
+
 .call-panel {
   margin-bottom: 0;
 }
@@ -1006,7 +1024,7 @@ label {
 .automatic-smile-card > div:first-child {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 9px;
 }
 
 .automatic-smile-card .info-dot {
