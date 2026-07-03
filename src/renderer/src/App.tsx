@@ -413,7 +413,7 @@ const csvEscape = (value: unknown): string => {
   return /[",\n\r]/.test(text) ? `"${text.replace(/\r?\n|\r/g, ' ').replace(/"/g, '""')}"` : text
 }
 
-const controlEventsToCsv = (events: ControlEvent[]): string => {
+const controlEventsToCsv = (events: ControlEvent[], recordingStartMs?: number | null): string => {
   const header = [
     'timestamp',
     'elapsedMs',
@@ -427,10 +427,15 @@ const controlEventsToCsv = (events: ControlEvent[]): string => {
     'appliedToDuckSoup',
     'notes'
   ]
-  const rows = events.map((event) =>
-    [
+  const rows = events.map((event) => {
+    // elapsedMs = milliseconds from the recording start (video t=0). Recomputing it here from the
+    // absolute UTC timestamp keeps it correct even for events logged before recording began
+    // (negative) and after the experimenter re-anchors the start to the real interaction start.
+    const elapsedMs =
+      recordingStartMs != null ? Math.round(Date.parse(event.timestamp) - recordingStartMs) : event.elapsedMs
+    return [
       event.timestamp,
-      event.elapsedMs,
+      elapsedMs,
       event.roomId,
       event.participantId,
       event.partnerId,
@@ -443,7 +448,7 @@ const controlEventsToCsv = (events: ControlEvent[]): string => {
     ]
       .map(csvEscape)
       .join(',')
-  )
+  })
   return [header.join(','), ...rows].join('\n') + '\n'
 }
 
@@ -653,6 +658,7 @@ export default function App(): ReactElement {
   const logListRef = useRef<HTMLDivElement | null>(null)
   const autoJoinedRef = useRef(false)
   const recordingStartRef = useRef<number | null>(null)
+  const recordingReanchoredRef = useRef(false)
   const sessionSavedRef = useRef(false)
   const cleanRecorderRef = useRef<MediaRecorder | null>(null)
   const alteredRecorderRef = useRef<MediaRecorder | null>(null)
@@ -919,6 +925,19 @@ export default function App(): ReactElement {
   useEffect(() => {
     controlEventsRef.current = controlEvents
   }, [controlEvents])
+
+  // Experimenter: re-anchor the recording start to when both participants are present (≈ when the
+  // DuckSoup interaction begins recording), so manipulation_events.csv lines up with the videos.
+  // Anything logged before this (while waiting) keeps its absolute UTC timestamp and recomputes to a
+  // negative elapsedMs at save time. One-shot per session (reset on (re)join below).
+  useEffect(() => {
+    if (!isController || recordingReanchoredRef.current) return
+    if (expectedParticipants > 0 && participantPeers.length >= expectedParticipants) {
+      recordingStartRef.current = Date.now()
+      recordingReanchoredRef.current = true
+      setRecordingSeconds(0)
+    }
+  }, [isController, participantPeers.length, expectedParticipants])
 
   useEffect(() => {
     smileOnsetAuditEventsRef.current = smileOnsetAuditEvents
@@ -2458,6 +2477,13 @@ export default function App(): ReactElement {
         session: form,
         controlsAtEnd: controlsRef.current,
         mediaServer: form.duckSoupUrl,
+        recording: {
+          startedAt: recordingStartRef.current ? new Date(recordingStartRef.current).toISOString() : null,
+          endedAt: new Date().toISOString(),
+          durationMs: recordingStartRef.current ? Date.now() - recordingStartRef.current : null,
+          note:
+            'startedAt is video t=0 for the -dry/-wet recordings (the experimenter re-anchors it to when both participants are present). In manipulation_events.csv, elapsedMs is milliseconds from startedAt (negative = logged before recording began), so it lines up with the videos. For cross-machine alignment use the UTC timestamp column and keep the lab clocks NTP-synced.'
+        },
         duckSoup: {
           namespace,
           interaction,
@@ -2496,7 +2522,7 @@ export default function App(): ReactElement {
           'Media + face/voice manipulation routed through DuckSoup (SFU) + Mozza (face-only smile warp).',
           'Server records clean (-dry) and altered (-wet) streams per participant under data/<namespace>/<interaction>/recordings/.',
           'For empathic accuracy ratings, use the participant-specific ppsPlaybackPlan: selfVideo is clean/dry; partnerVideo is altered/wet.',
-          'manipulation_events.csv lists experimenter control changes, cue responses, and synchrony mode changes with timestamps relative to recording start.',
+          'manipulation_events.csv lists experimenter control changes, cue responses, and synchrony mode changes; its elapsedMs column is milliseconds from recording.startedAt (video t=0), so it aligns directly with the -dry/-wet videos.',
           'chat_log.csv lists every chat message with its audience (everyone / role / direct), including private experimenter messages.',
           'media_quality.csv separates transport jitter, packet loss, frame drops, and jitter-buffer delay from visible Mozza landmark jitter.',
           'smile_synchrony_events.csv records participant-driven clean-feed onset/offset detections and matched partner-response timing. The experimenter does not evaluate individual cues.',
@@ -2529,7 +2555,7 @@ export default function App(): ReactElement {
         window.researchApi.writeTextFile({
           sessionDir: createdDir,
           filename: 'manipulation_events.csv',
-          contents: controlEventsToCsv(controlEventsRef.current)
+          contents: controlEventsToCsv(controlEventsRef.current, recordingStartRef.current)
         }),
         window.researchApi.writeTextFile({
           sessionDir: createdDir,
@@ -2842,6 +2868,7 @@ export default function App(): ReactElement {
       // and re-arm the one-shot save guard for this session.
       if (isController) {
         recordingStartRef.current = Date.now()
+        recordingReanchoredRef.current = false
         sessionSavedRef.current = false
         setRecordingState('recording')
       }
@@ -3161,6 +3188,13 @@ export default function App(): ReactElement {
       session: form,
       controlsAtEnd: controls,
       files: { cleanVideo: cleanPath, alteredVideo: alteredPath },
+      recording: {
+        startedAt: recordingStartRef.current ? new Date(recordingStartRef.current).toISOString() : null,
+        endedAt: new Date().toISOString(),
+        durationMs: recordingStartRef.current ? Date.now() - recordingStartRef.current : null,
+        note:
+          'startedAt is video t=0. manipulation_events.csv elapsedMs is milliseconds from startedAt (negative = logged before recording began), aligning it with cleanVideo/alteredVideo.'
+      },
       ppsPlaybackPlan: [
         {
           participantUserId: form.participantId,
@@ -3179,7 +3213,7 @@ export default function App(): ReactElement {
         'cleanVideo is the local unaltered webcam/microphone stream.',
         'alteredVideo is the outgoing participant stream after live experimenter settings.',
         'For empathic accuracy ratings, pair this clean self video with the partner station altered/manipulated video.',
-        'manipulation_events.csv contains live setting changes with timestamps relative to recording start.'
+        'manipulation_events.csv elapsedMs is milliseconds from recording.startedAt (video t=0), aligning it with cleanVideo/alteredVideo.'
       ]
     }
 
@@ -3225,7 +3259,7 @@ export default function App(): ReactElement {
             appliedToDuckSoup: false,
             notes: 'Recording stopped and files saved.'
           }
-        ])
+        ], recordingStartRef.current)
       }),
       window.researchApi.writeTextFile({
         sessionDir,
