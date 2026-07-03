@@ -962,6 +962,12 @@ label {
   gap: 4px;
 }
 
+/* The automatic-smile row has two buttons (Detect / Live aligned) — the off action lives
+   on the "Reset / Off" button below — so it uses two columns, not the default three. */
+.segmented-row.automatic-smile-modes {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .segmented-row button {
   min-width: 0;
   padding: 0 4px;
@@ -1322,6 +1328,45 @@ label {
   gap: 7px;
   min-width: 0;
   overflow: visible;
+}
+
+/* Advanced (collapsed by default) — keeps the experimenter's default view minimal so
+   RAs see only the primary controls; tuning + manual-override live in here. */
+.advanced-controls {
+  margin-top: 6px;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+.advanced-controls > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 4px 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted, #94a3b8);
+  user-select: none;
+}
+.advanced-controls > summary::-webkit-details-marker {
+  display: none;
+}
+.advanced-controls > summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 120ms ease;
+}
+.advanced-controls[open] > summary::before {
+  transform: rotate(90deg);
+}
+.advanced-group-title {
+  margin: 12px 0 2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted, #94a3b8);
 }
 
 .info-dot {

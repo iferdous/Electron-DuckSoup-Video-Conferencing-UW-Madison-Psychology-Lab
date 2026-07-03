@@ -3435,24 +3435,6 @@ export default function App(): ReactElement {
           )}
 
           <div className={isController ? 'setup-grid' : 'setup-grid setup-grid--even'}>
-            {isController && (
-              <section className="panel">
-                <div className="section-title accent">Study Setup</div>
-                <div className="format-switch">
-                  {(['dyad', 'triad', 'quad'] as SessionFormat[]).map((format) => (
-                    <button
-                      key={format}
-                      className={form.sessionFormat === format ? 'role-button active' : 'role-button'}
-                      onClick={() => updateForm('sessionFormat', format)}
-                    >
-                      {sessionLabels[format]}
-                      {format !== 'dyad' ? ' (not wired)' : ''}
-                    </button>
-                  ))}
-                </div>
-              </section>
-            )}
-
             <section className="panel" ref={sessionLinkSectionRef}>
               <div className="section-title accent">Meeting</div>
               {isController ? (
@@ -3870,17 +3852,12 @@ export default function App(): ReactElement {
                 </label>
                 <div className="mode-card automatic-smile-card">
                   <div>
-                    <span>Automatic smile synchrony</span>
-                    <InfoDot description="Clean feeds detect each participant's smile onset and offset. Live adds a subtle partner smile at onset, then removes only that added smile when the source smile ends. No experimenter approval is involved." />
+                    <span className="label-with-info">
+                      Automatic smile synchrony
+                      <InfoDot description="Auto-detects each participant's smile and briefly mirrors it onto their partner. Detect = log only; Live = apply." />
+                    </span>
                   </div>
                   <div className="segmented-row automatic-smile-modes">
-                    <InfoButton
-                      className={controls.automaticSmileOnsetMode === 'off' ? 'active' : ''}
-                      description="Stop automatic detection and safely remove any active automatic smile addition."
-                      onClick={() => setAutomaticSmileOnsetMode('off')}
-                    >
-                      Off
-                    </InfoButton>
                     <InfoButton
                       className={controls.automaticSmileOnsetMode === 'detect' ? 'active' : ''}
                       description="Detect and timestamp participant smile onsets and offsets without altering the partner."
@@ -3900,9 +3877,23 @@ export default function App(): ReactElement {
                     className="secondary wide-button emergency-neutral"
                     onClick={() => setAutomaticSmileOnsetMode('off')}
                   >
-                    Emergency neutral reset
+                    Reset / Off
                   </button>
                 </div>
+                <RangeControl
+                  label="Smile alpha"
+                  description="0 = neutral, positive = smile, negative = frown. Keep within about -0.8 to 0.8 for best results."
+                  value={controls.smileAlpha}
+                  min={-1}
+                  max={1}
+                  step={0.05}
+                  markers={['Frown', 'Neutral', 'Smile']}
+                  neutral={0}
+                  onChange={(value) => setControl('smileAlpha', value)}
+                />
+                <details className="advanced-controls">
+                  <summary>Advanced</summary>
+                  <div className="advanced-group-title">Manual override</div>
                 <div className="mode-card">
                   <div>
                     <span>Synchrony mode</span>
@@ -3931,17 +3922,6 @@ export default function App(): ReactElement {
                     </InfoButton>
                   </div>
                 </div>
-                <RangeControl
-                  label="Smile alpha"
-                  description="0 = neutral, positive = smile, negative = frown. Keep within about -0.8 to 0.8 for best results."
-                  value={controls.smileAlpha}
-                  min={-1}
-                  max={1}
-                  step={0.05}
-                  markers={['Frown', 'Neutral', 'Smile']}
-                  neutral={0}
-                  onChange={(value) => setControl('smileAlpha', value)}
-                />
                 <RangeControl
                   label="Suppressed smile alpha"
                   description="Smile level used in Suppressed mode. 0 = neutral; negative dampens or frowns."
@@ -3990,6 +3970,7 @@ export default function App(): ReactElement {
                     Neutral reset
                   </InfoButton>
                 </div>
+                  <div className="advanced-group-title">Face tracking</div>
                 <RangeControl
                   label="Detection threshold"
                   description="Face-detect strictness. Lower = better in dim light; higher = less stray warping."
@@ -4023,32 +4004,24 @@ export default function App(): ReactElement {
                   neutral={0.3}
                   onChange={(value) => setControl('smoothingCutoff', value)}
                 />
+                </details>
               </section>
 
               <section className="panel">
                 <div className="section-title">Voice / Synchrony</div>
                 <div className="preset-list compact">
-                  {audioPresets.map((preset) => (
-                    <button
-                      key={preset.preset}
-                      className={controls.audioPreset === preset.preset ? 'preset active' : 'preset'}
-                      onClick={() => applyAudioPreset(preset)}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
+                  {audioPresets
+                    .filter((preset) => preset.effectName !== 'volume')
+                    .map((preset) => (
+                      <button
+                        key={preset.preset}
+                        className={controls.audioPreset === preset.preset ? 'preset active' : 'preset'}
+                        onClick={() => applyAudioPreset(preset)}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
                 </div>
-                <RangeControl
-                  label="Partner playback volume (not wired)"
-                  description="How loud others sound on this computer only. Not sent to anyone else."
-                  value={controls.partnerVolume}
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  markers={['Muted', 'Half', 'Full']}
-                  neutral={1}
-                  onChange={(value) => setControl('partnerVolume', value, 'Local playback volume only.')}
-                />
                 <RangeControl
                   label="Outgoing voice tone"
                   description="Participant mic tone. Lower = warmer/deeper; higher = brighter."
@@ -4066,34 +4039,33 @@ export default function App(): ReactElement {
                     addLog(`Outgoing voice tone = ${value.toFixed(2)} sent to participants.`, 'info')
                   }}
                 />
-                <RangeControl
-                  label="Outgoing voice gain (not wired)"
-                  description="How loud participant mics are for others."
-                  value={controls.audioGain}
-                  min={0}
-                  max={2}
-                  step={0.05}
-                  markers={['Muted', 'Neutral', 'Boosted']}
-                  neutral={1}
-                  onChange={(value) => {
-                    setControls((prev) => ({ ...prev, audioPreset: 'custom-volume', audioGain: value }))
-                    appendControlEvent('audioGain', value, 'Applied to outgoing participant microphone audio.')
-                    broadcastLiveControl('audioPreset', 'custom-volume')
-                    broadcastLiveControl('audioGain', value)
-                    addLog(`Outgoing voice gain = ${value.toFixed(2)} sent to participants.`, 'info')
-                  }}
-                />
-                <RangeControl
-                  label="Voice delay (not wired)"
-                  description="Adds delay to participant outgoing microphone audio before others hear it."
-                  value={controls.synchronyDelayMs}
-                  min={0}
-                  max={1200}
-                  step={50}
-                  markers={['Live', 'Lagged', 'Delayed']}
-                  neutral={0}
-                  onChange={(value) => setControl('synchronyDelayMs', value, 'Applied as a live outgoing microphone delay.')}
-                />
+                <details className="advanced-controls">
+                  <summary>Advanced</summary>
+                  <div className="preset-list compact">
+                    {audioPresets
+                      .filter((preset) => preset.effectName === 'volume')
+                      .map((preset) => (
+                        <button
+                          key={preset.preset}
+                          className={controls.audioPreset === preset.preset ? 'preset active' : 'preset'}
+                          onClick={() => applyAudioPreset(preset)}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                  </div>
+                  <RangeControl
+                    label="Voice delay (not wired)"
+                    description="Adds delay to participant outgoing microphone audio before others hear it."
+                    value={controls.synchronyDelayMs}
+                    min={0}
+                    max={1200}
+                    step={50}
+                    markers={['Live', 'Lagged', 'Delayed']}
+                    neutral={0}
+                    onChange={(value) => setControl('synchronyDelayMs', value, 'Applied as a live outgoing microphone delay.')}
+                  />
+                </details>
               </section>
             </>
           ) : null}
@@ -4430,7 +4402,13 @@ function InfoDot({ description }: { description: string }): ReactElement {
     // Open upward by default, but flip below when the dot is near the top of the screen
     // (e.g. the header heads-up) so the tooltip doesn't get clipped off the top edge.
     const below = rect.top < 170
-    setCoords({ left: rect.left + rect.width / 2, top: below ? rect.bottom : rect.top, below })
+    // Clamp the (centered) tooltip so it can't spill past the right/left viewport edge when
+    // the dot sits near the panel edge. halfMax mirrors .info-tooltip-fixed's max-width.
+    const margin = 8
+    const halfMax = Math.min(300, window.innerWidth * 0.6) / 2
+    const center = rect.left + rect.width / 2
+    const left = Math.max(margin + halfMax, Math.min(window.innerWidth - margin - halfMax, center))
+    setCoords({ left, top: below ? rect.bottom : rect.top, below })
   }
   const hide = (): void => setCoords(null)
 
