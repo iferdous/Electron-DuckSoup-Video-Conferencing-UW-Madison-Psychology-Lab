@@ -431,6 +431,13 @@ const secondsToMmSs = (total: number): string => {
   return `${m}:${String(s).padStart(2, '0')}`
 }
 
+const normalizeScheduleInteger = (value: string, max?: number): string => {
+  const digits = value.replace(/\D/g, '')
+  const parsed = digits === '' ? 0 : Number(digits)
+  const clamped = typeof max === 'number' ? Math.min(max, parsed) : parsed
+  return String(Math.max(0, clamped))
+}
+
 const controlEventsToCsv = (events: ControlEvent[], recordingStartMs?: number | null): string => {
   const header = [
     'timestamp',
@@ -758,8 +765,8 @@ export default function App(): ReactElement {
   const [showSelfView, setShowSelfView] = useState(true)
   const [monitorView, setMonitorView] = useState<'all' | 'altered' | 'clean'>('all')
   const [timedSchedule, setTimedSchedule] = useState<TimedPreset[]>([])
-  const [timedAtMin, setTimedAtMin] = useState(0)
-  const [timedAtSec, setTimedAtSec] = useState(0)
+  const [timedAtMin, setTimedAtMin] = useState('0')
+  const [timedAtSec, setTimedAtSec] = useState('0')
   const [timedAlpha, setTimedAlpha] = useState('0')
   const timedScheduleRef = useRef<TimedPreset[]>([])
   const fireTimedPresetRef = useRef<(preset: TimedPreset) => void>(() => {})
@@ -3180,7 +3187,9 @@ export default function App(): ReactElement {
   })
 
   const addTimedPreset = (): void => {
-    const atSeconds = Math.max(0, Math.round(timedAtMin) * 60 + Math.round(timedAtSec))
+    const atSeconds =
+      Math.max(0, Math.round(Number(timedAtMin) || 0)) * 60 +
+      Math.max(0, Math.round(Number(timedAtSec) || 0))
     const smileAlpha = Math.max(-1, Math.min(1, Number(timedAlpha) || 0))
     // Snapshot the current control target so the preset fires against the participant the
     // experimenter has selected now, regardless of what's selected later.
@@ -4277,20 +4286,21 @@ export default function App(): ReactElement {
                   <label>
                     Min
                     <input
-                      type="number"
-                      min={0}
+                      type="text"
+                      inputMode="numeric"
                       value={timedAtMin}
-                      onChange={(event) => setTimedAtMin(Number(event.target.value))}
+                      onChange={(event) => setTimedAtMin(normalizeScheduleInteger(event.target.value))}
+                      onBlur={() => setTimedAtMin(normalizeScheduleInteger(timedAtMin))}
                     />
                   </label>
                   <label>
                     Sec
                     <input
-                      type="number"
-                      min={0}
-                      max={59}
+                      type="text"
+                      inputMode="numeric"
                       value={timedAtSec}
-                      onChange={(event) => setTimedAtSec(Number(event.target.value))}
+                      onChange={(event) => setTimedAtSec(normalizeScheduleInteger(event.target.value, 59))}
+                      onBlur={() => setTimedAtSec(normalizeScheduleInteger(timedAtSec, 59))}
                     />
                   </label>
                   <label>
