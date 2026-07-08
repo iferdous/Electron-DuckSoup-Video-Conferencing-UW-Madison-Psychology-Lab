@@ -1133,7 +1133,8 @@ label {
 }
 
 .segmented-row button.active,
-.cue-grid button:hover {
+.cue-grid button:hover,
+.smile-type-grid button:hover:not(:disabled) {
   border-color: var(--accent);
   background: var(--surface-4);
 }
@@ -1151,6 +1152,26 @@ label {
   line-height: 1.25;
 }
 
+.smile-type-card {
+  gap: 10px;
+}
+
+.smile-type-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.smile-type-grid button {
+  min-height: 46px;
+  white-space: normal;
+  line-height: 1.22;
+}
+
+.smile-type-grid .baseline {
+  grid-column: 1 / -1;
+}
+
 .info-button {
   position: relative;
   overflow: visible;
@@ -1163,6 +1184,11 @@ label {
   display: block;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.info-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .button-info-tooltip {
@@ -1215,7 +1241,8 @@ label {
 
 .info-button:hover .button-info-tooltip,
 .info-button:focus .button-info-tooltip,
-.info-button:focus-visible .button-info-tooltip {
+.info-button:focus-visible .button-info-tooltip,
+.info-button:disabled:hover .button-info-tooltip {
   opacity: 1;
   transform: translate(-50%, 0);
   transition-delay: 1s;
@@ -1227,13 +1254,15 @@ label {
 }
 
 .segmented-row .info-button:first-child .button-info-tooltip,
-.cue-grid .info-button:nth-child(odd) .button-info-tooltip {
+.cue-grid .info-button:nth-child(odd) .button-info-tooltip,
+.smile-type-grid .info-button:nth-child(odd) .button-info-tooltip {
   left: 0;
   transform: translate(0, 4px);
 }
 
 .segmented-row .info-button:first-child,
-.cue-grid .info-button:nth-child(odd) {
+.cue-grid .info-button:nth-child(odd),
+.smile-type-grid .info-button:nth-child(odd) {
   --tooltip-arrow-left: 40px;
   --tooltip-arrow-translate-x: -50%;
 }
@@ -1243,12 +1272,17 @@ label {
 .segmented-row .info-button:first-child:focus-visible .button-info-tooltip,
 .cue-grid .info-button:nth-child(odd):hover .button-info-tooltip,
 .cue-grid .info-button:nth-child(odd):focus .button-info-tooltip,
-.cue-grid .info-button:nth-child(odd):focus-visible .button-info-tooltip {
+.cue-grid .info-button:nth-child(odd):focus-visible .button-info-tooltip,
+.smile-type-grid .info-button:nth-child(odd):hover .button-info-tooltip,
+.smile-type-grid .info-button:nth-child(odd):focus .button-info-tooltip,
+.smile-type-grid .info-button:nth-child(odd):focus-visible .button-info-tooltip,
+.smile-type-grid .info-button:nth-child(odd):disabled:hover .button-info-tooltip {
   transform: translate(0, 0);
 }
 
 .segmented-row .info-button:last-child .button-info-tooltip,
-.cue-grid .info-button:nth-child(even) .button-info-tooltip {
+.cue-grid .info-button:nth-child(even) .button-info-tooltip,
+.smile-type-grid .info-button:nth-child(even) .button-info-tooltip {
   left: auto;
   right: 0;
   transform: translate(0, 4px);
@@ -1260,7 +1294,8 @@ label {
 }
 
 .segmented-row .info-button:last-child,
-.cue-grid .info-button:nth-child(even) {
+.cue-grid .info-button:nth-child(even),
+.smile-type-grid .info-button:nth-child(even) {
   --tooltip-arrow-left: auto;
   --tooltip-arrow-right: 40px;
   --tooltip-arrow-translate-x: 50%;
@@ -1271,7 +1306,11 @@ label {
 .segmented-row .info-button:last-child:focus-visible .button-info-tooltip,
 .cue-grid .info-button:nth-child(even):hover .button-info-tooltip,
 .cue-grid .info-button:nth-child(even):focus .button-info-tooltip,
-.cue-grid .info-button:nth-child(even):focus-visible .button-info-tooltip {
+.cue-grid .info-button:nth-child(even):focus-visible .button-info-tooltip,
+.smile-type-grid .info-button:nth-child(even):hover .button-info-tooltip,
+.smile-type-grid .info-button:nth-child(even):focus .button-info-tooltip,
+.smile-type-grid .info-button:nth-child(even):focus-visible .button-info-tooltip,
+.smile-type-grid .info-button:nth-child(even):disabled:hover .button-info-tooltip {
   transform: translate(0, 0);
 }
 

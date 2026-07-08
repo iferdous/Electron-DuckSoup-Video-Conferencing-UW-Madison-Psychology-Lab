@@ -1,7 +1,7 @@
 import http from 'node:http'
 
 const port = Number(process.env.PORT || 8765)
-const serviceName = process.env.SERVICE_NAME || 'Niedenthal Emotions Lab Signaling'
+const serviceName = process.env.SERVICE_NAME || 'SyncLink Signaling'
 const signalClients = new Map()
 
 const jsonResponse = (response, status, payload) => {
@@ -100,7 +100,7 @@ const joinPage = (requestUrl) => {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Niedenthal Emotions Lab Session</title>
+    <title>SyncLink Session</title>
     <style>
       body { margin: 0; background: #0a0f1e; color: #e7edf7; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
       main { max-width: 760px; margin: 0 auto; padding: 48px 24px; }
@@ -116,7 +116,7 @@ const joinPage = (requestUrl) => {
   <body>
     <main>
       <section>
-        <h1>Niedenthal Emotions Lab Session</h1>
+        <h1>SyncLink Session</h1>
         <p>Open the desktop app, paste this session link into the participant setup screen, then join the room.</p>
         <dl>
           <dt>Study</dt><dd>${studyId}</dd>

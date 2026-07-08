@@ -1,6 +1,6 @@
-# Niedenthal Emotions Lab
+# SyncLink
 
-Desktop app for running live emotion-study video sessions.
+A real-time platform for studying social connection.
 
 The app supports participant rooms, an Experimenter-only control view, 2-person (dyad) sessions, hosted room links, live chat, self-view hide/show, simple latency display, dual clean + altered `.mp4` recordings, and session timing logs.
 

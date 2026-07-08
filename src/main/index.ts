@@ -561,7 +561,7 @@ function createWindow(): void {
     minWidth: 1180,
     minHeight: 760,
     show: true,
-    title: 'Niedenthal Emotions Lab',
+    title: 'SyncLink',
     backgroundColor: '#0b1020',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -637,7 +637,7 @@ app.whenReady().then(() => {
       timestampSegment()
     ].join('_')
 
-    const outputRoot = metadata.outputFolder || join(app.getPath('documents'), 'Niedenthal Emotions Lab Sessions')
+    const outputRoot = metadata.outputFolder || join(app.getPath('documents'), 'SyncLink Sessions')
     const sessionDir = join(outputRoot, folderName)
     await mkdir(sessionDir, { recursive: true })
     await mkdir(join(sessionDir, 'video'), { recursive: true })
@@ -741,7 +741,7 @@ app.whenReady().then(() => {
   ipcMain.handle('get-storage-paths', () => {
     return {
       serverDataDir: join(process.cwd(), 'docker', 'ducksoup', 'data'),
-      sessionsDir: join(app.getPath('documents'), 'Niedenthal Emotions Lab Sessions')
+      sessionsDir: join(app.getPath('documents'), 'SyncLink Sessions')
     }
   })
 

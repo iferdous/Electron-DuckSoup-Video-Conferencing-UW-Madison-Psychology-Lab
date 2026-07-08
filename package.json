@@ -1,9 +1,9 @@
 {
   "name": "uw-emotions-lab-conference",
   "version": "0.1.0",
-  "description": "Research video conferencing console for live emotion study sessions.",
+  "description": "A real-time platform for studying social connection.",
   "main": "./out/main/index.js",
-  "author": "UW-Madison Niedenthal Emotions Lab",
+  "author": "UW-Madison Psychology Lab",
   "scripts": {
     "dev": "electron-vite dev",
     "start": "electron-vite preview",

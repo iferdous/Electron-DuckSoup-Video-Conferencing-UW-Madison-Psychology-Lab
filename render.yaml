@@ -12,4 +12,4 @@ services:
       - key: NODE_ENV
         value: production
       - key: SERVICE_NAME
-        value: Niedenthal Emotions Lab Signaling
+        value: SyncLink Signaling

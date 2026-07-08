@@ -55,20 +55,32 @@ const SMILE_OFFSET_RETURN_MS = 650
 const SMILE_RESPONSE_WATCHDOG_MS = 5_000
 const SMILE_CUE_MAX_AGE_MS = 2_000
 
+type SmileTypePresetId = 'reward' | 'affiliative' | 'dominance'
+
+type SmileTypePreset = {
+  id: SmileTypePresetId
+  label: string
+  description: string
+  alpha: number
+  durationMs: number
+  rampMs: number
+  returnMs: number
+}
+
 const hostedSignalUrl = 'https://nelf-call-signaling.onrender.com'
 
 const initialForm: SessionForm = {
   role: 'participant',
   sessionFormat: 'dyad',
   mediaTransport: 'ducksoup',
-  serverName: 'Emotions Lab Host',
+  serverName: 'SyncLink Host',
   studyId: 'NELF2026',
   raId: '',
   dyadId: '',
   displayName: 'Participant',
   participantId: 'P001',
   partnerId: 'P002',
-  roomId: `nelf-room-${Date.now()}`,
+  roomId: `synclink-room-${Date.now()}`,
   targetUserId: '',
   duckSoupUrl: 'http://localhost:8100',
   callSignalUrl: hostedSignalUrl,
@@ -99,6 +111,36 @@ const initialControls: ManipulationControls = {
   synchronyDelayMs: 0,
   automaticSmileOnsetMode: 'off'
 }
+
+const smileTypePresets: SmileTypePreset[] = [
+  {
+    id: 'reward',
+    label: 'Reward smile',
+    description: 'Positive reinforcement signal. Uses the current Mozza smile warp at a clear but still conservative intensity.',
+    alpha: 0.35,
+    durationMs: 900,
+    rampMs: 400,
+    returnMs: 600
+  },
+  {
+    id: 'affiliative',
+    label: 'Affiliative smile',
+    description: 'Softer social-bonding signal. Lower intensity and slower timing than reward so it reads as warmer/subtler.',
+    alpha: 0.2,
+    durationMs: 1200,
+    rampMs: 550,
+    returnMs: 750
+  },
+  {
+    id: 'dominance',
+    label: 'Dominance smile',
+    description: 'Experimental approximation. Current Mozza alpha cannot create true asymmetry/sneer, so this uses a brief firmer smile-style pulse.',
+    alpha: 0.15,
+    durationMs: 700,
+    rampMs: 250,
+    returnMs: 450
+  }
+]
 
 type SignalEnvelope = {
   type: string
@@ -209,6 +251,9 @@ type DirectorPayload =
       alpha: number
       returnAlpha: number
       durationMs: number
+      rampMs?: number
+      returnMs?: number
+      smileType?: SmileTypePresetId | 'baseline'
       label: string
     }
   | {
@@ -295,8 +340,8 @@ const smileSynchronyEventsToCsv = (events: SmileOnsetAuditEvent[]): string => {
   return [header.join(','), ...rows].join('\n') + '\n'
 }
 
-const appTitle = 'Niedenthal Emotions Lab'
-const appSubtitle = 'Live emotion study session'
+const appTitle = 'SyncLink'
+const appSubtitle = 'A real-time platform for studying social connection'
 
 // "Alice · P001" once the participant's study ID has been relayed; otherwise just the name.
 const peerStripLabel = (peer: CallPeer): string => {
@@ -703,6 +748,7 @@ export default function App(): ReactElement {
   const pendingMozzaControlsRef = useRef<{ face: LiveMozzaFaceParams; audioPitch: number } | null>(null)
   const appliedMozzaControlsRef = useRef<{ face: LiveMozzaFaceParams; audioPitch: number } | null>(null)
   const mozzaControlTimerRef = useRef<number | null>(null)
+  const manualCueReturnTimerRef = useRef<number | null>(null)
   const leaveLiveCallRef = useRef<(() => void) | null>(null)
   // Automatic smile onset/offset runs only on each participant's clean local camera. It uses
   // its own detector/timers so it cannot alter DuckSoup negotiation or the monitor path.
@@ -956,6 +1002,10 @@ export default function App(): ReactElement {
       if (mozzaControlTimerRef.current !== null) {
         window.clearTimeout(mozzaControlTimerRef.current)
         mozzaControlTimerRef.current = null
+      }
+      if (manualCueReturnTimerRef.current !== null) {
+        window.clearTimeout(manualCueReturnTimerRef.current)
+        manualCueReturnTimerRef.current = null
       }
     },
     []
@@ -1339,16 +1389,51 @@ export default function App(): ReactElement {
         const alpha = typeof message.alpha === 'number' ? message.alpha : initialControls.suppressSmileAlpha
         const returnAlpha = typeof message.returnAlpha === 'number' ? message.returnAlpha : initialControls.smileAlpha
         const durationMs = typeof message.durationMs === 'number' ? message.durationMs : initialControls.reactivePulseMs
-        setControls((prev) => ({ ...prev, synchronyMode: 'reactive', smileAlpha: alpha }))
+        const rampMs = typeof message.rampMs === 'number' ? message.rampMs : 300
+        const returnMs = typeof message.returnMs === 'number' ? message.returnMs : 300
+        const smileType = typeof message.smileType === 'string' ? message.smileType : ''
+        const applyCueAlpha = (nextAlpha: number, transitionMs: number): void => {
+          const player = duckSoupPlayerRef.current
+          if (player && duckSoupActiveRef.current) {
+            player.controlFx(MOZZA_FX_NAME, 'alpha', nextAlpha, transitionMs)
+            const previousApplied = appliedMozzaControlsRef.current
+            const currentControls = controlsRef.current
+            appliedMozzaControlsRef.current = {
+              face: {
+                smileAlpha: nextAlpha,
+                faceThreshold: currentControls.faceThreshold,
+                landmarkBeta: currentControls.landmarkBeta,
+                smoothingCutoff: currentControls.smoothingCutoff
+              },
+              audioPitch: previousApplied?.audioPitch ?? currentControls.audioPitch
+            }
+          }
+          setControls((prev) => {
+            const next = { ...prev, synchronyMode: 'reactive' as const, smileAlpha: nextAlpha }
+            controlsRef.current = next
+            return next
+          })
+        }
+
+        if (manualCueReturnTimerRef.current !== null) {
+          window.clearTimeout(manualCueReturnTimerRef.current)
+          manualCueReturnTimerRef.current = null
+        }
+        applyCueAlpha(alpha, rampMs)
         appendControlEvent(
-          'cueResponse',
+          smileType ? 'smileTypePreset' : 'cueResponse',
           alpha,
-          `${sender}: ${message.label || message.cue || 'behavioral cue'}; returning to ${returnAlpha} after ${durationMs}ms.`
+          `${sender}: ${message.label || message.cue || 'behavioral cue'}; smileType=${smileType || 'manual-cue'}; ramp=${rampMs}ms; hold=${durationMs}ms; return=${returnMs}ms to ${returnAlpha}.`
         )
         addLog(`${sender} triggered ${message.label || 'a synchrony cue response'}.`, 'info')
-        window.setTimeout(() => {
-          setControls((prev) => ({ ...prev, smileAlpha: returnAlpha }))
-          appendControlEvent('cueResponseReturn', returnAlpha, 'Reactive cue response returned to baseline.')
+        manualCueReturnTimerRef.current = window.setTimeout(() => {
+          manualCueReturnTimerRef.current = null
+          applyCueAlpha(returnAlpha, returnMs)
+          appendControlEvent(
+            smileType ? 'smileTypePresetReturn' : 'cueResponseReturn',
+            returnAlpha,
+            `${smileType || 'Reactive cue'} response returned to baseline over ${returnMs}ms.`
+          )
         }, durationMs)
         return
       }
@@ -3041,6 +3126,10 @@ export default function App(): ReactElement {
       window.clearTimeout(mozzaControlTimerRef.current)
       mozzaControlTimerRef.current = null
     }
+    if (manualCueReturnTimerRef.current !== null) {
+      window.clearTimeout(manualCueReturnTimerRef.current)
+      manualCueReturnTimerRef.current = null
+    }
     pendingMozzaControlsRef.current = null
     appliedMozzaControlsRef.current = null
     if (duckSoupActiveRef.current) {
@@ -3240,6 +3329,56 @@ export default function App(): ReactElement {
     addLog(`${label} sent to ${controlTargetLabel}.`, 'info')
   }
 
+  const triggerSmileTypePreset = (preset: SmileTypePreset): void => {
+    if (controlsRef.current.automaticSmileOnsetMode === 'live') {
+      addLog('Turn automatic smile synchrony off before applying manual smile-type presets.', 'warn')
+      return
+    }
+
+    const targetUserId = form.targetUserId
+    const targetLabel = controlTargetLabel
+    setControls((prev) => ({ ...prev, synchronyMode: 'reactive', smileAlpha: preset.alpha }))
+    appendControlEvent(
+      'smileTypePreset',
+      preset.id,
+      `Manual ${preset.label}; target=${targetLabel}; intensity=${preset.alpha}; ramp=${preset.rampMs}ms; hold=${preset.durationMs}ms; return=${preset.returnMs}ms.`,
+      targetUserId
+    )
+    sendDirectorPayload({
+      kind: 'cue-response',
+      cue: `smile-type-${preset.id}`,
+      targetUserId: targetUserId || undefined,
+      alpha: preset.alpha,
+      returnAlpha: 0,
+      durationMs: preset.durationMs,
+      rampMs: preset.rampMs,
+      returnMs: preset.returnMs,
+      smileType: preset.id,
+      label: `${preset.label} preset`
+    })
+    addLog(`${preset.label} preset sent to ${targetLabel}.`, 'info')
+  }
+
+  const returnSmileTypePresetToBaseline = (): void => {
+    const targetUserId = form.targetUserId
+    const targetLabel = controlTargetLabel
+    setControls((prev) => ({ ...prev, synchronyMode: 'aligned', smileAlpha: 0 }))
+    appendControlEvent('smileTypePreset', 'baseline', `Manual smile-type return to baseline; target=${targetLabel}.`, targetUserId)
+    sendDirectorPayload({
+      kind: 'cue-response',
+      cue: 'smile-type-baseline',
+      targetUserId: targetUserId || undefined,
+      alpha: 0,
+      returnAlpha: 0,
+      durationMs: 0,
+      rampMs: 300,
+      returnMs: 300,
+      smileType: 'baseline',
+      label: 'Return to baseline'
+    })
+    addLog(`Smile-type baseline sent to ${targetLabel}.`, 'info')
+  }
+
   const setAutomaticSmileOnsetMode = (
     mode: ManipulationControls['automaticSmileOnsetMode']
   ): void => {
@@ -3353,7 +3492,7 @@ export default function App(): ReactElement {
       return
     }
     if (!form.outputFolder) {
-      addLog('No output folder selected. Saving to the default Emotions Lab sessions folder.', 'info')
+      addLog('No output folder selected. Saving to the default SyncLink sessions folder.', 'info')
     }
 
     const { sessionDir: createdDir } = await window.researchApi.createSessionDirectory(form)
@@ -3535,12 +3674,14 @@ export default function App(): ReactElement {
       return
     }
 
-    if (isController && isLocalSignalUrl(nextSignalUrl)) {
-      const result = await startSignalServer()
-      if (!result.ok) return
-    } else {
-      const reachable = await checkRoomStatus(false, { roomId: nextRoomId, callSignalUrl: nextSignalUrl })
-      if (!reachable) return
+    if (isController) {
+      if (isLocalSignalUrl(nextSignalUrl)) {
+        const result = await startSignalServer()
+        if (!result.ok) return
+      } else {
+        const reachable = await checkRoomStatus(false, { roomId: nextRoomId, callSignalUrl: nextSignalUrl })
+        if (!reachable) return
+      }
     }
 
     setSetupComplete(true)
@@ -3572,7 +3713,7 @@ export default function App(): ReactElement {
           <main className="portal-login-main">
             <section className="portal-login-card" role="dialog" aria-label="Experimenter login">
               <div className="portal-login-card-header">
-                <div className="portal-icon">NEL</div>
+                <div className="portal-icon">SL</div>
                 <h2>Experimenter Portal</h2>
               </div>
 
@@ -3861,7 +4002,7 @@ export default function App(): ReactElement {
                     <br />
                     Manifests, Logs, Chat, Notes go to:{' '}
                     <code className="path-text">
-                      {form.outputFolder || storagePaths?.sessionsDir || 'Documents\\Niedenthal Emotions Lab Sessions'}
+                      {form.outputFolder || storagePaths?.sessionsDir || 'Documents\\SyncLink Sessions'}
                     </code>
                   </p>
                   <button
@@ -4161,6 +4302,32 @@ export default function App(): ReactElement {
                   neutral={0}
                   onChange={(value) => setControl('smileAlpha', value)}
                 />
+                <div className="mode-card smile-type-card">
+                  <div>
+                    <span>Smile type presets</span>
+                  </div>
+                  <p>
+                    Applies a timed smile signal to the selected control target and logs it for later review.
+                  </p>
+                  <div className="smile-type-grid">
+                    {smileTypePresets.map((preset) => (
+                      <InfoButton
+                        key={preset.id}
+                        description={preset.description}
+                        onClick={() => triggerSmileTypePreset(preset)}
+                      >
+                        {preset.label}
+                      </InfoButton>
+                    ))}
+                    <InfoButton
+                      className="baseline"
+                      description="Return the selected participant or room to neutral Smile Alpha."
+                      onClick={returnSmileTypePresetToBaseline}
+                    >
+                      Return baseline
+                    </InfoButton>
+                  </div>
+                </div>
                 <details className="advanced-controls">
                   <summary>Advanced</summary>
                   <div className="advanced-group-title">Manual override</div>
@@ -4595,10 +4762,10 @@ function WelcomeScreen({ onStart }: { onStart: () => void }): ReactElement {
       <section className="welcome-frame">
         <div className="welcome-content">
           <h1>
-            <span>Niedenthal</span>
-            <em>Emotions Lab</em>
+            <span>Sync</span>
+            <em>Link</em>
           </h1>
-          <p>Live emotion study sessions for research observation, recording, and participant connection.</p>
+          <p>A real-time platform for studying social connection</p>
           <button className="welcome-start" onClick={onStart}>
             Initialize Session
             <span aria-hidden="true">›</span>
@@ -4708,16 +4875,21 @@ function InfoButton({
   children,
   className = '',
   description,
+  disabled = false,
   onClick
 }: {
   children: ReactNode
   className?: string
   description: string
+  disabled?: boolean
   onClick: () => void
 }): ReactElement {
   return (
-    <button className={`info-button ${className}`.trim()} onClick={onClick} title={description}>
+    <button className={`info-button ${className}`.trim()} disabled={disabled} onClick={onClick} title={description}>
       <span className="button-label">{children}</span>
+      <span className="button-info-tooltip" role="tooltip">
+        {description}
+      </span>
     </button>
   )
 }
