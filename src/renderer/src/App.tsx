@@ -3196,13 +3196,12 @@ export default function App(): ReactElement {
   }
   leaveLiveCallRef.current = leaveLiveCall
 
-  const returnToSetup = (): void => {
-    // Only the experimenter has anything to lose by leaving mid-recording (it's the authoritative
-    // saver). A participant can't stop/save the server-side recording anyway, so it must not be
-    // blocked here — otherwise it can never get back to setup once the interaction has started.
+  const returnToSetup = async (): Promise<void> => {
+    // The experimenter is the authoritative saver. Back to setup should still work, but it must
+    // first run the same finalization path as Conclude so active-session data is not discarded.
     if (isController && recordingState === 'recording') {
-      addLog('Conclude the study (or stop the recording) before returning to setup, so the session is saved.', 'error')
-      return
+      addLog('Saving the active session before returning to setup.', 'warn')
+      await finalizeDuckSoupSession()
     }
     if (callState !== 'idle') leaveLiveCall()
     // Returning to setup starts a fresh session. Clear the accumulators that otherwise bleed into
