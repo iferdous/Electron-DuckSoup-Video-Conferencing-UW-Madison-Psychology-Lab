@@ -86,14 +86,16 @@ npm run media:down
 
 This Docker server runs on the computer that starts it. The hosted Render signaling server is separate.
 
-**Where the media server runs — read before a multi-computer lab install.** The app currently connects
-to the media/effects server at `localhost:8100`, so out of the box that server must run on the **same
-computer** as each app instance (this is why the single-machine test setup "just works"). To run **one
-shared** media server — e.g. on the lab's NVIDIA "gaming PC" — that the participant machines reach over
-the LAN, the app has to point at that machine's LAN IP instead of `localhost`, and the field for that is
-**not currently in the UI** (a known to-do). Coordinate with Aditya before the multi-machine install. On
-the Windows/NVIDIA media-server machine, also set `docker/ducksoup/.env`
-(`DUCKSOUP_IMAGE=ducksouplab/ducksoup:latest`, GPU flags off → CPU x264); see `docs/DUCKSOUP_INTEGRATION.md`.
+**Where the media server runs — read before a multi-computer lab install.** The app defaults to
+`http://localhost:8100`, which is correct when Docker is running on the same computer as the app. To run
+one shared media server, such as the lab's NVIDIA/gaming PC, start Docker there and put that computer's
+LAN address in the Experimenter setup screen under `Media Server`, for example `http://192.168.1.50:8100`.
+That address is included in the participant session link, so participants should not have to type it
+manually. On a Windows/NVIDIA media-server machine, set `docker/ducksoup/.env`
+(`DUCKSOUP_IMAGE=ducksouplab/ducksoup:latest`, GPU flags off -> CPU x264); see
+`docs/DUCKSOUP_INTEGRATION.md`.
+
+Before a formal lab run, use `docs/RUGGED_TESTING_CHECKLIST.md`.
 
 ## Local Signaling Test
 

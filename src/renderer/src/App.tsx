@@ -461,7 +461,10 @@ const csvEscape = (value: unknown): string => {
 type TimedPreset = {
   id: string
   atSeconds: number
-  smileAlpha: number
+  kind: 'smile-alpha' | 'smile-type'
+  smileAlpha?: number
+  smileType?: SmileTypePresetId | 'baseline'
+  label: string
   // The control target snapshotted when the preset was scheduled, so it fires against the
   // participant the experimenter had selected then — not whoever happens to be selected at fire
   // time. Empty targetUserId = all participants.
@@ -813,7 +816,9 @@ export default function App(): ReactElement {
   const [timedSchedule, setTimedSchedule] = useState<TimedPreset[]>([])
   const [timedAtMin, setTimedAtMin] = useState('0')
   const [timedAtSec, setTimedAtSec] = useState('0')
+  const [timedKind, setTimedKind] = useState<TimedPreset['kind']>('smile-alpha')
   const [timedAlpha, setTimedAlpha] = useState('0')
+  const [timedSmileType, setTimedSmileType] = useState<SmileTypePresetId | 'baseline'>('reward')
   const timedScheduleRef = useRef<TimedPreset[]>([])
   const fireTimedPresetRef = useRef<(preset: TimedPreset) => void>(() => {})
   const [logs, setLogs] = useState<LogEvent[]>([])
@@ -3251,26 +3256,57 @@ export default function App(): ReactElement {
         )
         return
       }
+      if (preset.kind === 'smile-type') {
+        const smileType = preset.smileType ?? 'baseline'
+        const selected = smileTypePresets.find((candidate) => candidate.id === smileType)
+        const alpha = selected?.alpha ?? 0
+        const durationMs = selected?.durationMs ?? 0
+        const rampMs = selected?.rampMs ?? 300
+        const returnMs = selected?.returnMs ?? 300
+
+        setControls((prev) => ({
+          ...prev,
+          synchronyMode: smileType === 'baseline' ? 'aligned' : 'reactive',
+          smileAlpha: alpha
+        }))
+        appendControlEvent(
+          'smileTypePreset',
+          smileType,
+          `Timed ${preset.label} at ${secondsToMmSs(preset.atSeconds)} → ${preset.targetLabel}.`,
+          preset.targetUserId
+        )
+        sendDirectorPayload({
+          kind: 'cue-response',
+          cue: `timed-smile-type-${smileType}`,
+          targetUserId: preset.targetUserId || undefined,
+          alpha,
+          returnAlpha: 0,
+          durationMs,
+          rampMs,
+          returnMs,
+          smileType,
+          label: `Timed ${preset.label}`
+        })
+        addLog(
+          `Timed preset: ${preset.label} → ${preset.targetLabel} at ${secondsToMmSs(preset.atSeconds)}.`,
+          'info'
+        )
+        return
+      }
+
+      const smileAlpha = preset.smileAlpha ?? 0
       // Reflect it on the experimenter's own slider + event log, and broadcast to the target that
       // was snapshotted when the preset was scheduled (dyad-wide if none was selected) — not
       // whatever the Control-target dropdown happens to be at fire time.
-      setControls((prev) => ({ ...prev, smileAlpha: preset.smileAlpha }))
+      setControls((prev) => ({ ...prev, smileAlpha }))
       appendControlEvent(
         'smileAlpha',
-        preset.smileAlpha,
+        smileAlpha,
         `Timed preset at ${secondsToMmSs(preset.atSeconds)} → ${preset.targetLabel}.`,
         preset.targetUserId
       )
-      broadcastLiveControl(
-        'smileAlpha',
-        preset.smileAlpha,
-        `Timed preset ${secondsToMmSs(preset.atSeconds)}`,
-        preset.targetUserId
-      )
-      addLog(
-        `Timed preset: smile alpha ${preset.smileAlpha} → ${preset.targetLabel} at ${secondsToMmSs(preset.atSeconds)}.`,
-        'info'
-      )
+      broadcastLiveControl('smileAlpha', smileAlpha, `Timed preset ${secondsToMmSs(preset.atSeconds)}`, preset.targetUserId)
+      addLog(`Timed preset: smile alpha ${smileAlpha} → ${preset.targetLabel} at ${secondsToMmSs(preset.atSeconds)}.`, 'info')
     }
   })
 
@@ -3283,10 +3319,26 @@ export default function App(): ReactElement {
     // experimenter has selected now, regardless of what's selected later.
     const targetUserId = form.targetUserId
     const targetLabel = controlTargetLabel
+    const selectedSmileType = smileTypePresets.find((preset) => preset.id === timedSmileType)
+    const label =
+      timedKind === 'smile-type'
+        ? selectedSmileType?.label ?? 'Return baseline'
+        : `smile alpha ${smileAlpha}`
     setTimedSchedule((prev) =>
-      [...prev, { id: makeId(), atSeconds, smileAlpha, targetUserId, targetLabel, fired: false }].sort(
-        (a, b) => a.atSeconds - b.atSeconds
-      )
+      [
+        ...prev,
+        {
+          id: makeId(),
+          atSeconds,
+          kind: timedKind,
+          smileAlpha: timedKind === 'smile-alpha' ? smileAlpha : undefined,
+          smileType: timedKind === 'smile-type' ? timedSmileType : undefined,
+          label,
+          targetUserId,
+          targetLabel,
+          fired: false
+        }
+      ].sort((a, b) => a.atSeconds - b.atSeconds)
     )
   }
   const removeTimedPreset = (id: string): void => {
@@ -3764,9 +3816,6 @@ export default function App(): ReactElement {
               <p>{appSubtitle}</p>
             </div>
             <div className="setup-header-actions">
-              {isController && (
-                <InfoDot description="Reminder: bring the Advanced button back before the lab setup. We hid it for a cleaner screen, but the lab needs it — that's where you point the participants' computers at the right server address so they can connect." />
-              )}
               {isController ? (
                 <button onClick={returnToParticipantMode}>Exit experimenter mode</button>
               ) : (
@@ -3917,6 +3966,35 @@ export default function App(): ReactElement {
                 )}
               </div>
             </section>
+
+            {isController && (
+              <section className="panel setup-wide">
+                <div className="section-title accent">Media Server</div>
+                <p className="plain-text compact-copy">
+                  Use the computer running Docker/Mozza. Participants receive this address inside the session link.
+                </p>
+                <div className="field-grid two">
+                  <label>
+                    Media mode
+                    <select
+                      value={form.mediaTransport}
+                      onChange={(event) => updateForm('mediaTransport', event.target.value as SessionForm['mediaTransport'])}
+                    >
+                      <option value="ducksoup">DuckSoup / Mozza</option>
+                      <option value="mesh">Basic WebRTC fallback</option>
+                    </select>
+                  </label>
+                  <label>
+                    Server URL
+                    <input
+                      value={form.duckSoupUrl}
+                      onChange={(event) => updateForm('duckSoupUrl', event.target.value)}
+                      placeholder="http://localhost:8100"
+                    />
+                  </label>
+                </div>
+              </section>
+            )}
           </div>
 
           <div className="setup-actions">
@@ -4446,7 +4524,7 @@ export default function App(): ReactElement {
               <section className="panel">
                 <div className="section-title accent">
                   Timed schedule
-                  <InfoDot description="Sets smile alpha at a set time into the call, timed from when both participants join. Each entry remembers the Control target selected when you added it, and fires automatically at its time." />
+                  <InfoDot description="Runs a smile alpha or smile-type preset at a set time into the call. Each entry remembers the selected Control target." />
                 </div>
                 <div className="timed-add">
                   <label>
@@ -4470,14 +4548,42 @@ export default function App(): ReactElement {
                     />
                   </label>
                   <label>
-                    Smile alpha
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      value={timedAlpha}
-                      onChange={(event) => setTimedAlpha(event.target.value)}
-                      onBlur={() => setTimedAlpha(String(Math.max(-1, Math.min(1, Number(timedAlpha) || 0))))}
-                    />
+                    Action
+                    <select value={timedKind} onChange={(event) => setTimedKind(event.target.value as TimedPreset['kind'])}>
+                      <option value="smile-alpha">Smile alpha</option>
+                      <option value="smile-type">Smile type</option>
+                    </select>
+                  </label>
+                  {timedKind === 'smile-alpha' ? (
+                    <label>
+                      Smile alpha
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={timedAlpha}
+                        onChange={(event) => setTimedAlpha(event.target.value)}
+                        onBlur={() => setTimedAlpha(String(Math.max(-1, Math.min(1, Number(timedAlpha) || 0))))}
+                      />
+                    </label>
+                  ) : (
+                    <label>
+                      Smile type
+                      <select
+                        value={timedSmileType}
+                        onChange={(event) => setTimedSmileType(event.target.value as SmileTypePresetId | 'baseline')}
+                      >
+                        {smileTypePresets.map((preset) => (
+                          <option key={preset.id} value={preset.id}>
+                            {preset.label}
+                          </option>
+                        ))}
+                        <option value="baseline">Return baseline</option>
+                      </select>
+                    </label>
+                  )}
+                  <label>
+                    Target
+                    <input value={controlTargetLabel} readOnly />
                   </label>
                   <button className="secondary" onClick={addTimedPreset}>
                     Add
@@ -4491,7 +4597,7 @@ export default function App(): ReactElement {
                       <div className="timed-row" key={preset.id}>
                         <span className="timed-when">{secondsToMmSs(preset.atSeconds)}</span>
                         <span className="timed-what">
-                          smile alpha {preset.smileAlpha} → {preset.targetLabel}
+                          {preset.label} → {preset.targetLabel}
                         </span>
                         <span className={preset.fired ? 'timed-status done' : 'timed-status pending'}>
                           {preset.fired ? 'done' : 'pending'}
