@@ -8,7 +8,7 @@
     "dev": "electron-vite dev",
     "start": "electron-vite preview",
     "signal:start": "node server/signaling-server.mjs",
-    "signal:dev": "PORT=8765 node server/signaling-server.mjs",
+    "signal:dev": "node server/signaling-server.mjs --port 8765",
     "media:up": "cd docker/ducksoup && cp -n env.example .env && docker compose up -d",
     "media:down": "cd docker/ducksoup && docker compose down",
     "media:status": "docker ps --format \"table {{.Names}}\\t{{.Status}}\\t{{.Ports}}\"",

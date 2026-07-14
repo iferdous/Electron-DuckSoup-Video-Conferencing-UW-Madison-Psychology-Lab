@@ -1,5 +1,6 @@
 services:
   ducksoup:
+    # x86_64 / Windows+NVIDIA hosts MUST set DUCKSOUP_IMAGE=ducksouplab/ducksoup:latest in .env; the ARM default won't load the x86 Mozza plugin (libgstmozza.so).
     image: ${DUCKSOUP_IMAGE:-ducksouplab/ducksoup:arm_latest}
     restart: unless-stopped
     env_file:

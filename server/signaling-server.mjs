@@ -1,6 +1,10 @@
 import http from 'node:http'
 
-const port = Number(process.env.PORT || 8765)
+process.on('uncaughtException', (err) => console.error('[signal] uncaughtException', err))
+process.on('unhandledRejection', (err) => console.error('[signal] unhandledRejection', err))
+
+const portArgIndex = process.argv.indexOf('--port')
+const port = Number(process.env.PORT || (portArgIndex > -1 ? process.argv[portArgIndex + 1] : '') || 8765)
 const serviceName = process.env.SERVICE_NAME || 'SyncLink Signaling'
 const signalClients = new Map()
 
@@ -30,10 +34,20 @@ const readJsonBody = async (request) => {
 }
 
 const sendSignalEvent = (client, type, payload) => {
-  client.response.write(`data: ${JSON.stringify({ type, payload })}\n\n`)
+  if (client.response.destroyed || client.response.writableEnded) {
+    removeSignalClient(client, false)
+    return
+  }
+  try {
+    client.response.write(`data: ${JSON.stringify({ type, payload })}\n\n`)
+  } catch {
+    removeSignalClient(client, false)
+  }
 }
 
 const roomClients = (roomId) => [...signalClients.values()].filter((client) => client.roomId === roomId)
+
+const userInRoom = (roomId, userId) => roomClients(roomId).some((client) => client.userId === userId)
 
 const roomPeers = (roomId) => {
   const unique = new Map()
@@ -167,6 +181,10 @@ const server = http.createServer(async (request, response) => {
         ok: true,
         roomId,
         peers: roomPeers(roomId),
+        // Clients learn this to convert cue timestamps into the server clock domain, so cross-machine
+        // smile-cue freshness survives laptop clock skew. Field name must match the client + main-process
+        // embedded server (serverEpochMs).
+        serverEpochMs: Date.now(),
         checkedAt: new Date().toISOString()
       })
       return
@@ -179,6 +197,7 @@ const server = http.createServer(async (request, response) => {
       const role = requestedRole === 'director' ? 'controller' : requestedRole || 'participant'
       const displayName = url.searchParams.get('displayName')?.trim() || userId || 'Participant'
       const participantId = url.searchParams.get('participantId')?.trim() || ''
+      const connectionId = url.searchParams.get('connectionId')?.trim() || ''
 
       if (!roomId || !userId || !['participant', 'controller'].includes(role)) {
         jsonResponse(response, 400, { ok: false, error: 'Missing roomId, userId, or role.' })
@@ -205,19 +224,28 @@ const server = http.createServer(async (request, response) => {
         role,
         displayName,
         participantId,
+        connectionId,
         response,
         joinedAt: Date.now()
       }
       signalClients.set(client.id, client)
+      // notify=true: an abrupt socket error must still broadcast peer-left/peer-list, or remaining
+      // peers keep a stale tile / inflated count (request 'close' fires second and no-ops via the
+      // !removed guard, so there's no double broadcast).
+      response.on('error', () => removeSignalClient(client, true))
       client.heartbeat = setInterval(() => {
-        if (response.destroyed) {
+        if (response.destroyed || response.writableEnded) {
           removeSignalClient(client, true)
           return
         }
-        response.write(': keepalive\n\n')
+        try {
+          response.write(': keepalive\n\n')
+        } catch {
+          removeSignalClient(client, true)
+        }
       }, 10000)
 
-      sendSignalEvent(client, 'hello', { peer: peerPayload(client), peers: roomPeers(roomId) })
+      sendSignalEvent(client, 'hello', { peer: peerPayload(client), peers: roomPeers(roomId), serverEpochMs: Date.now() })
       broadcastSignalEvent(roomId, 'peer-joined', { peer: peerPayload(client) }, client.id)
       broadcastSignalEvent(roomId, 'peer-list', { peers: roomPeers(roomId) })
 
@@ -233,7 +261,9 @@ const server = http.createServer(async (request, response) => {
       }
 
       for (const client of roomClients(message.roomId)) {
-        if (client.userId === message.from) removeSignalClient(client, true, true)
+        if (client.userId === message.from && (!message.connectionId || client.connectionId === message.connectionId)) {
+          removeSignalClient(client, true, true)
+        }
       }
 
       jsonResponse(response, 200, { ok: true })
@@ -244,6 +274,10 @@ const server = http.createServer(async (request, response) => {
       const message = await readJsonBody(request)
       if (!message.roomId || !message.from || !message.type) {
         jsonResponse(response, 400, { ok: false, error: 'Missing roomId, from, or type.' })
+        return
+      }
+      if (!userInRoom(message.roomId, message.from)) {
+        jsonResponse(response, 403, { ok: false, error: 'Sender is not an active member of this room.' })
         return
       }
 
@@ -271,6 +305,11 @@ const server = http.createServer(async (request, response) => {
         jsonResponse(response, 400, { ok: false, error: 'Missing roomId or from.' })
         return
       }
+      // Membership only — do NOT role-gate: participants send smile-onset/offset cues over this endpoint.
+      if (!userInRoom(message.roomId, message.from)) {
+        jsonResponse(response, 403, { ok: false, error: 'Sender is not an active member of this room.' })
+        return
+      }
       broadcastSignalEvent(message.roomId, 'director-control', message)
       jsonResponse(response, 200, { ok: true })
       return
@@ -281,6 +320,10 @@ const server = http.createServer(async (request, response) => {
       const text = typeof message.text === 'string' ? message.text.trim() : ''
       if (!message.roomId || !message.from || !text) {
         jsonResponse(response, 400, { ok: false, error: 'Missing roomId, sender, or message text.' })
+        return
+      }
+      if (!userInRoom(message.roomId, message.from)) {
+        jsonResponse(response, 403, { ok: false, error: 'Sender is not an active member of this room.' })
         return
       }
 
@@ -310,7 +353,11 @@ const server = http.createServer(async (request, response) => {
 
     jsonResponse(response, 404, { ok: false, error: 'Not found.' })
   } catch (error) {
-    jsonResponse(response, 500, { ok: false, error: error instanceof Error ? error.message : 'Signal server error.' })
+    if (!response.headersSent) {
+      jsonResponse(response, 500, { ok: false, error: error instanceof Error ? error.message : 'Signal server error.' })
+    } else {
+      try { response.end() } catch {}
+    }
   }
 })
 
