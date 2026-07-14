@@ -66,7 +66,9 @@ declare global {
         destDir: string
         namespace: string
         interaction: string
+        sinceEpochMs?: number
       }) => Promise<{ copied: string[]; copiedPaths: string[]; dataDir: string | null }>
+      setSavingState: (saving: boolean) => void
     }
     DuckSoup?: {
       render: (

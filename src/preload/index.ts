@@ -53,8 +53,10 @@ const researchApi = {
     destDir: string
     namespace: string
     interaction: string
-  }): Promise<{ copied: string[]; dataDir: string | null }> =>
-    ipcRenderer.invoke('collect-ducksoup-recordings', payload)
+    sinceEpochMs?: number
+  }): Promise<{ copied: string[]; copiedPaths: string[]; dataDir: string | null }> =>
+    ipcRenderer.invoke('collect-ducksoup-recordings', payload),
+  setSavingState: (saving: boolean): void => ipcRenderer.send('set-saving-state', saving)
 }
 
 if (process.contextIsolated) {

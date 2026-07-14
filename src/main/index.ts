@@ -1,10 +1,11 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import dgram, { type Socket } from 'node:dgram'
-import { mkdir, writeFile, readdir, copyFile } from 'node:fs/promises'
+import { mkdir, writeFile, readdir, copyFile, stat, readFile } from 'node:fs/promises'
 import http, { type Server, type ServerResponse } from 'node:http'
 import os from 'node:os'
-import { join, sanitize } from './path-utils'
+import { extname, normalize } from 'node:path'
+import { join, sanitize, dirname } from './path-utils'
 
 type SessionMetadata = {
   serverName?: string
@@ -61,6 +62,7 @@ type SignalClient = {
   role: CallRole
   displayName: string
   participantId: string
+  connectionId?: string
   response: ServerResponse
   joinedAt: number
   heartbeat?: NodeJS.Timeout
@@ -74,6 +76,8 @@ type SignalMessage = {
   payload?: unknown
   role?: CallRole
   displayName?: string
+  connectionId?: string
+  senderRole?: CallRole
 }
 
 type ChatMessage = {
@@ -92,11 +96,71 @@ const DISCOVERY_GROUP = '239.255.42.99'
 const DISCOVERY_PORT = 44563
 const DEFAULT_SIGNAL_PORT = 8765
 
+// Fix F: the packaged renderer is served from a privileged custom `app://` scheme instead of
+// file:// so it gets a stable web origin (`app://bundle`). That origin is accepted by the
+// DuckSoup SFU WS-origin allowlist and lets MediaPipe fetch() local wasm/model assets.
+// IMPORTANT: DUCKSOUP_ALLOWED_WS_ORIGINS must include `app://bundle` for production
+// (the env file is edited separately). This only affects the packaged build; `npm run dev`
+// still loads the electron-vite dev server URL and is untouched.
+const APP_SCHEME = 'app'
+const APP_HOST = 'bundle'
+
+const RENDERER_CONTENT_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.task': 'application/octet-stream',
+  '.map': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf'
+}
+
+// Must run before the app is ready (module top level satisfies that).
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: APP_SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true }
+  }
+])
+
 let advertisementSocket: Socket | null = null
 let advertisementTimer: NodeJS.Timeout | null = null
 let callSignalServer: Server | null = null
 let callSignalServerPort: number | null = null
+// Fix A: set by the renderer via 'set-saving-state' while a save/recording write is in flight,
+// so quitting/closing the window waits instead of truncating the file.
+let isSaving = false
 const signalClients = new Map<string, SignalClient>()
+
+// Fix F: serve the packaged renderer output dir over app://bundle/<path>. `/` and missing
+// paths fall back to index.html. Paths are normalized to stay inside the renderer dir.
+const registerRendererProtocol = (): void => {
+  const rendererDir = join(__dirname, '../renderer')
+  protocol.handle(APP_SCHEME, async (request) => {
+    try {
+      const requestUrl = new URL(request.url)
+      let relativePath = decodeURIComponent(requestUrl.pathname)
+      if (!relativePath || relativePath === '/') relativePath = '/index.html'
+      const safeRelative = normalize(relativePath).replace(/^([\\/]|\.\.[\\/])+/, '')
+      const filePath = join(rendererDir, safeRelative)
+      const body = await readFile(filePath)
+      const contentType = RENDERER_CONTENT_TYPES[extname(filePath).toLowerCase()] ?? 'application/octet-stream'
+      return new Response(body, { headers: { 'Content-Type': contentType } })
+    } catch {
+      return new Response('Not found', { status: 404 })
+    }
+  })
+}
 
 const safeSegment = (value: string, fallback: string): string => {
   const trimmed = sanitize(value).trim()
@@ -113,7 +177,23 @@ const localAddresses = (): string[] => {
     .map((item) => item.address)
 }
 
-const firstLanAddress = (): string => localAddresses()[0] ?? '127.0.0.1'
+// Fix E: prefer a real private-LAN address over the first NIC, which on Windows is often a
+// WSL/Hyper-V virtual adapter. Order: 192.168.* > 10.* > 172.16-31.* > other, and push
+// 169.254.* link-local addresses last.
+const lanAddressRank = (address: string): number => {
+  if (/^192\.168\./.test(address)) return 0
+  if (/^10\./.test(address)) return 1
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(address)) return 2
+  if (/^169\.254\./.test(address)) return 4
+  return 3
+}
+
+const firstLanAddress = (): string => {
+  const best = localAddresses()
+    .map((address, index) => ({ address, index, rank: lanAddressRank(address) }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)[0]
+  return best?.address ?? '127.0.0.1'
+}
 
 const hostUrlFrom = (baseUrl: string, fallbackAddress = firstLanAddress(), fallbackPort = 8100): string => {
   try {
@@ -274,7 +354,16 @@ const readJsonBody = async (request: http.IncomingMessage): Promise<Record<strin
 }
 
 const sendSignalEvent = (client: SignalClient, type: string, payload: unknown): void => {
-  client.response.write(`data: ${JSON.stringify({ type, payload })}\n\n`)
+  // Fix B: never write to a dead SSE socket; drop the client instead of throwing.
+  if (client.response.destroyed || client.response.writableEnded) {
+    removeSignalClient(client, false)
+    return
+  }
+  try {
+    client.response.write(`data: ${JSON.stringify({ type, payload })}\n\n`)
+  } catch {
+    removeSignalClient(client, false)
+  }
 }
 
 const roomClients = (roomId: string): SignalClient[] =>
@@ -383,6 +472,7 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
             ok: true,
             roomId,
             peers: roomPeers(roomId),
+            serverEpochMs: Date.now(),
             checkedAt: new Date().toISOString()
           })
           return
@@ -395,6 +485,7 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
           const role = requestedRole === 'director' ? 'controller' : ((requestedRole as CallRole | null) ?? 'participant')
           const displayName = url.searchParams.get('displayName')?.trim() || userId || 'Participant'
           const participantId = url.searchParams.get('participantId')?.trim() || ''
+          const connectionId = url.searchParams.get('connectionId')?.trim() || ''
 
           if (!roomId || !userId || !['participant', 'controller'].includes(role)) {
             jsonResponse(response, 400, { ok: false, error: 'Missing roomId, userId, or role.' })
@@ -407,7 +498,11 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
             Connection: 'keep-alive',
             'Content-Type': 'text/event-stream'
           })
-          response.write(': connected\n\n')
+          try {
+            response.write(': connected\n\n')
+          } catch {
+            return
+          }
 
           for (const existing of roomClients(roomId)) {
             if (existing.userId === userId) {
@@ -422,21 +517,35 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
             role,
             displayName,
             participantId,
+            connectionId,
             response,
             joinedAt: Date.now()
           }
           signalClients.set(client.id, client)
           client.heartbeat = setInterval(() => {
-            if (response.destroyed) {
+            // Fix B: drop the client if its socket is gone; guard the keepalive write too.
+            if (response.destroyed || response.writableEnded) {
               removeSignalClient(client, true)
               return
             }
-            response.write(': keepalive\n\n')
+            try {
+              response.write(': keepalive\n\n')
+            } catch {
+              removeSignalClient(client, true)
+            }
           }, 10000)
-          sendSignalEvent(client, 'hello', { peer: peerPayload(client), peers: roomPeers(roomId) })
+          sendSignalEvent(client, 'hello', {
+            peer: peerPayload(client),
+            peers: roomPeers(roomId),
+            serverEpochMs: Date.now()
+          })
           broadcastSignalEvent(roomId, 'peer-joined', { peer: peerPayload(client) }, client.id)
           broadcastSignalEvent(roomId, 'peer-list', { peers: roomPeers(roomId) })
 
+          // Fix B: a socket error should also evict the client.
+          response.on('error', () => {
+            removeSignalClient(client, true)
+          })
           request.on('close', () => {
             removeSignalClient(client, true)
           })
@@ -450,8 +559,14 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
             return
           }
 
+          // Fix B: only evict the caller's own connection. With a connectionId, scope the
+          // removal to that exact connection so a stale duplicate cannot drop a live one.
+          const from = message.from
+          const connectionId = typeof message.connectionId === 'string' ? message.connectionId : ''
           for (const client of roomClients(message.roomId)) {
-            if (client.userId === message.from) removeSignalClient(client, true, true)
+            if (client.userId === from && (!connectionId || client.connectionId === connectionId)) {
+              removeSignalClient(client, true, true)
+            }
           }
 
           jsonResponse(response, 200, { ok: true })
@@ -487,6 +602,19 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
           if (!message.roomId || !message.from) {
             jsonResponse(response, 400, { ok: false, error: 'Missing roomId or from.' })
             return
+          }
+          // Fix B: when a connectionId is supplied, verify the sender owns that live
+          // connection and stamp the authoritative role before relaying; drop if unknown.
+          const connectionId = typeof message.connectionId === 'string' ? message.connectionId : ''
+          if (connectionId) {
+            const sender = roomClients(message.roomId).find(
+              (client) => client.userId === message.from && client.connectionId === connectionId
+            )
+            if (!sender) {
+              jsonResponse(response, 200, { ok: true })
+              return
+            }
+            message.senderRole = sender.role
           }
           broadcastSignalEvent(message.roomId, 'director-control', message)
           jsonResponse(response, 200, { ok: true })
@@ -531,7 +659,20 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
       }
     })
 
-    server.once('error', reject)
+    // Fix C: surface a clear message on port conflicts and close the failed server so it
+    // does not leak; other errors reject as before.
+    server.once('error', (error: NodeJS.ErrnoException) => {
+      if (error?.code === 'EADDRINUSE') {
+        try {
+          server.close()
+        } catch {
+          // server never started listening; nothing to clean up
+        }
+        reject(new Error(`Call signal server port ${port} is already in use — close other app instances.`))
+        return
+      }
+      reject(error)
+    })
     server.listen(port, '0.0.0.0', () => {
       callSignalServer = server
       callSignalServerPort = port
@@ -603,9 +744,12 @@ function createWindow(): void {
   })
 
   if (is.dev && process.env.ELECTRON_RENDERER_URL) {
+    // DEV: electron-vite dev server — leave completely unchanged.
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    // Fix F: PROD loads via the privileged app:// scheme (origin app://bundle) instead of
+    // loadFile's file:// origin. DUCKSOUP_ALLOWED_WS_ORIGINS must include `app://bundle`.
+    mainWindow.loadURL(`${APP_SCHEME}://${APP_HOST}/index.html`)
   }
 }
 
@@ -617,8 +761,17 @@ app.whenReady().then(() => {
 
   electronApp.setAppUserModelId('edu.wisc.niedenthal.emotionslab')
 
+  // Fix F: wire up the app:// scheme so the production window can load app://bundle/index.html.
+  registerRendererProtocol()
+
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
+  })
+
+  // Fix A: the renderer flips this while writing recordings/session data so a quit does not
+  // truncate an in-progress save.
+  ipcMain.on('set-saving-state', (_e, saving) => {
+    isSaving = Boolean(saving)
   })
 
   ipcMain.handle('select-output-folder', async (): Promise<string | null> => {
@@ -664,9 +817,13 @@ app.whenReady().then(() => {
   )
 
   ipcMain.handle('check-ducksoup', async (_, baseUrl: string) => {
+    // Bound the probe so a routable-but-dead address (SYN black-hole) can't hang the setup
+    // "Continue" button on the OS TCP timeout.
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5000)
     try {
       const url = new URL('/test/mirror/', baseUrl)
-      const response = await fetch(url, { method: 'GET' })
+      const response = await fetch(url, { method: 'GET', signal: controller.signal })
       const reachable = response.ok || response.status === 401
       return {
         ok: reachable,
@@ -676,11 +833,18 @@ app.whenReady().then(() => {
           : `HTTP ${response.status}`
       }
     } catch (error) {
+      const aborted = error instanceof Error && error.name === 'AbortError'
       return {
         ok: false,
         status: 0,
-        detail: error instanceof Error ? error.message : 'Local media server is not reachable.'
+        detail: aborted
+          ? 'Media server did not respond within 5 seconds.'
+          : error instanceof Error
+            ? error.message
+            : 'Local media server is not reachable.'
       }
+    } finally {
+      clearTimeout(timer)
     }
   })
 
@@ -690,14 +854,25 @@ app.whenReady().then(() => {
   // the caller keeps the server-side paths in the manifest.
   ipcMain.handle(
     'collect-ducksoup-recordings',
-    async (_, payload: { destDir: string; namespace: string; interaction: string }) => {
+    async (_, payload: { destDir: string; namespace: string; interaction: string; sinceEpochMs?: number }) => {
+      // Fix C (H3): candidate data roots, tried in order. The env override and the packaged-exe
+      // location keep this working in a packaged build where process.cwd()/getAppPath() no
+      // longer point at the repo; dev (cwd = repo root) still resolves when present.
       const candidateRoots = [
+        process.env.SYNCLINK_DUCKSOUP_DATA,
         join(process.cwd(), 'docker', 'ducksoup', 'data'),
-        join(app.getAppPath(), 'docker', 'ducksoup', 'data')
-      ]
+        join(app.getAppPath(), 'docker', 'ducksoup', 'data'),
+        join(dirname(app.getPath('exe')), 'docker', 'ducksoup', 'data')
+      ].filter((root): root is string => Boolean(root))
       const copied: string[] = []
       const copiedPaths: string[] = []
       let dataDir: string | null = null
+
+      // Fix C: when the caller passes the interaction start time, skip recordings left over
+      // from earlier interactions that reused this room folder. 5s buffer absorbs mtime skew.
+      const sinceEpochMs =
+        typeof payload.sinceEpochMs === 'number' && payload.sinceEpochMs > 0 ? payload.sinceEpochMs : 0
+      const cutoffMs = sinceEpochMs > 0 ? sinceEpochMs - 5000 : 0
 
       for (const root of candidateRoots) {
         const recordingsDir = join(
@@ -708,9 +883,25 @@ app.whenReady().then(() => {
         )
         try {
           const entries = await readdir(recordingsDir)
-          const media = entries.filter((name) => /\.(webm|mp4|mkv|ogg)$/i.test(name))
-          if (media.length === 0) continue
+          const allMedia = entries.filter((name) => /\.(webm|mp4|mkv|ogg)$/i.test(name))
+          if (allMedia.length === 0) continue
           dataDir = recordingsDir
+
+          let media = allMedia
+          if (cutoffMs > 0) {
+            const fresh: string[] = []
+            for (const name of allMedia) {
+              try {
+                const info = await stat(join(recordingsDir, name))
+                if (info.mtimeMs >= cutoffMs) fresh.push(name)
+              } catch {
+                // If the file cannot be stat'd, err on the side of copying it.
+                fresh.push(name)
+              }
+            }
+            media = fresh
+          }
+
           const destVideo = join(payload.destDir, 'video')
           await mkdir(destVideo, { recursive: true })
           for (const name of media) {
@@ -732,7 +923,10 @@ app.whenReady().then(() => {
   ipcMain.handle('get-network-info', () => {
     return {
       hostname: os.hostname(),
-      addresses: localAddresses()
+      // Rank-sorted (192.168 > 10 > 172.16-31 > other > 169.254 link-local) so the renderer's
+      // media-URL prefill picks a real LAN address, not a WSL/Hyper-V virtual adapter that a
+      // participant machine can't reach.
+      addresses: [...localAddresses()].sort((a, b) => lanAddressRank(a) - lanAddressRank(b))
     }
   })
 
@@ -787,8 +981,38 @@ app.whenReady().then(() => {
   })
 })
 
+// Fix A: if the renderer is mid-save (isSaving), block the quit and poll until the save
+// clears, then quit — instead of tearing the process down and truncating the file. When
+// idle, quitting proceeds normally (unchanged behavior).
+// Cap the save-wait so a renderer that crashes mid-save (isSaving stuck true) can't wedge the
+// app open forever — force the quit after this deadline.
+const MAX_SAVE_WAIT_MS = 15_000
+
+app.on('before-quit', (event) => {
+  if (!isSaving) return
+  event.preventDefault()
+  const deadline = Date.now() + MAX_SAVE_WAIT_MS
+  const waitThenQuit = (): void => {
+    if (isSaving && Date.now() < deadline) {
+      setTimeout(waitThenQuit, 200)
+      return
+    }
+    app.quit()
+  }
+  setTimeout(waitThenQuit, 200)
+})
+
 app.on('window-all-closed', () => {
   stopAdvertisement()
   stopCallSignalServer()
-  if (process.platform !== 'darwin') app.quit()
+  if (process.platform === 'darwin') return
+  const deadline = Date.now() + MAX_SAVE_WAIT_MS
+  const quitWhenIdle = (): void => {
+    if (isSaving && Date.now() < deadline) {
+      setTimeout(quitWhenIdle, 200)
+      return
+    }
+    app.quit()
+  }
+  quitWhenIdle()
 })
