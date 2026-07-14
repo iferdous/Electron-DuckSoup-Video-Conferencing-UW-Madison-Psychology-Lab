@@ -240,6 +240,7 @@ export type SmileDetectorConfig = {
   releaseDwellMs: number
   refractoryMs: number
   reacquireMs: number
+  maxCueActiveMs: number
 }
 
 export const defaultSmileDetectorConfig: SmileDetectorConfig = {
@@ -253,7 +254,12 @@ export const defaultSmileDetectorConfig: SmileDetectorConfig = {
   onsetDwellMs: 200,
   releaseDwellMs: 300,
   refractoryMs: 1_500,
-  reacquireMs: 500
+  reacquireMs: 500,
+  // Hard cap on how long a single detected smile may hold the cue active. Without this,
+  // a resting smile that settles in the release band (0.2-0.35) never drops below
+  // releaseThreshold, so no natural offset fires and every later smile is suppressed.
+  // On timeout we force a normal smile-offset so the partner is returned to baseline.
+  maxCueActiveMs: 8_000
 }
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value))
@@ -289,6 +295,7 @@ export class SmileOnsetDetector {
   private provisionalActive = false
   private onsetCandidateSince: number | null = null
   private releaseCandidateSince: number | null = null
+  private cueActiveStartedAt = 0
   private cooldownUntil = 0
   private faceStableSince: number | null = null
   private calibrationFailure = ''
@@ -315,6 +322,7 @@ export class SmileOnsetDetector {
     this.provisionalActive = false
     this.onsetCandidateSince = null
     this.releaseCandidateSince = null
+    this.cueActiveStartedAt = 0
     this.cooldownUntil = 0
     this.faceStableSince = null
     this.calibrationFailure = ''
@@ -336,6 +344,7 @@ export class SmileOnsetDetector {
     this.provisionalActive = false
     this.onsetCandidateSince = null
     this.releaseCandidateSince = null
+    this.cueActiveStartedAt = 0
     this.cooldownUntil = 0
     this.faceStableSince = null
     this.calibrationFailure = ''
@@ -444,22 +453,20 @@ export class SmileOnsetDetector {
     }
 
     if (this.phase === 'cue-active') {
+      // Safety valve: a smile that lingers in the release band (never dips below
+      // releaseThreshold) would otherwise hold the cue forever and block all later
+      // smiles. Force a normal offset once the cue has been active for maxCueActiveMs.
+      // This is deliberately mode-agnostic: the detector always advances its own state
+      // (so 'detect'/log-only mode still returns to a re-armable state); the App layer
+      // decides whether the emitted offset is actually sent to the partner.
+      if (frame.timestampMs - this.cueActiveStartedAt >= this.config.maxCueActiveMs) {
+        this.emitSmileOffset(events, frame, rawSmile, normalized, smoothedNormalized)
+        return events
+      }
       if (smoothedNormalized <= this.config.releaseThreshold) {
         this.releaseCandidateSince ??= frame.timestampMs
         if (frame.timestampMs - this.releaseCandidateSince >= this.config.releaseDwellMs) {
-          events.push({
-            kind: 'smile-offset',
-            timestampMs: frame.timestampMs,
-            rawSmile,
-            normalizedSmile: normalized,
-            smoothedNormalizedSmile: smoothedNormalized,
-            mouthSmileLeft: frame.mouthSmileLeft,
-            mouthSmileRight: frame.mouthSmileRight,
-            jawOpen: frame.jawOpen
-          })
-          this.phase = 'cooldown'
-          this.cooldownUntil = frame.timestampMs + this.config.refractoryMs
-          this.releaseCandidateSince = null
+          this.emitSmileOffset(events, frame, rawSmile, normalized, smoothedNormalized)
         }
       } else {
         this.releaseCandidateSince = null
@@ -478,6 +485,7 @@ export class SmileOnsetDetector {
       ) {
         this.phase = 'cue-active'
         this.onsetCandidateSince = null
+        this.cueActiveStartedAt = frame.timestampMs
         events.push({
           kind: 'smile-onset',
           timestampMs: frame.timestampMs,
@@ -513,6 +521,33 @@ export class SmileOnsetDetector {
     }
   }
 
+  // Single source of truth for leaving cue-active. Both a natural release (smoothed
+  // score sustained below releaseThreshold) and the maxCueActiveMs timeout route through
+  // here, so a forced offset is byte-for-byte the same event shape/type as a natural one
+  // and drives the same cooldown/refractory transition.
+  private emitSmileOffset(
+    events: SmileDetectorEvent[],
+    frame: SmileFrame,
+    rawSmile: number,
+    normalized: number,
+    smoothedNormalized: number
+  ): void {
+    events.push({
+      kind: 'smile-offset',
+      timestampMs: frame.timestampMs,
+      rawSmile,
+      normalizedSmile: normalized,
+      smoothedNormalizedSmile: smoothedNormalized,
+      mouthSmileLeft: frame.mouthSmileLeft,
+      mouthSmileRight: frame.mouthSmileRight,
+      jawOpen: frame.jawOpen
+    })
+    this.phase = 'cooldown'
+    this.cooldownUntil = frame.timestampMs + this.config.refractoryMs
+    this.releaseCandidateSince = null
+    this.cueActiveStartedAt = 0
+  }
+
   private normalize(rawSmile: number): number {
     if (!this.calibration || this.calibration.smileRange <= 0) return 0
     return clamp01((rawSmile - this.calibration.neutralMedian) / this.calibration.smileRange)
@@ -521,6 +556,8 @@ export class SmileOnsetDetector {
   private finishCalibration(timestampMs: number): SmileDetectorEvent[] {
     const neutralMedian = median(this.neutralSamples)
     const neutralDeviations = this.neutralSamples.map((value) => Math.abs(value - neutralMedian))
+    // NOTE: `neutralMad` (here) and per-frame `jawOpen` are captured but intentionally
+    // unused in the smile score for now; the scoring math is deliberately left unchanged.
     const neutralMad = median(neutralDeviations)
     const smileReference = percentile(this.smileSamples, 0.9)
     const smileRange = smileReference - neutralMedian

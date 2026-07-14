@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   SmileOnsetDetector,
+  defaultSmileDetectorConfig,
   smileCueRejectionReason,
   smileOffsetMatchRejectionReason,
   smileOffsetRejectionReason,
@@ -136,6 +137,73 @@ describe('SmileOnsetDetector', () => {
     expect(offsetEvents.filter((event) => event.kind === 'smile-offset')).toHaveLength(1)
   })
 
+  it('defaults maxCueActiveMs to 8000', () => {
+    expect(defaultSmileDetectorConfig.maxCueActiveMs).toBe(8_000)
+  })
+
+  it('force-emits an offset after maxCueActiveMs when a smile never releases, then re-arms', () => {
+    const detector = new SmileOnsetDetector()
+    const cursor = calibrate(detector)
+
+    // A smile held well above the release threshold the whole time. Without the safety
+    // valve this holds the cue forever and suppresses every later smile; maxCueActiveMs
+    // must force a normal offset once the cue has been active for 8s.
+    const held = feed(detector, cursor + 50, cursor + 9_500, 0.6)
+    expect(held.filter((event) => event.kind === 'smile-onset')).toHaveLength(1)
+    const forced = held.filter((event) => event.kind === 'smile-offset')
+    expect(forced).toHaveLength(1)
+
+    // The forced offset is the same shape/type as a natural offset (all fields present),
+    // even though the participant is still smiling (score well above release).
+    const forcedOffset = forced[0]
+    expect(forcedOffset.kind).toBe('smile-offset')
+    let offsetTs = cursor
+    if (forcedOffset.kind === 'smile-offset') {
+      expect(forcedOffset.rawSmile).toBeGreaterThan(0.2)
+      expect(forcedOffset.normalizedSmile).toBeGreaterThan(0.2)
+      expect(forcedOffset.smoothedNormalizedSmile).toBeGreaterThan(0.2)
+      offsetTs = forcedOffset.timestampMs
+    }
+
+    // After the forced offset the detector is in cooldown/refractory. Drop to neutral so
+    // cooldown can clear, then confirm a brand-new onset can fire again.
+    let next = offsetTs + 50
+    feed(detector, next, next + 2_000, 0.05)
+    next += 2_050
+    const reArmed = feed(detector, next, next + 800, 0.6)
+    expect(reArmed.filter((event) => event.kind === 'smile-onset')).toHaveLength(1)
+  })
+
+  it('still emits a natural offset when the smile drops below release well before maxCueActiveMs', () => {
+    const detector = new SmileOnsetDetector()
+    const cursor = calibrate(detector)
+    const onsetEvents = feed(detector, cursor + 50, cursor + 500, 0.6)
+    expect(onsetEvents.filter((event) => event.kind === 'smile-onset')).toHaveLength(1)
+
+    // Drop to neutral; a natural offset should fire after the release dwell (~300ms),
+    // far sooner than the 8s force-offset safety valve.
+    const offsetEvents = feed(detector, cursor + 550, cursor + 1_200, 0.05)
+    const offset = offsetEvents.find((event) => event.kind === 'smile-offset')
+    expect(offset).toBeDefined()
+    if (offset?.kind === 'smile-offset') {
+      expect(offset.smoothedNormalizedSmile).toBeLessThanOrEqual(0.2)
+      expect(offset.timestampMs).toBeLessThan(cursor + 8_000)
+    }
+  })
+
+  it('recovers to ready after the reacquire dwell once the face returns', () => {
+    const detector = new SmileOnsetDetector()
+    const cursor = calibrate(detector)
+    detector.ingest(frame(cursor + 50, 0, false))
+    expect(detector.snapshot(cursor + 60).phase).toBe('face-missing')
+    // Face returns but must stay missing until reacquireMs (500ms) of stable presence elapses,
+    // then recovers to ready and can detect a fresh onset again.
+    feed(detector, cursor + 100, cursor + 700, 0.05)
+    expect(detector.snapshot(cursor + 700).phase).toBe('ready')
+    const events = feed(detector, cursor + 750, cursor + 1_400, 0.6)
+    expect(events.filter((event) => event.kind === 'smile-onset')).toHaveLength(1)
+  })
+
   it('fails calibration when smile movement is not distinguishable from neutral', () => {
     const detector = new SmileOnsetDetector({ provisionalSmileDelta: 0.01 })
     detector.startCalibration(0)
@@ -216,5 +284,13 @@ describe('smileCueRejectionReason', () => {
     expect(smileCueRejectionReason({ ...valid, cueTargetUserId: 'p1' })).toContain('target')
     expect(smileCueRejectionReason({ ...valid, senderUserId: 'other' })).toContain('sender')
     expect(smileCueRejectionReason({ ...valid, localFaceReady: false })).toContain('not calibrated')
+  })
+
+  it('tolerates small negative cue ages (cross-machine clock skew) but rejects large ones', () => {
+    // Cues are stamped/compared in the signaling server's clock domain, but a residual skew can still
+    // yield a slightly negative age. The window tolerates down to -1000ms and rejects beyond it.
+    expect(smileCueRejectionReason({ ...valid, ageMs: -500 })).toBe('')
+    expect(smileCueRejectionReason({ ...valid, ageMs: -1_500 })).toContain('Stale cue')
+    expect(smileCueRejectionReason({ ...valid, ageMs: 0 })).toBe('')
   })
 })

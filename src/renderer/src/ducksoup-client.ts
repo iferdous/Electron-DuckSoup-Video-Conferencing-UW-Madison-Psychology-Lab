@@ -12,7 +12,9 @@
 // The global Window.DuckSoup type lives in src/preload/index.d.ts.
 
 // Asset version served by the upstream `ducksouplab/ducksoup` image (config/version.yml).
-// Bump if the server image is upgraded.
+// This MUST match the assets the running DuckSoup image actually serves — the client is
+// fetched from `<httpBaseUrl>/assets/<version>/js/ducksoup.js`, so a mismatch here yields
+// a 404 and a failed load. Bump this whenever the server image is upgraded.
 export const DUCKSOUP_ASSET_VERSION = 'v1.93'
 
 // Mozza is the face-only smile warp (GStreamer plugin). videoFx string + the live-tunable
@@ -120,7 +122,11 @@ export const ensureDuckSoupLoaded = (httpBaseUrl: string): Promise<void> => {
           'error',
           () => {
             scriptPromise = null
-            reject(new Error(`Could not load the DuckSoup client from ${src}.`))
+            reject(
+              new Error(
+                `Could not load DuckSoup client from ${src} (asset version ${DUCKSOUP_ASSET_VERSION}). Is the media server running and serving this version?`
+              )
+            )
           },
           { once: true }
         )
@@ -138,7 +144,11 @@ export const ensureDuckSoupLoaded = (httpBaseUrl: string): Promise<void> => {
       () => {
         script.remove()
         scriptPromise = null
-        reject(new Error(`Could not load the DuckSoup client from ${src}. Is the media server running?`))
+        reject(
+          new Error(
+            `Could not load DuckSoup client from ${src} (asset version ${DUCKSOUP_ASSET_VERSION}). Is the media server running and serving this version?`
+          )
+        )
       },
       { once: true }
     )
