@@ -120,7 +120,7 @@ const smileTypePresets: SmileTypePreset[] = [
   {
     id: 'reward',
     label: 'Reward smile',
-    description: 'Positive reinforcement signal. Uses the current Mozza smile warp at a clear but still conservative intensity.',
+    description: 'A clear, happy smile (the strongest of the three).',
     alpha: 0.35,
     durationMs: 900,
     rampMs: 400,
@@ -129,7 +129,7 @@ const smileTypePresets: SmileTypePreset[] = [
   {
     id: 'affiliative',
     label: 'Affiliative smile',
-    description: 'Softer social-bonding signal. Lower intensity and slower timing than reward so it reads as warmer/subtler.',
+    description: 'A soft, warm, friendly smile.',
     alpha: 0.2,
     durationMs: 1200,
     rampMs: 550,
@@ -138,7 +138,7 @@ const smileTypePresets: SmileTypePreset[] = [
   {
     id: 'dominance',
     label: 'Dominance smile',
-    description: 'Experimental approximation. Current Mozza alpha cannot create true asymmetry/sneer, so this uses a brief firmer smile-style pulse.',
+    description: 'A quick, firm smile.',
     alpha: 0.15,
     durationMs: 700,
     rampMs: 250,
@@ -4304,10 +4304,11 @@ export default function App(): ReactElement {
             </section>
 
             {isController && (
-              <section className="panel setup-wide">
+              <details className="panel setup-wide advanced-setup">
+                <summary className="advanced-setup-summary">Advanced settings</summary>
                 <div className="section-title accent">Media Server</div>
                 <p className="plain-text compact-copy">
-                  Use the computer running Docker/Mozza. Participants receive this address inside the session link.
+                  Filled in automatically. Only change it if the effects server runs on another computer.
                 </p>
                 <div className="field-grid two">
                   <label>
@@ -4333,7 +4334,7 @@ export default function App(): ReactElement {
                     />
                   </label>
                 </div>
-              </section>
+              </details>
             )}
           </div>
 
@@ -4630,9 +4631,6 @@ export default function App(): ReactElement {
                     }}
                   >
                     <span>{callErrorMessage}</span>
-                    <button className="secondary" onClick={joinLiveCall}>
-                      Rejoin
-                    </button>
                   </div>
                 )}
                 <div className="participant-stage">
@@ -4762,7 +4760,7 @@ export default function App(): ReactElement {
                     ))}
                     <InfoButton
                       className="baseline"
-                      description="Return the selected participant or room to neutral Smile Alpha."
+                      description="Return the person to a neutral face."
                       onClick={returnSmileTypePresetToBaseline}
                     >
                       Return baseline
@@ -4947,7 +4945,14 @@ export default function App(): ReactElement {
                   )}
                   <label>
                     Target
-                    <input value={controlTargetLabel} readOnly />
+                    <select value={form.targetUserId} onChange={(event) => updateForm('targetUserId', event.target.value)}>
+                      <option value="">All participants</option>
+                      {participantPeers.map((peer) => (
+                        <option key={peer.userId} value={peer.userId}>
+                          {peer.displayName}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <button className="secondary" onClick={addTimedPreset}>
                     Add
@@ -5354,7 +5359,7 @@ function InfoButton({
   onClick: () => void
 }): ReactElement {
   return (
-    <button className={`info-button ${className}`.trim()} disabled={disabled} onClick={onClick} title={description}>
+    <button className={`info-button ${className}`.trim()} disabled={disabled} onClick={onClick}>
       <span className="button-label">{children}</span>
       <span className="button-info-tooltip" role="tooltip">
         {description}

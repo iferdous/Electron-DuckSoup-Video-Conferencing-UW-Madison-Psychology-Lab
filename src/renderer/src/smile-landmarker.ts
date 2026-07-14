@@ -6,8 +6,8 @@ const localAssetUrl = (path: string): string => new URL(path.replace(/^\/+/, '')
 let faceLandmarkerPromise: Promise<FaceLandmarker> | null = null
 
 export const getSmileFaceLandmarker = (): Promise<FaceLandmarker> => {
-  faceLandmarkerPromise ??= FilesetResolver.forVisionTasks(localAssetUrl('mediapipe/wasm/')).then(
-    (wasmFileset) =>
+  faceLandmarkerPromise ??= FilesetResolver.forVisionTasks(localAssetUrl('mediapipe/wasm/'))
+    .then((wasmFileset) =>
       FaceLandmarker.createFromOptions(wasmFileset, {
         baseOptions: {
           modelAssetPath: localAssetUrl('mediapipe/models/face_landmarker.task'),
@@ -21,7 +21,14 @@ export const getSmileFaceLandmarker = (): Promise<FaceLandmarker> => {
         outputFaceBlendshapes: true,
         outputFacialTransformationMatrixes: false
       })
-  )
+    )
+    .catch((error) => {
+      // Don't cache a failed load. Otherwise the rejected promise is handed back to every later
+      // attempt (retry / re-enabling the feature), so the detector can never recover from a
+      // transient first-load hiccup.
+      faceLandmarkerPromise = null
+      throw error
+    })
   return faceLandmarkerPromise
 }
 

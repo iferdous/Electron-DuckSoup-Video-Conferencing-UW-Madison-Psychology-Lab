@@ -1173,8 +1173,13 @@ label {
   line-height: 1.22;
 }
 
-.smile-type-grid .baseline {
-  grid-column: 1 / -1;
+/* "Return baseline" sits in the 2x2 grid like the other three buttons. It used to be full-width
+   (grid-column: 1 / -1), which forced the four buttons onto three uneven rows. */
+
+.advanced-setup > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 4px 0;
 }
 
 .info-button {
