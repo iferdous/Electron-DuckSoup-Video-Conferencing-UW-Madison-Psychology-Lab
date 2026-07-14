@@ -52,7 +52,11 @@ const SMILE_RESPONSE_ALPHA = 0.25
 const SMILE_RESPONSE_RAMP_MS = 350
 const SMILE_OFFSET_MIN_PEAK_HOLD_MS = 400
 const SMILE_OFFSET_RETURN_MS = 650
-const SMILE_RESPONSE_WATCHDOG_MS = 5_000
+// Must exceed the detector's maxCueActiveMs (8s): the SOURCE force-emits a smile-offset at 8s for a
+// smile that lingers in the release band, so the target only needs this net as a genuine "offset lost"
+// backstop. Keeping it at 5s truncated real smiles longer than 5s (the partner's added smile vanished
+// mid-smile). 9s = 8s source cap + ~1s network margin.
+const SMILE_RESPONSE_WATCHDOG_MS = 9_000
 const SMILE_CUE_MAX_AGE_MS = 2_000
 
 type SmileTypePresetId = 'reward' | 'affiliative' | 'dominance'
@@ -420,6 +424,20 @@ const isLocalSignalUrl = (value: string): boolean => {
     return ['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname)
   } catch {
     return false
+  }
+}
+
+// Normalize a media-server address the experimenter types: trim, auto-prepend http:// when no scheme
+// is given (so "192.168.1.50:8100" becomes a valid URL instead of failing only later at connect time),
+// and return '' if it still can't be parsed. Keeps a trailing-slash-free origin+path.
+const normalizeMediaUrl = (value: string): string => {
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`
+  try {
+    return new URL(withScheme).toString().replace(/\/$/, '')
+  } catch {
+    return ''
   }
 }
 
@@ -793,10 +811,31 @@ export default function App(): ReactElement {
   // (DuckSoup teardown events like 'end'/'track', in-flight signaling) check this so pressing
   // "Leave room" can't be undone by a stale event flipping callState back or re-adding tiles.
   const inCallRef = useRef(false)
+  // Offset (serverClock - localClock) learned from the signaling server, so cross-machine smile cue
+  // freshness checks survive laptops whose wall clocks differ by seconds (they'd otherwise reject
+  // every live cue as "stale"). Both peers stamp/compare cue times in the server's clock domain.
+  const serverClockOffsetRef = useRef(0)
+  // Per-EventSource id sent to the signaling server so a stale /leave from a previous connection
+  // can't kick a freshly-rejoined station (which reuses the same userId), and control messages can
+  // be attributed to a live connection.
+  const connectionIdRef = useRef('')
+  // Timed presets skipped because automatic smile synchrony is Live are left pending (they fire once
+  // Live is turned off). Track which we've already warned about so the 500ms scheduler doesn't spam.
+  const timedSkipWarnedRef = useRef<Set<string>>(new Set())
+  // Trailing-throttle state for the experimenter's continuous slider sends, so a single drag doesn't
+  // fire dozens of /director-control POSTs + manipulation_events.csv rows.
+  const controlSendThrottleRef = useRef<Map<string, { timer: number | null; latest: { value: ManipulationControls[keyof ManipulationControls]; notes?: string } }>>(new Map())
+  // Experimenter-only display reset: after a smile-type preset's envelope, snap the experimenter's own
+  // (display-only) Smile Alpha readout back to neutral so it doesn't look stuck at the preset value.
+  const experimenterDisplayTimerRef = useRef<number | null>(null)
 
   const [setupComplete, setSetupComplete] = useState(false)
   const [welcomeComplete, setWelcomeComplete] = useState(false)
   const [callState, setCallState] = useState<CallState>('idle')
+  // Participant-facing join/media failure text. Participants don't see the experimenter log panel, so
+  // without this a failed media connection (e.g. wrong media-server address) left them on a silent
+  // "Waiting room" with no clue why.
+  const [callErrorMessage, setCallErrorMessage] = useState('')
   const [callPeers, setCallPeers] = useState<CallPeer[]>([])
   const [remoteTiles, setRemoteTiles] = useState<RemoteTile[]>([])
   const [monitorTiles, setMonitorTiles] = useState<MonitorTile[]>([])
@@ -820,7 +859,9 @@ export default function App(): ReactElement {
   const [timedAlpha, setTimedAlpha] = useState('0')
   const [timedSmileType, setTimedSmileType] = useState<SmileTypePresetId | 'baseline'>('reward')
   const timedScheduleRef = useRef<TimedPreset[]>([])
-  const fireTimedPresetRef = useRef<(preset: TimedPreset) => void>(() => {})
+  // Returns true only if the preset actually dispatched, so the scheduler leaves a skipped preset
+  // pending instead of consuming it forever.
+  const fireTimedPresetRef = useRef<(preset: TimedPreset) => boolean>(() => false)
   const [logs, setLogs] = useState<LogEvent[]>([])
   const [controlEvents, setControlEvents] = useState<ControlEvent[]>([])
   const [recordingSeconds, setRecordingSeconds] = useState(0)
@@ -867,7 +908,8 @@ export default function App(): ReactElement {
     url.searchParams.set('format', form.sessionFormat)
     url.searchParams.set('transport', form.mediaTransport)
     if (form.mediaTransport === 'ducksoup' && form.duckSoupUrl.trim()) {
-      url.searchParams.set('ds', form.duckSoupUrl.trim())
+      // Normalize so participants always receive a parseable http(s):// address in the link.
+      url.searchParams.set('ds', normalizeMediaUrl(form.duckSoupUrl) || form.duckSoupUrl.trim())
     }
     if (form.dyadId.trim()) url.searchParams.set('dyadId', form.dyadId.trim())
     return url.toString()
@@ -966,6 +1008,38 @@ export default function App(): ReactElement {
     formRef.current = form
   }, [form])
 
+  // Controller: default the media-server address to this machine's LAN IP. Participants can't reach the
+  // experimenter's "localhost", so shipping the untouched localhost default in the session link is the
+  // single most common way the in-lab dyad silently fails to connect media. Only overrides an untouched
+  // localhost value — never a hostname the RA typed themselves.
+  useEffect(() => {
+    if (!isController) return undefined
+    let cancelled = false
+    let host: URL
+    try {
+      host = new URL(formRef.current.duckSoupUrl || 'http://localhost:8100')
+    } catch {
+      return undefined
+    }
+    if (!['localhost', '127.0.0.1', '0.0.0.0'].includes(host.hostname)) return undefined
+    window.researchApi
+      ?.getNetworkInfo?.()
+      .then((info) => {
+        if (cancelled) return
+        const lan =
+          info?.addresses?.find((address) => /^(192\.168\.|10\.)/.test(address)) ?? info?.addresses?.[0]
+        if (lan) {
+          host.hostname = lan
+          updateForm('duckSoupUrl', host.toString().replace(/\/$/, ''))
+          addLog(`Media server address set to this computer's LAN IP: ${host.toString().replace(/\/$/, '')}.`, 'info')
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [isController])
+
   useEffect(() => {
     controlsRef.current = controls
     for (const video of document.querySelectorAll<HTMLVideoElement>('video[data-remote-call-video="true"]')) {
@@ -1012,6 +1086,14 @@ export default function App(): ReactElement {
         window.clearTimeout(manualCueReturnTimerRef.current)
         manualCueReturnTimerRef.current = null
       }
+      if (experimenterDisplayTimerRef.current !== null) {
+        window.clearTimeout(experimenterDisplayTimerRef.current)
+        experimenterDisplayTimerRef.current = null
+      }
+      for (const entry of controlSendThrottleRef.current.values()) {
+        if (entry.timer != null) window.clearTimeout(entry.timer)
+      }
+      controlSendThrottleRef.current.clear()
     },
     []
   )
@@ -1035,6 +1117,7 @@ export default function App(): ReactElement {
       setInteractionCapReached(false)
       // New recording window: let the timed schedule fire again from this t=0.
       setTimedSchedule((prev) => prev.map((preset) => ({ ...preset, fired: false })))
+      timedSkipWarnedRef.current.clear()
     }
   }, [isController, participantPeers.length, expectedParticipants])
 
@@ -1070,12 +1153,19 @@ export default function App(): ReactElement {
         (preset) => !preset.fired && elapsedMs >= preset.atSeconds * 1000
       )
       if (due.length === 0) return
-      const dueIds = new Set(due.map((preset) => preset.id))
-      timedScheduleRef.current = timedScheduleRef.current.map((preset) =>
-        dueIds.has(preset.id) ? { ...preset, fired: true } : preset
-      )
-      setTimedSchedule(timedScheduleRef.current)
-      due.forEach((preset) => fireTimedPresetRef.current(preset))
+      // Only mark a preset fired if it actually dispatched. A preset skipped because automatic smile
+      // synchrony is Live returns false and stays pending, so it fires once Live is turned off rather
+      // than being silently consumed and lost.
+      const firedIds = new Set<string>()
+      for (const preset of due) {
+        if (fireTimedPresetRef.current(preset)) firedIds.add(preset.id)
+      }
+      if (firedIds.size > 0) {
+        timedScheduleRef.current = timedScheduleRef.current.map((preset) =>
+          firedIds.has(preset.id) ? { ...preset, fired: true } : preset
+        )
+        setTimedSchedule(timedScheduleRef.current)
+      }
     }, 500)
     return () => window.clearInterval(id)
   }, [])
@@ -1181,6 +1271,10 @@ export default function App(): ReactElement {
 
   const signalBaseUrl = (): string => form.callSignalUrl.replace(/\/$/, '')
 
+  // Wall-clock time expressed in the signaling server's clock domain (see serverClockOffsetRef). Used
+  // only for cross-machine smile-cue timestamps/freshness, never for UI timers.
+  const serverNow = (): number => Date.now() + serverClockOffsetRef.current
+
   const callDisplayName = (): string => {
     const fallback = isController ? 'Experimenter' : 'Participant'
     return form.displayName.trim() || (isController && form.raId ? `Experimenter ${form.raId}` : fallback)
@@ -1243,10 +1337,21 @@ export default function App(): ReactElement {
   }
 
   const startSignalServer = async (): Promise<{ ok: boolean; localUrl: string; lanUrl: string }> => {
-    const result = await window.researchApi.startCallSignalServer(8765)
-    updateForm('callSignalUrl', result.localUrl)
-    addLog(`Call server running. Participants can use ${result.lanUrl}.`, 'success')
-    return result
+    try {
+      const result = await window.researchApi.startCallSignalServer(8765)
+      updateForm('callSignalUrl', result.localUrl)
+      addLog(`Call server running. Participants can use ${result.lanUrl}.`, 'success')
+      return result
+    } catch (error) {
+      // Surface a clear reason (e.g. port 8765 already held by a stale app instance) instead of
+      // letting the rejection bubble out of continueFromSetup as a silent unhandled rejection that
+      // makes the Continue button appear to do nothing.
+      addLog(
+        error instanceof Error ? error.message : 'Could not start the local call server (is port 8765 already in use?).',
+        'error'
+      )
+      return { ok: false, localUrl: '', lanUrl: '' }
+    }
   }
 
   const checkRoomStatus = useCallback(
@@ -1259,12 +1364,35 @@ export default function App(): ReactElement {
         return false
       }
 
+      const fetchRoom = async (timeoutMs: number): Promise<Response> => {
+        const controller = new AbortController()
+        const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+        try {
+          const url = new URL('/room', callSignalUrl.replace(/\/$/, ''))
+          url.searchParams.set('roomId', roomId.trim())
+          return await fetch(url, { signal: controller.signal })
+        } finally {
+          window.clearTimeout(timer)
+        }
+      }
+
       try {
-        const url = new URL('/room', callSignalUrl.replace(/\/$/, ''))
-        url.searchParams.set('roomId', roomId.trim())
-        const response = await fetch(url)
+        let response: Response
+        try {
+          response = await fetchRoom(6000)
+        } catch {
+          // The hosted (Render free-tier) signaling server sleeps when idle; the first request after a
+          // cold spell can take ~30-60s to wake. Retry once with a longer timeout and a clear message,
+          // instead of failing with a misleading "not reachable".
+          if (!quiet) addLog('Waking up the room server (the first connection can take up to a minute)…', 'info')
+          response = await fetchRoom(45000)
+        }
         if (!response.ok) throw new Error(`Room check failed with HTTP ${response.status}`)
-        const status = (await response.json()) as RoomPresence
+        const status = (await response.json()) as RoomPresence & { serverEpochMs?: number }
+        // Learn the server clock so cross-machine smile-cue freshness survives laptop clock skew.
+        if (typeof status.serverEpochMs === 'number') {
+          serverClockOffsetRef.current = status.serverEpochMs - Date.now()
+        }
         setRoomPresence(status)
         if (!quiet) {
           addLog(
@@ -1333,12 +1461,26 @@ export default function App(): ReactElement {
     (payload: DirectorPayload): void => {
       if (!form.roomId.trim() || !form.callSignalUrl.trim() || !callEventsRef.current) return
 
+      // An authoritative smile-alpha change (a live-control smileAlpha, or any cue-response that
+      // drives the participant's alpha) supersedes a still-pending throttled slider send of the same
+      // control: cancel it, or a stale drag value could POST ~120 ms later and clobber the newer
+      // value on the participant's Mozza + the recorded stream. (The throttle's own settled send
+      // already deleted its entry before reaching here, so this is a no-op for that legitimate send.)
+      const affectsSmileAlpha =
+        (payload.kind === 'live-control' && payload.key === 'smileAlpha') || payload.kind === 'cue-response'
+      if (affectsSmileAlpha) {
+        const pendingAlpha = controlSendThrottleRef.current.get('smileAlpha')
+        if (pendingAlpha?.timer != null) window.clearTimeout(pendingAlpha.timer)
+        controlSendThrottleRef.current.delete('smileAlpha')
+      }
+
       fetch(`${signalBaseUrl()}/director-control`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           roomId: form.roomId,
           from: callUserIdRef.current,
+          connectionId: connectionIdRef.current,
           type: 'live-control',
           role: form.role,
           displayName: callDisplayName(),
@@ -1397,7 +1539,7 @@ export default function App(): ReactElement {
         const rampMs = typeof message.rampMs === 'number' ? message.rampMs : 300
         const returnMs = typeof message.returnMs === 'number' ? message.returnMs : 300
         const smileType = typeof message.smileType === 'string' ? message.smileType : ''
-        const applyCueAlpha = (nextAlpha: number, transitionMs: number): void => {
+        const applyCueAlpha = (nextAlpha: number, transitionMs: number, nextMode: 'reactive' | 'aligned'): void => {
           const player = duckSoupPlayerRef.current
           if (player && duckSoupActiveRef.current) {
             player.controlFx(MOZZA_FX_NAME, 'alpha', nextAlpha, transitionMs)
@@ -1414,7 +1556,7 @@ export default function App(): ReactElement {
             }
           }
           setControls((prev) => {
-            const next = { ...prev, synchronyMode: 'reactive' as const, smileAlpha: nextAlpha }
+            const next = { ...prev, synchronyMode: nextMode, smileAlpha: nextAlpha }
             controlsRef.current = next
             return next
           })
@@ -1424,28 +1566,38 @@ export default function App(): ReactElement {
           window.clearTimeout(manualCueReturnTimerRef.current)
           manualCueReturnTimerRef.current = null
         }
-        applyCueAlpha(alpha, rampMs)
+        applyCueAlpha(alpha, rampMs, smileType === 'baseline' ? 'aligned' : 'reactive')
         appendControlEvent(
           smileType ? 'smileTypePreset' : 'cueResponse',
           alpha,
           `${sender}: ${message.label || message.cue || 'behavioral cue'}; smileType=${smileType || 'manual-cue'}; ramp=${rampMs}ms; hold=${durationMs}ms; return=${returnMs}ms to ${returnAlpha}.`
         )
         addLog(`${sender} triggered ${message.label || 'a synchrony cue response'}.`, 'info')
+        // Hold the peak for the configured durationMs AFTER the ramp completes (not from ramp start),
+        // so the actual hold matches the logged hold=... value instead of being rampMs shorter.
         manualCueReturnTimerRef.current = window.setTimeout(() => {
           manualCueReturnTimerRef.current = null
-          applyCueAlpha(returnAlpha, returnMs)
+          applyCueAlpha(returnAlpha, returnMs, 'aligned')
           appendControlEvent(
             smileType ? 'smileTypePresetReturn' : 'cueResponseReturn',
             returnAlpha,
             `${smileType || 'Reactive cue'} response returned to baseline over ${returnMs}ms.`
           )
-        }, durationMs)
+        }, rampMs + durationMs)
         return
       }
 
       const update = message as { key?: keyof ManipulationControls; value?: unknown }
       if (!update.key || !(update.key in initialControls)) return
       if (update.key === 'partnerVolume') return
+
+      // A live smile-alpha (manual slider or a timed smile-alpha event) supersedes any smile-type
+      // preset still holding: cancel its pending return so it doesn't later slam alpha back to 0 and
+      // discard this value. Fixes overlapping timed presets + hand-dragging right after a preset.
+      if (update.key === 'smileAlpha' && manualCueReturnTimerRef.current !== null) {
+        window.clearTimeout(manualCueReturnTimerRef.current)
+        manualCueReturnTimerRef.current = null
+      }
 
       setControls((prev) => {
         const next = { ...prev, [update.key!]: update.value as never }
@@ -1656,7 +1808,7 @@ export default function App(): ReactElement {
       const sourcePeer = callPeersRef.current.find(
         (peer) => peer.userId === cue.sourceUserId && peer.role === 'participant'
       )
-      const ageMs = Date.now() - cue.observedAtEpochMs
+      const ageMs = serverNow() - cue.observedAtEpochMs
       const localDetectorSnapshot = smileDetectorRef.current?.snapshot(performance.now())
       const localFaceReady =
         Boolean(localDetectorSnapshot?.facePresent) &&
@@ -1731,7 +1883,7 @@ export default function App(): ReactElement {
         cueSourceUserId: cue.sourceUserId,
         senderUserId,
         sourceIsParticipant: Boolean(sourcePeer),
-        ageMs: Date.now() - cue.observedAtEpochMs,
+        ageMs: serverNow() - cue.observedAtEpochMs,
         maxAgeMs: SMILE_CUE_MAX_AGE_MS,
         duplicate: processedSmileOffsetIdsRef.current.has(cue.eventId),
         activeEventId: active?.eventId ?? '',
@@ -1827,7 +1979,9 @@ export default function App(): ReactElement {
       }
 
       if (event.kind === 'face-lost') {
-        returnAutomaticSmileToNeutral('Local target face left the valid tracking area.')
+        // Local face loss only affects THIS station's OUTGOING detection (below). It must NOT tear down
+        // the incoming partner-driven smile envelope — that is governed by the partner's offset / the
+        // watchdog. Clearing it here made the received smile flicker to neutral on a brief look-away.
         const eventId = activeLocalSmileEventIdRef.current
         if (eventId && target) {
           const cancelAfterOnset = async (): Promise<void> => {
@@ -1856,7 +2010,7 @@ export default function App(): ReactElement {
           sourceParticipantId: currentForm.participantId,
           targetUserId: target?.userId ?? '',
           observedAtIso: new Date().toISOString(),
-          observedAtEpochMs: Date.now(),
+          observedAtEpochMs: serverNow(),
           observedAtMonotonicMs: event.timestampMs,
           rawSmile: event.rawSmile,
           normalizedSmile: event.normalizedSmile,
@@ -1920,7 +2074,7 @@ export default function App(): ReactElement {
         sourceParticipantId: currentForm.participantId,
         targetUserId: target?.userId ?? '',
         observedAtIso: new Date().toISOString(),
-        observedAtEpochMs: Date.now(),
+        observedAtEpochMs: serverNow(),
         observedAtMonotonicMs: event.timestampMs,
         rawSmile: event.rawSmile,
         normalizedSmile: event.normalizedSmile,
@@ -2017,7 +2171,6 @@ export default function App(): ReactElement {
     smileDetectorRef.current = detector
     smileDetectorVideoRef.current = video
     smileDetectorStreamRef.current = stream
-    detector.startCalibration(performance.now())
     setSmileDetectorSnapshot(detector.snapshot(performance.now()))
 
     try {
@@ -2030,6 +2183,12 @@ export default function App(): ReactElement {
       ) {
         return
       }
+
+      // Start the neutral-calibration clock only now that the model is loaded and the camera is
+      // playing. Starting it before the first cold model load (~13MB wasm + 3.7MB model) could let the
+      // 8s neutral window elapse before enough frames were ingested, failing the first calibration.
+      detector.startCalibration(performance.now())
+      setSmileDetectorSnapshot(detector.snapshot(performance.now()))
 
       let lastSnapshotAt = 0
       smileDetectorTimerRef.current = window.setInterval(() => {
@@ -2217,6 +2376,18 @@ export default function App(): ReactElement {
       if (prev.some((item) => item.id === message.id)) return prev
       return [...prev, message].slice(-200)
     })
+    // Notify on an incoming message from someone else: chime, and if the chat panel is scrolled out of
+    // view bring it on-screen (chat isn't always visible during a call).
+    if (message.from !== callUserIdRef.current) {
+      playNoticeTone()
+      const panel = chatPanelRef.current
+      if (panel) {
+        const rect = panel.getBoundingClientRect()
+        if (rect.top < 0 || rect.bottom > window.innerHeight) {
+          panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+        }
+      }
+    }
   }
 
   // --- Experimenter 4-view monitor (separate WebRTC channel, DuckSoup mode) ----------------
@@ -2367,6 +2538,10 @@ export default function App(): ReactElement {
     const envelope = JSON.parse(event.data) as SignalEnvelope
 
     if (envelope.type === 'hello' || envelope.type === 'peer-list') {
+      if (envelope.type === 'hello') {
+        const serverEpochMs = (envelope.payload as { serverEpochMs?: number } | undefined)?.serverEpochMs
+        if (typeof serverEpochMs === 'number') serverClockOffsetRef.current = serverEpochMs - Date.now()
+      }
       const peers = envelope.payload?.peers ?? []
       const mediaPeers = peers.filter((peer) => peer.userId !== callUserIdRef.current && peer.role === 'participant')
       setCallPeers(peers)
@@ -2386,21 +2561,29 @@ export default function App(): ReactElement {
       // A participant may join after the experimenter selected Detect or Live. Send the
       // current automatic-session state directly so late joiners never silently stay Off.
       if (isController && joinedPeer.role === 'participant') {
+        // Re-push the current manipulation state to a joining OR reconnecting participant, so a station
+        // that dropped and came back resyncs its Mozza pipeline. SSE has no replay, so any cue sent
+        // during the reconnect gap is otherwise lost. Automatic mode owns smileAlpha in Live, so send 0.
         window.setTimeout(() => {
-          sendDirectorPayload({
-            kind: 'live-control',
-            key: 'automaticSmileOnsetMode',
-            value: controlsRef.current.automaticSmileOnsetMode,
-            targetUserId: joinedPeer.userId,
-            label: 'Current automatic smile synchrony mode'
-          })
-          sendDirectorPayload({
-            kind: 'live-control',
-            key: 'smileAlpha',
-            value: 0,
-            targetUserId: joinedPeer.userId,
-            label: 'Automatic smile synchrony neutral baseline'
-          })
+          const current = controlsRef.current
+          const live = current.automaticSmileOnsetMode === 'live'
+          const snapshot: Array<[keyof ManipulationControls, ManipulationControls[keyof ManipulationControls]]> = [
+            ['automaticSmileOnsetMode', current.automaticSmileOnsetMode],
+            ['synchronyMode', current.synchronyMode],
+            ['smileAlpha', live ? 0 : current.smileAlpha],
+            ['faceThreshold', current.faceThreshold],
+            ['landmarkBeta', current.landmarkBeta],
+            ['smoothingCutoff', current.smoothingCutoff]
+          ]
+          for (const [key, value] of snapshot) {
+            sendDirectorPayload({
+              kind: 'live-control',
+              key,
+              value,
+              targetUserId: joinedPeer.userId,
+              label: 'Resync current session state'
+            })
+          }
         }, 250)
       }
       return
@@ -2409,6 +2592,11 @@ export default function App(): ReactElement {
     if (envelope.type === 'peer-left') {
       const userId = envelope.payload?.userId || envelope.payload?.from || envelope.payload?.peer?.userId
       if (userId) {
+        // A participant dropping ends the DuckSoup interaction; if they rejoin, DuckSoup starts a new
+        // recording (video t=0 resets). Re-arm the controller's anchor so the log re-aligns to the new
+        // recording window instead of staying pinned to the original t=0.
+        const leaver = callPeersRef.current.find((peer) => peer.userId === userId)
+        if (isController && leaver?.role === 'participant') recordingReanchoredRef.current = false
         if (activeSmileEnvelopeRef.current?.sourceUserId === userId) {
           returnAutomaticSmileToNeutral('Source participant left the room.')
         }
@@ -2634,6 +2822,9 @@ export default function App(): ReactElement {
     if (!isController || sessionSavedRef.current) return
     sessionSavedRef.current = true
     setRecordingState('saving')
+    // Tell the main process a save is in flight so closing the window / quitting waits for it to finish
+    // instead of truncating half-written manifests, CSVs, and the in-progress video copy.
+    window.researchApi.setSavingState(true)
     try {
       const { sessionDir: createdDir } = await window.researchApi.createSessionDirectory(form)
       setSessionDir(createdDir)
@@ -2645,7 +2836,14 @@ export default function App(): ReactElement {
       try {
         // DuckSoup finishes muxing each .mp4 a moment after the interaction ends, so retry a few times.
         for (let attempt = 0; attempt < 4; attempt += 1) {
-          const result = await window.researchApi.collectDuckSoupRecordings({ destDir: createdDir, namespace, interaction })
+          const result = await window.researchApi.collectDuckSoupRecordings({
+            destDir: createdDir,
+            namespace,
+            interaction,
+            // Only copy files from THIS interaction's recording window, so a rejoined room's older
+            // -dry/-wet attempts aren't bundled into the session folder.
+            sinceEpochMs: recordingStartRef.current ?? undefined
+          })
           copied = result.copied
           copiedPaths = result.copiedPaths
           serverDataDir = result.dataDir
@@ -2784,6 +2982,7 @@ export default function App(): ReactElement {
       addLog(error instanceof Error ? error.message : 'Could not finalize the session files.', 'error')
     } finally {
       setRecordingState('idle')
+      window.researchApi.setSavingState(false)
     }
   }, [addLog, form, participantPeers, isController])
 
@@ -2921,6 +3120,7 @@ export default function App(): ReactElement {
             }
             duckSoupActiveRef.current = false
             setCallState('error')
+            setCallErrorMessage('The video connection dropped. Press Rejoin to reconnect.')
           }
           break
         default:
@@ -2946,6 +3146,7 @@ export default function App(): ReactElement {
             }
             duckSoupActiveRef.current = false
             setCallState('error')
+            setCallErrorMessage(detail)
           }
       }
     },
@@ -3015,6 +3216,7 @@ export default function App(): ReactElement {
 
     inCallRef.current = true
     setCallState('starting')
+    setCallErrorMessage('')
     setInteractionCapReached(false)
     smileOnsetAuditEventsRef.current = []
     setSmileOnsetAuditEvents([])
@@ -3067,9 +3269,13 @@ export default function App(): ReactElement {
         return
       }
 
+      // A fresh per-connection id so a stale /leave from a prior connection can't kick this one.
+      const connectionId = `${callUserIdRef.current}-${makeId()}`
+      connectionIdRef.current = connectionId
       const params = new URLSearchParams({
         roomId: form.roomId,
         userId: callUserIdRef.current,
+        connectionId,
         role: form.role,
         displayName: callDisplayName(),
         participantId: form.participantId
@@ -3079,6 +3285,7 @@ export default function App(): ReactElement {
       events.onopen = () => {
         if (eventSourceErrorAtRef.current > 0) addLog('Room connection restored.', 'success')
         eventSourceErrorAtRef.current = 0
+        setCallErrorMessage('')
         setCallState((prev) => (prev === 'starting' || prev === 'error' ? 'waiting' : prev))
       }
       events.onmessage = (message) => {
@@ -3090,6 +3297,7 @@ export default function App(): ReactElement {
         const now = Date.now()
         if (events.readyState === EventSource.CLOSED) {
           setCallState('error')
+          setCallErrorMessage('Lost the connection to the session. Ask the experimenter to check the room, then press Rejoin.')
           addLog('Room connection closed. Check the server URL and make sure the host app is still open.', 'error')
           return
         }
@@ -3112,6 +3320,11 @@ export default function App(): ReactElement {
       addLog(`${callDisplayName()} joined ${form.roomId}.`, 'success')
     } catch (error) {
       setCallState('error')
+      setCallErrorMessage(
+        error instanceof Error
+          ? error.message
+          : 'Could not connect. Check with the experimenter that the media server is running.'
+      )
       addLog(error instanceof Error ? error.message : 'Could not join the room.', 'error')
     }
   }
@@ -3135,6 +3348,15 @@ export default function App(): ReactElement {
       window.clearTimeout(manualCueReturnTimerRef.current)
       manualCueReturnTimerRef.current = null
     }
+    if (experimenterDisplayTimerRef.current !== null) {
+      window.clearTimeout(experimenterDisplayTimerRef.current)
+      experimenterDisplayTimerRef.current = null
+    }
+    for (const entry of controlSendThrottleRef.current.values()) {
+      if (entry.timer != null) window.clearTimeout(entry.timer)
+    }
+    controlSendThrottleRef.current.clear()
+    timedSkipWarnedRef.current.clear()
     pendingMozzaControlsRef.current = null
     appliedMozzaControlsRef.current = null
     if (duckSoupActiveRef.current) {
@@ -3161,6 +3383,7 @@ export default function App(): ReactElement {
         body: JSON.stringify({
           roomId: form.roomId,
           from: callUserIdRef.current,
+          connectionId: connectionIdRef.current,
           role: form.role,
           displayName: callDisplayName()
         })
@@ -3201,6 +3424,17 @@ export default function App(): ReactElement {
   }
   leaveLiveCallRef.current = leaveLiveCall
 
+  // The prominent red "Leave room" button must not silently discard the session. For the experimenter
+  // (the authoritative saver) run the same finalize path as Conclude / Back-to-setup first, so the
+  // event log, manipulation_events.csv, chat, and manifests are written before teardown.
+  const leaveRoom = async (): Promise<void> => {
+    if (isController && recordingState === 'recording' && !sessionSavedRef.current) {
+      addLog('Saving the session before leaving the room.', 'warn')
+      await finalizeDuckSoupSession()
+    }
+    leaveLiveCall()
+  }
+
   const returnToSetup = async (): Promise<void> => {
     // The experimenter is the authoritative saver. Back to setup should still work, but it must
     // first run the same finalization path as Conclude so active-session data is not discarded.
@@ -3215,6 +3449,7 @@ export default function App(): ReactElement {
     setControlEvents([])
     controlEventsRef.current = []
     setTimedSchedule([])
+    timedSkipWarnedRef.current.clear()
     updateForm('targetUserId', '')
     setSetupComplete(false)
     addLog('Returned to setup.', 'info')
@@ -3238,6 +3473,40 @@ export default function App(): ReactElement {
     }
 
     setControls((prev) => ({ ...prev, [key]: value }))
+
+    // Continuous sliders fire onChange on every drag tick. Keep the local UI live, but coalesce the
+    // outgoing /director-control POST + manipulation_events.csv row + log to one settled event per drag
+    // (the receiver already coalesces its Mozza writes). Discrete controls send immediately.
+    const continuousControlKeys: Array<keyof ManipulationControls> = [
+      'smileAlpha',
+      'faceThreshold',
+      'landmarkBeta',
+      'smoothingCutoff',
+      'suppressSmileAlpha',
+      'reactivePulseMs'
+    ]
+    if (continuousControlKeys.includes(key)) {
+      // A manual Smile Alpha change supersedes a pending smile-type preset display reset, so the
+      // experimenter's readout doesn't snap back to 0 while they're setting a value by hand.
+      if (key === 'smileAlpha' && experimenterDisplayTimerRef.current !== null) {
+        window.clearTimeout(experimenterDisplayTimerRef.current)
+        experimenterDisplayTimerRef.current = null
+      }
+      const existing = controlSendThrottleRef.current.get(key)
+      if (existing?.timer != null) window.clearTimeout(existing.timer)
+      const label = controlTargetLabel
+      const timer = window.setTimeout(() => {
+        const settled = controlSendThrottleRef.current.get(key)
+        controlSendThrottleRef.current.delete(key)
+        if (!settled) return
+        appendControlEvent(String(key), settled.latest.value, settled.latest.notes || `Applied to ${label}.`)
+        broadcastLiveControl(key, settled.latest.value, settled.latest.notes)
+        addLog(`${String(key)} = ${settled.latest.value} sent to ${label}.`, 'info')
+      }, 120)
+      controlSendThrottleRef.current.set(key, { timer, latest: { value, notes } })
+      return
+    }
+
     appendControlEvent(String(key), value, notes || `Applied to ${controlTargetLabel}.`)
     broadcastLiveControl(key, value)
     addLog(`${String(key)} = ${value} sent to ${controlTargetLabel}.`, 'info')
@@ -3245,17 +3514,21 @@ export default function App(): ReactElement {
 
   // Keep the timed-preset firing function pointed at the latest control closures.
   useEffect(() => {
-    fireTimedPresetRef.current = (preset: TimedPreset): void => {
-      // Automatic smile synchrony owns the smile alpha in Live mode; a scheduled change would fight
-      // it. Skip and warn — the preset is still consumed by the scheduler, so it won't retry every
-      // tick and spam the log.
+    fireTimedPresetRef.current = (preset: TimedPreset): boolean => {
+      // Automatic smile synchrony owns the smile alpha in Live mode; a scheduled change would fight it.
+      // Leave the preset PENDING (return false) so it fires once Live is turned off, and warn only once
+      // per preset so the 500ms scheduler doesn't spam the log while it waits.
       if (controlsRef.current.automaticSmileOnsetMode === 'live') {
-        addLog(
-          `Timed preset at ${secondsToMmSs(preset.atSeconds)} skipped — turn off automatic smile synchrony to run scheduled smile-alpha changes.`,
-          'warn'
-        )
-        return
+        if (!timedSkipWarnedRef.current.has(preset.id)) {
+          timedSkipWarnedRef.current.add(preset.id)
+          addLog(
+            `Timed preset at ${secondsToMmSs(preset.atSeconds)} is waiting — it will run when automatic smile synchrony is turned off.`,
+            'warn'
+          )
+        }
+        return false
       }
+      timedSkipWarnedRef.current.delete(preset.id)
       if (preset.kind === 'smile-type') {
         const smileType = preset.smileType ?? 'baseline'
         const selected = smileTypePresets.find((candidate) => candidate.id === smileType)
@@ -3291,7 +3564,16 @@ export default function App(): ReactElement {
           `Timed preset: ${preset.label} → ${preset.targetLabel} at ${secondsToMmSs(preset.atSeconds)}.`,
           'info'
         )
-        return
+        // Experimenter display-only: snap the local Smile Alpha readout back to neutral after the
+        // envelope so it doesn't look stuck at the preset value (the experimenter owns no Mozza player).
+        if (smileType !== 'baseline') {
+          if (experimenterDisplayTimerRef.current !== null) window.clearTimeout(experimenterDisplayTimerRef.current)
+          experimenterDisplayTimerRef.current = window.setTimeout(() => {
+            experimenterDisplayTimerRef.current = null
+            setControls((prev) => ({ ...prev, smileAlpha: 0, synchronyMode: 'aligned' }))
+          }, rampMs + durationMs + returnMs + 100)
+        }
+        return true
       }
 
       const smileAlpha = preset.smileAlpha ?? 0
@@ -3307,6 +3589,7 @@ export default function App(): ReactElement {
       )
       broadcastLiveControl('smileAlpha', smileAlpha, `Timed preset ${secondsToMmSs(preset.atSeconds)}`, preset.targetUserId)
       addLog(`Timed preset: smile alpha ${smileAlpha} → ${preset.targetLabel} at ${secondsToMmSs(preset.atSeconds)}.`, 'info')
+      return true
     }
   })
 
@@ -3408,6 +3691,13 @@ export default function App(): ReactElement {
       label: `${preset.label} preset`
     })
     addLog(`${preset.label} preset sent to ${targetLabel}.`, 'info')
+    // Experimenter display-only: snap the local Smile Alpha readout back to neutral after the envelope
+    // so it doesn't look stuck at the preset value (the experimenter owns no Mozza player).
+    if (experimenterDisplayTimerRef.current !== null) window.clearTimeout(experimenterDisplayTimerRef.current)
+    experimenterDisplayTimerRef.current = window.setTimeout(() => {
+      experimenterDisplayTimerRef.current = null
+      setControls((prev) => ({ ...prev, smileAlpha: 0, synchronyMode: 'aligned' }))
+    }, preset.rampMs + preset.durationMs + preset.returnMs + 100)
   }
 
   const returnSmileTypePresetToBaseline = (): void => {
@@ -3696,6 +3986,16 @@ export default function App(): ReactElement {
     let nextRoomId = form.roomId
     let nextSignalUrl = form.callSignalUrl
 
+    // Participants must load the experimenter's session link. Without it they would silently join their
+    // own empty room on their own localhost and wait forever while the experimenter shows 0/2.
+    if (!isController && !appliedSessionLinkInput.trim()) {
+      setSessionLinkNotice('Paste the session link from the experimenter and click Use before continuing.')
+      playNoticeTone()
+      sessionLinkSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      addLog('A session link is required to join. Paste it and click Use.', 'error')
+      return
+    }
+
     if (!isController && sessionLinkInput.trim()) {
       if (sessionLinkInput.trim() !== appliedSessionLinkInput) {
         setSessionLinkNotice('Click Use to load this session link before continuing.')
@@ -3732,6 +4032,42 @@ export default function App(): ReactElement {
       } else {
         const reachable = await checkRoomStatus(false, { roomId: nextRoomId, callSignalUrl: nextSignalUrl })
         if (!reachable) return
+      }
+
+      // Verify the media/effects server is reachable before starting a session. The experimenter owns
+      // no media player, so a wrong/unreachable media address would otherwise only surface as every
+      // participant silently failing to connect. Catch it here, at setup, where it can be fixed.
+      if (form.mediaTransport === 'ducksoup') {
+        const mediaUrl = normalizeMediaUrl(form.duckSoupUrl)
+        if (!mediaUrl) {
+          addLog('Enter the media server address (for example http://192.168.1.50:8100) before continuing.', 'error')
+          return
+        }
+        if (mediaUrl !== form.duckSoupUrl) updateForm('duckSoupUrl', mediaUrl)
+        const mediaCheck = await window.researchApi.checkDuckSoup(mediaUrl)
+        if (!mediaCheck.ok) {
+          addLog(
+            `Media server not reachable at ${mediaUrl}${mediaCheck.detail ? ` (${mediaCheck.detail})` : ''}. Start Docker/Mozza on that computer or fix the address before continuing.`,
+            'error'
+          )
+          return
+        }
+        addLog(`Media server reachable at ${mediaUrl}.`, 'success')
+        // Reachable from the experimenter's machine is necessary but not sufficient: localhost only
+        // works if every participant runs on THIS computer. Warn (don't block — single-machine
+        // testing legitimately uses localhost) so a multi-computer session isn't shipped a link that
+        // points each participant at their own empty localhost.
+        try {
+          const mediaHost = new URL(mediaUrl).hostname
+          if (['localhost', '127.0.0.1', '0.0.0.0'].includes(mediaHost)) {
+            addLog(
+              'Media server is set to localhost — that only works if every participant runs on THIS computer. For a multi-computer lab session, set the media server to this machine’s LAN address (e.g. http://192.168.1.50:8100) before copying the link.',
+              'warn'
+            )
+          }
+        } catch {
+          // mediaUrl was already validated by normalizeMediaUrl + the probe above.
+        }
       }
     }
 
@@ -3989,7 +4325,11 @@ export default function App(): ReactElement {
                     <input
                       value={form.duckSoupUrl}
                       onChange={(event) => updateForm('duckSoupUrl', event.target.value)}
-                      placeholder="http://localhost:8100"
+                      onBlur={(event) => {
+                        const normalized = normalizeMediaUrl(event.target.value)
+                        if (normalized && normalized !== event.target.value.trim()) updateForm('duckSoupUrl', normalized)
+                      }}
+                      placeholder="http://192.168.x.x:8100"
                     />
                   </label>
                 </div>
@@ -4020,7 +4360,7 @@ export default function App(): ReactElement {
               {callState === 'error' ? 'Rejoin' : 'Join room'}
             </button>
           ) : (
-            <button className="danger leave-button" onClick={leaveLiveCall}>
+            <button className="danger leave-button" onClick={() => void leaveRoom()}>
               Leave room
             </button>
           )}
@@ -4261,6 +4601,9 @@ export default function App(): ReactElement {
                       {smileDetectorSnapshot.phase === 'face-missing' && (
                         <span>Camera calibration paused. Center your full face in the camera.</span>
                       )}
+                      {smileDetectorSnapshot.phase === 'idle' && (
+                        <span>Starting camera calibration…</span>
+                      )}
                       {smileDetectorSnapshot.phase === 'failed' && (
                         <>
                           <span>{smileDetectorSnapshot.calibrationFailure}</span>
@@ -4271,6 +4614,27 @@ export default function App(): ReactElement {
                       )}
                     </div>
                   )}
+                {!isController && callState === 'error' && callErrorMessage && (
+                  <div
+                    style={{
+                      margin: '0 0 12px',
+                      padding: '12px 16px',
+                      borderRadius: 10,
+                      background: 'rgba(220, 38, 38, 0.15)',
+                      border: '1px solid rgba(248, 113, 113, 0.6)',
+                      color: '#fecaca',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 12
+                    }}
+                  >
+                    <span>{callErrorMessage}</span>
+                    <button className="secondary" onClick={joinLiveCall}>
+                      Rejoin
+                    </button>
+                  </div>
+                )}
                 <div className="participant-stage">
                   {remoteTiles.length > 0 ? (
                     <RemoteVideoCard
