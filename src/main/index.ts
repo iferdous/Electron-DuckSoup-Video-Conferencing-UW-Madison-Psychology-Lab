@@ -822,15 +822,23 @@ app.whenReady().then(() => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 5000)
     try {
-      const url = new URL('/test/mirror/', baseUrl)
-      const response = await fetch(url, { method: 'GET', signal: controller.signal })
-      const reachable = response.ok || response.status === 401
+      const mirrorUrl = new URL('/test/mirror/', baseUrl)
+      const scriptUrl = new URL('/assets/v1.93/js/ducksoup.js', baseUrl)
+      const [mirrorResponse, scriptResponse] = await Promise.all([
+        fetch(mirrorUrl, { method: 'GET', signal: controller.signal }),
+        fetch(scriptUrl, { method: 'GET', signal: controller.signal })
+      ])
+      const mirrorReachable = mirrorResponse.ok || mirrorResponse.status === 401
+      const scriptReachable = scriptResponse.ok || scriptResponse.status === 401
+      const reachable = mirrorReachable && scriptReachable
       return {
         ok: reachable,
-        status: response.status,
+        status: reachable ? 200 : scriptResponse.status || mirrorResponse.status,
         detail: reachable
-          ? 'Local media server is reachable.'
-          : `HTTP ${response.status}`
+          ? 'DuckSoup/Mozza media server is reachable.'
+          : !mirrorReachable
+            ? `DuckSoup mirror page did not respond correctly (HTTP ${mirrorResponse.status}).`
+            : `DuckSoup client asset is missing or blocked (HTTP ${scriptResponse.status}).`
       }
     } catch (error) {
       const aborted = error instanceof Error && error.name === 'AbortError'

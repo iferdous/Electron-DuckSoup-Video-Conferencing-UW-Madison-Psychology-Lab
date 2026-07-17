@@ -6,6 +6,7 @@ import {
   applyMozzaControls,
   buildMozzaVideoFx,
   buildAudioFx,
+  duckSoupScriptUrl,
   MOZZA_FX_NAME,
   MOZZA_AUDIO_FX_NAME,
   type DuckSoupPlayer,
@@ -471,6 +472,17 @@ const applyMediaElementVolume = (video: HTMLVideoElement, value: number): void =
   }
 }
 
+const readableJoinError = (error: unknown): string => {
+  if (!(error instanceof Error)) return 'Could not connect. Check with the experimenter that the media server is running.'
+  if (error.name === 'NotFoundError' || /requested device not found|no device/i.test(error.message)) {
+    return 'No camera or microphone was found. Connect the webcam/mic, allow access, then press Rejoin.'
+  }
+  if (error.name === 'NotAllowedError' || /permission|denied/i.test(error.message)) {
+    return 'Camera or microphone permission was blocked. Allow access in system/browser settings, then press Rejoin.'
+  }
+  return error.message
+}
+
 const csvEscape = (value: unknown): string => {
   const text = value == null ? '' : String(value)
   return /[",\n\r]/.test(text) ? `"${text.replace(/\r?\n|\r/g, ' ').replace(/"/g, '""')}"` : text
@@ -871,6 +883,8 @@ export default function App(): ReactElement {
   const [sessionLinkInput, setSessionLinkInput] = useState('')
   const [appliedSessionLinkInput, setAppliedSessionLinkInput] = useState('')
   const [sessionLinkNotice, setSessionLinkNotice] = useState('')
+  const [setupErrorMessage, setSetupErrorMessage] = useState('')
+  const [setupChecking, setSetupChecking] = useState(false)
   const [experimenterLoginOpen, setExperimenterLoginOpen] = useState(false)
   const [experimenterCredentials, setExperimenterCredentials] = useState({ username: '', password: '' })
   const [experimenterLoginError, setExperimenterLoginError] = useState('')
@@ -1416,6 +1430,31 @@ export default function App(): ReactElement {
     },
     [addLog, form.callSignalUrl, form.roomId]
   )
+
+  const checkMediaServerReady = async (
+    rawUrl: string
+  ): Promise<{ ok: boolean; url: string; detail: string }> => {
+    const mediaUrl = normalizeMediaUrl(rawUrl)
+    if (!mediaUrl) {
+      return {
+        ok: false,
+        url: '',
+        detail: 'Enter a valid DuckSoup/Mozza media server address, such as http://192.168.1.50:8100.'
+      }
+    }
+
+    const mediaCheck = await window.researchApi.checkDuckSoup(mediaUrl)
+    if (!mediaCheck.ok) {
+      return {
+        ok: false,
+        url: mediaUrl,
+        detail:
+          `${mediaCheck.detail || 'The media server is not reachable.'} Expected DuckSoup client: ${duckSoupScriptUrl(mediaUrl)}`
+      }
+    }
+
+    return { ok: true, url: mediaUrl, detail: mediaCheck.detail || 'DuckSoup/Mozza media server is ready.' }
+  }
 
   useEffect(() => {
     if (!setupComplete || !form.callSignalUrl.trim() || !form.roomId.trim()) return undefined
@@ -3319,13 +3358,10 @@ export default function App(): ReactElement {
       }
       addLog(`${callDisplayName()} joined ${form.roomId}.`, 'success')
     } catch (error) {
+      const message = readableJoinError(error)
       setCallState('error')
-      setCallErrorMessage(
-        error instanceof Error
-          ? error.message
-          : 'Could not connect. Check with the experimenter that the media server is running.'
-      )
-      addLog(error instanceof Error ? error.message : 'Could not join the room.', 'error')
+      setCallErrorMessage(message)
+      addLog(message, 'error')
     }
   }
 
@@ -3983,82 +4019,79 @@ export default function App(): ReactElement {
   }
 
   const continueFromSetup = async (): Promise<void> => {
+    if (setupChecking) return
+    setSetupChecking(true)
+    setSetupErrorMessage('')
     let nextRoomId = form.roomId
     let nextSignalUrl = form.callSignalUrl
+    let nextMediaTransport = form.mediaTransport
+    let nextDuckSoupUrl = form.duckSoupUrl
 
-    // Participants must load the experimenter's session link. Without it they would silently join their
-    // own empty room on their own localhost and wait forever while the experimenter shows 0/2.
-    if (!isController && !appliedSessionLinkInput.trim()) {
-      setSessionLinkNotice('Paste the session link from the experimenter and click Use before continuing.')
-      playNoticeTone()
-      sessionLinkSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      addLog('A session link is required to join. Paste it and click Use.', 'error')
-      return
-    }
-
-    if (!isController && sessionLinkInput.trim()) {
-      if (sessionLinkInput.trim() !== appliedSessionLinkInput) {
-        setSessionLinkNotice('Click Use to load this session link before continuing.')
+    try {
+      // Participants must load the experimenter's session link. Without it they would silently join their
+      // own empty room on their own localhost and wait forever while the experimenter shows 0/2.
+      if (!isController && !appliedSessionLinkInput.trim()) {
+        setSessionLinkNotice('Paste the session link from the experimenter and click Use before continuing.')
         playNoticeTone()
         sessionLinkSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-        addLog('Click Use to load the pasted session link before continuing.', 'error')
+        addLog('A session link is required to join. Paste it and click Use.', 'error')
         return
       }
 
-      try {
+      if (!isController && sessionLinkInput.trim()) {
+        if (sessionLinkInput.trim() !== appliedSessionLinkInput) {
+          setSessionLinkNotice('Click Use to load this session link before continuing.')
+          playNoticeTone()
+          sessionLinkSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          addLog('Click Use to load the pasted session link before continuing.', 'error')
+          return
+        }
+
         const parsed = parseSessionLink(sessionLinkInput)
         nextRoomId = parsed.roomId
         nextSignalUrl = parsed.callSignalUrl
+        nextMediaTransport = parsed.mediaTransport ?? nextMediaTransport
+        nextDuckSoupUrl = parsed.duckSoupUrl ?? nextDuckSoupUrl
         setForm((prev) => ({ ...prev, ...parsed }))
-      } catch (error) {
-        addLog(error instanceof Error ? error.message : 'Could not read that session link.', 'error')
+      }
+
+      if (!nextRoomId.trim()) {
+        addLog('Create or enter a meeting ID before continuing.', 'error')
         return
       }
-    }
-
-    if (!nextRoomId.trim()) {
-      addLog('Create or enter a meeting ID before continuing.', 'error')
-      return
-    }
-    if (!nextSignalUrl.trim()) {
-      addLog('Enter a session link before continuing.', 'error')
-      return
-    }
-
-    if (isController) {
-      if (isLocalSignalUrl(nextSignalUrl)) {
-        const result = await startSignalServer()
-        if (!result.ok) return
-      } else {
-        const reachable = await checkRoomStatus(false, { roomId: nextRoomId, callSignalUrl: nextSignalUrl })
-        if (!reachable) return
+      if (!nextSignalUrl.trim()) {
+        addLog('Enter a session link before continuing.', 'error')
+        return
       }
 
-      // Verify the media/effects server is reachable before starting a session. The experimenter owns
-      // no media player, so a wrong/unreachable media address would otherwise only surface as every
-      // participant silently failing to connect. Catch it here, at setup, where it can be fixed.
-      if (form.mediaTransport === 'ducksoup') {
-        const mediaUrl = normalizeMediaUrl(form.duckSoupUrl)
-        if (!mediaUrl) {
-          addLog('Enter the media server address (for example http://192.168.1.50:8100) before continuing.', 'error')
-          return
+      if (isController) {
+        if (isLocalSignalUrl(nextSignalUrl)) {
+          const result = await startSignalServer()
+          if (!result.ok) return
+        } else {
+          const reachable = await checkRoomStatus(false, { roomId: nextRoomId, callSignalUrl: nextSignalUrl })
+          if (!reachable) return
         }
-        if (mediaUrl !== form.duckSoupUrl) updateForm('duckSoupUrl', mediaUrl)
-        const mediaCheck = await window.researchApi.checkDuckSoup(mediaUrl)
+      }
+
+      // Verify the media/effects server before anyone enters the room. This catches the packaged-app
+      // failure Ben saw (bad /assets/v1.93/js/ducksoup.js URL) while the user can still fix the setup.
+      if (nextMediaTransport === 'ducksoup') {
+        const mediaCheck = await checkMediaServerReady(nextDuckSoupUrl)
         if (!mediaCheck.ok) {
-          addLog(
-            `Media server not reachable at ${mediaUrl}${mediaCheck.detail ? ` (${mediaCheck.detail})` : ''}. Start Docker/Mozza on that computer or fix the address before continuing.`,
-            'error'
-          )
+          const message = `${mediaCheck.url ? `DuckSoup/Mozza is not ready at ${mediaCheck.url}. ` : ''}${mediaCheck.detail} Start the Docker media server on the host machine, then try Continue again.`
+          setSetupErrorMessage(message)
+          addLog(message, 'error')
           return
         }
-        addLog(`Media server reachable at ${mediaUrl}.`, 'success')
+        if (mediaCheck.url !== form.duckSoupUrl) updateForm('duckSoupUrl', mediaCheck.url)
+        addLog(`Media server reachable at ${mediaCheck.url}.`, 'success')
         // Reachable from the experimenter's machine is necessary but not sufficient: localhost only
         // works if every participant runs on THIS computer. Warn (don't block — single-machine
         // testing legitimately uses localhost) so a multi-computer session isn't shipped a link that
         // points each participant at their own empty localhost.
         try {
-          const mediaHost = new URL(mediaUrl).hostname
+          const mediaHost = new URL(mediaCheck.url).hostname
           if (['localhost', '127.0.0.1', '0.0.0.0'].includes(mediaHost)) {
             addLog(
               'Media server is set to localhost — that only works if every participant runs on THIS computer. For a multi-computer lab session, set the media server to this machine’s LAN address (e.g. http://192.168.1.50:8100) before copying the link.',
@@ -4066,12 +4099,18 @@ export default function App(): ReactElement {
             )
           }
         } catch {
-          // mediaUrl was already validated by normalizeMediaUrl + the probe above.
+          // mediaCheck.url was already validated by normalizeMediaUrl + the probe above.
         }
       }
-    }
 
-    setSetupComplete(true)
+      setSetupComplete(true)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not continue to the room.'
+      setSetupErrorMessage(message)
+      addLog(message, 'error')
+    } finally {
+      setSetupChecking(false)
+    }
   }
 
   if (!welcomeComplete) {
@@ -4229,6 +4268,7 @@ export default function App(): ReactElement {
                       onChange={(event) => {
                         setSessionLinkInput(event.target.value)
                         setSessionLinkNotice('')
+                        setSetupErrorMessage('')
                       }}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter') applySessionLink(sessionLinkInput)
@@ -4338,9 +4378,16 @@ export default function App(): ReactElement {
             )}
           </div>
 
+          {setupErrorMessage && (
+            <div className="connection-tip error setup-blocking-error">
+              <strong>Setup needs attention.</strong>
+              <span>{setupErrorMessage}</span>
+            </div>
+          )}
+
           <div className="setup-actions">
-            <button className="primary setup-continue" onClick={() => continueFromSetup()}>
-              Continue to room
+            <button className="primary setup-continue" onClick={() => continueFromSetup()} disabled={setupChecking}>
+              {setupChecking ? 'Checking setup...' : 'Continue to room'}
             </button>
           </div>
         </section>
