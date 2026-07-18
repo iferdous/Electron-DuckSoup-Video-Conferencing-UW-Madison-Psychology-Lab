@@ -72,7 +72,17 @@ type SmileTypePreset = {
   returnMs: number
 }
 
-const hostedSignalUrl = 'https://nelf-call-signaling.onrender.com'
+// Signaling always runs on the server embedded in this app (started on the experimenter's machine;
+// participants reach it at that machine's LAN address, which the session link carries).
+//
+// The hosted Render service was dropped as the default and as a fallback. It is current code (the
+// blueprint tracks main and redeploys on push), but it is on the free plan, so it sleeps when idle
+// and a cold wake drops peers mid-session. A lab LAN needs no internet for signaling at all. There
+// is deliberately no automatic fallback to it: a session link must never point somewhere the
+// experimenter did not choose. It was https://nelf-call-signaling.onrender.com; cross-network
+// testing (e.g. with Ismam, which a LAN server cannot do) means pointing back at it, which needs a
+// signal-server field in the setup UI.
+const localSignalUrl = 'http://localhost:8765'
 
 const initialForm: SessionForm = {
   role: 'participant',
@@ -88,7 +98,7 @@ const initialForm: SessionForm = {
   roomId: `synclink-room-${Date.now()}`,
   targetUserId: '',
   duckSoupUrl: 'http://localhost:8100',
-  callSignalUrl: hostedSignalUrl,
+  callSignalUrl: localSignalUrl,
   outputFolder: '',
   condition: 'Neutral / Sham'
 }
@@ -885,6 +895,11 @@ export default function App(): ReactElement {
   const [sessionLinkNotice, setSessionLinkNotice] = useState('')
   const [setupErrorMessage, setSetupErrorMessage] = useState('')
   const [setupChecking, setSetupChecking] = useState(false)
+  // When the embedded LAN signal server is running, the experimenter keeps talking to it over
+  // localhost (so isLocalSignalUrl still recognizes it and can restart it), but participants on
+  // other machines must be handed this machine's LAN address instead. Localhost in a copied link
+  // would point each participant at their own computer. The session link uses this when set.
+  const [localSignalLanUrl, setLocalSignalLanUrl] = useState('')
   const [experimenterLoginOpen, setExperimenterLoginOpen] = useState(false)
   const [experimenterCredentials, setExperimenterCredentials] = useState({ username: '', password: '' })
   const [experimenterLoginError, setExperimenterLoginError] = useState('')
@@ -911,11 +926,18 @@ export default function App(): ReactElement {
       ? form.targetUserId
       : 'all participants'
   const sessionLink = useMemo(() => {
+    // Participants get the LAN address of the embedded server, never localhost (which would resolve
+    // to their own machine). Every fallback stays local: a link must never silently point at a
+    // remote/hosted server the experimenter did not choose.
+    const linkBase =
+      isLocalSignalUrl(form.callSignalUrl) && localSignalLanUrl
+        ? localSignalLanUrl
+        : form.callSignalUrl || localSignalLanUrl || localSignalUrl
     let url: URL
     try {
-      url = new URL('/join', form.callSignalUrl || hostedSignalUrl)
+      url = new URL('/join', linkBase)
     } catch {
-      url = new URL('/join', hostedSignalUrl)
+      url = new URL('/join', localSignalLanUrl || localSignalUrl)
     }
     url.searchParams.set('roomId', form.roomId)
     url.searchParams.set('studyId', form.studyId)
@@ -934,7 +956,8 @@ export default function App(): ReactElement {
     form.mediaTransport,
     form.roomId,
     form.sessionFormat,
-    form.studyId
+    form.studyId,
+    localSignalLanUrl
   ])
 
   const addLog = useCallback((message: string, level: LogEvent['level'] = 'info') => {
@@ -1354,7 +1377,8 @@ export default function App(): ReactElement {
     try {
       const result = await window.researchApi.startCallSignalServer(8765)
       updateForm('callSignalUrl', result.localUrl)
-      addLog(`Call server running. Participants can use ${result.lanUrl}.`, 'success')
+      setLocalSignalLanUrl(result.lanUrl)
+      addLog(`Call server running. The session link now points participants at ${result.lanUrl}.`, 'success')
       return result
     } catch (error) {
       // Surface a clear reason (e.g. port 8765 already held by a stale app instance) instead of
