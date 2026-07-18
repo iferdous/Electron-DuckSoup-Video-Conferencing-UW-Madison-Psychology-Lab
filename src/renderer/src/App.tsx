@@ -3174,8 +3174,13 @@ export default function App(): ReactElement {
           break
         case 'closed':
           if (interactionEndedRef.current) {
-            // Expected: the socket closes after a normal 'end'/'ending'. Nothing to recover.
+            // Expected: the socket closes after a normal 'end'/'ending'. Nothing to recover, but the
+            // player object is now dead, so drop it before a later Rejoin can inherit a closed
+            // session. (Deliberately not done on 'end': the server still sends 'files' with the
+            // recording paths after that, and stopping the player early would cut that message off.)
             addLog('Media server connection closed.', 'info')
+            duckSoupPlayerRef.current = null
+            duckSoupActiveRef.current = false
           } else {
             // Unexpected mid-call drop (SFU restart, Wi-Fi flap): the video freezes but nothing
             // else signalled it. Surface a recoverable error and release the dead player so a
@@ -3226,6 +3231,20 @@ export default function App(): ReactElement {
 
   const startDuckSoupMedia = useCallback(async (): Promise<void> => {
     const baseUrl = form.duckSoupUrl.trim()
+    // Never stack a second player on top of a live one. A partner's disconnect ends the interaction
+    // for everyone, but the local player object survives that; rejoining then built a NEW player
+    // while the stale one still held a socket for the same userId, and the server saw two peers for
+    // one participant. That showed up as one side's video staying black until a manual Leave (the
+    // only path that used to tear the player down) and a second Rejoin.
+    if (duckSoupPlayerRef.current) {
+      try {
+        duckSoupPlayerRef.current.stop()
+      } catch {
+        // already stopped
+      }
+      duckSoupPlayerRef.current = null
+    }
+    duckSoupActiveRef.current = false
     streamUserMapRef.current.clear()
     duckSoupFilesRef.current = {}
     mediaQualitySamplesRef.current = []
