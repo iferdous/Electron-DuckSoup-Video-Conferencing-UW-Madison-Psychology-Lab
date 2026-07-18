@@ -1443,6 +1443,14 @@ export default function App(): ReactElement {
       }
     }
 
+    // Browser-tab participants (Chrome at :5173, the one-machine test recipe) have no preload, so
+    // there is no main-process fetch to probe with, and probing from the renderer would hit CORS.
+    // Skip the pre-check for them rather than blocking entry: a genuinely unreachable media server
+    // still surfaces at join time via ensureDuckSoupLoaded()'s script-load error.
+    if (!window.researchApi?.checkDuckSoup) {
+      return { ok: true, url: mediaUrl, detail: 'Media server check skipped (not available in a browser tab).' }
+    }
+
     const mediaCheck = await window.researchApi.checkDuckSoup(mediaUrl)
     if (!mediaCheck.ok) {
       return {
