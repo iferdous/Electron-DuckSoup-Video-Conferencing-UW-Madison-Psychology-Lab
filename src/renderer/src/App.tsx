@@ -13,7 +13,7 @@ import {
   type DuckSoupCallbackMessage,
   type LiveMozzaFaceParams
 } from './ducksoup-client'
-import { getSmileFaceLandmarker, sampleSmileFrame } from './smile-landmarker'
+import { getSmileFaceLandmarker, resetSmileFaceLandmarker, sampleSmileFrame } from './smile-landmarker'
 import {
   SmileOnsetDetector,
   smileCueRejectionReason,
@@ -320,7 +320,8 @@ const mediaQualitySamplesToCsv = (samples: MediaQualitySample[]): string => {
     'videoJitterBufferMs'
   ]
   const rows = samples.map((sample) => headers.map((header) => csvEscape(sample[header])).join(','))
-  return [headers.join(','), ...rows].join('\n')
+  // Trailing newline to match manipulation_events / smile_synchrony CSVs (POSIX-friendly).
+  return `${[headers.join(','), ...rows].join('\n')}\n`
 }
 
 const smileSynchronyEventsToCsv = (events: SmileOnsetAuditEvent[]): string => {
@@ -841,6 +842,14 @@ export default function App(): ReactElement {
   // can't kick a freshly-rejoined station (which reuses the same userId), and control messages can
   // be attributed to a live connection.
   const connectionIdRef = useRef('')
+  // True while the current error banner is a MEDIA drop (video connection lost), so a signaling
+  // (SSE) reconnect's onopen doesn't wipe the "Press Rejoin" banner and flip the UI back to a
+  // normal waiting room — the video is still dead until the user actually rejoins the media.
+  const callErrorIsMediaDropRef = useRef(false)
+  // Guards joinLiveCall so two overlapping invocations (e.g. rapid Rejoin taps) can't both pass the
+  // "no existing player" check during the multi-second renderDuckSoup await and create two players
+  // (two sockets) for the same userId — which the SFU rejects as error-duplicate / leaves black.
+  const joinInFlightRef = useRef(false)
   // Timed presets skipped because automatic smile synchrony is Live are left pending (they fire once
   // Live is turned off). Track which we've already warned about so the 500ms scheduler doesn't spam.
   const timedSkipWarnedRef = useRef<Set<string>>(new Set())
@@ -861,7 +870,6 @@ export default function App(): ReactElement {
   const [callPeers, setCallPeers] = useState<CallPeer[]>([])
   const [remoteTiles, setRemoteTiles] = useState<RemoteTile[]>([])
   const [monitorTiles, setMonitorTiles] = useState<MonitorTile[]>([])
-  const [, setRoomPresence] = useState<RoomPresence | null>(null)
   const [storagePaths, setStoragePaths] = useState<{ serverDataDir: string; sessionsDir: string } | null>(null)
   const [experimenterNotes, setExperimenterNotes] = useState('')
   const experimenterNotesRef = useRef('')
@@ -1103,11 +1111,16 @@ export default function App(): ReactElement {
           if (!player || !pending) return
 
           const previous = appliedMozzaControlsRef.current
-          applyMozzaControlChanges(player, pending.face, previous?.face ?? null)
-          if (!previous || pending.audioPitch !== previous.audioPitch) {
-            player.controlFx(MOZZA_AUDIO_FX_NAME, 'pitch', pending.audioPitch)
+          try {
+            applyMozzaControlChanges(player, pending.face, previous?.face ?? null)
+            if (!previous || pending.audioPitch !== previous.audioPitch) {
+              player.controlFx(MOZZA_AUDIO_FX_NAME, 'pitch', pending.audioPitch)
+            }
+            appliedMozzaControlsRef.current = pending
+          } catch {
+            // The player socket may be closing (the window between 'end' and 'closed'). A control
+            // write on a half-dead pipeline is a harmless no-op, not an error worth surfacing.
           }
-          appliedMozzaControlsRef.current = pending
         }, MOZZA_CONTROL_INTERVAL_MS)
       }
     }
@@ -1431,7 +1444,6 @@ export default function App(): ReactElement {
         if (typeof status.serverEpochMs === 'number') {
           serverClockOffsetRef.current = status.serverEpochMs - Date.now()
         }
-        setRoomPresence(status)
         if (!quiet) {
           addLog(
             `${status.peers.length} ${status.peers.length === 1 ? 'person is' : 'people are'} currently in ${status.roomId}.`,
@@ -1440,7 +1452,6 @@ export default function App(): ReactElement {
         }
         return true
       } catch (error) {
-        setRoomPresence(null)
         if (!quiet) {
           addLog(
             error instanceof Error
@@ -2205,6 +2216,7 @@ export default function App(): ReactElement {
     if (video) {
       video.pause()
       video.srcObject = null
+      video.remove()
     }
     smileDetectorVideoRef.current = null
     smileDetectorStreamRef.current = null
@@ -2238,7 +2250,13 @@ export default function App(): ReactElement {
     const video = document.createElement('video')
     video.muted = true
     video.playsInline = true
+    video.setAttribute('aria-hidden', 'true')
+    // Attach the detection video off-screen (not left detached): Chromium can stall frame
+    // production for a detached/occluded video element, which silently starves the detector so
+    // calibration never gathers enough neutral samples and just times out as "face not visible".
+    video.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none'
     video.srcObject = stream
+    document.body.appendChild(video)
     smileDetectorRef.current = detector
     smileDetectorVideoRef.current = video
     smileDetectorStreamRef.current = stream
@@ -2264,6 +2282,11 @@ export default function App(): ReactElement {
       let lastSnapshotAt = 0
       smileDetectorTimerRef.current = window.setInterval(() => {
         if (smileDetectorBusyRef.current || !smileDetectorRef.current || !smileDetectorVideoRef.current) return
+        // Skip while the window is hidden: Chromium suspends frames for a hidden/occluded video, and
+        // running detectForVideo against a stalled or GPU-suspended context is the most likely
+        // trigger for a native MediaPipe/WebGL abort (which no JS try/catch can catch) and for
+        // calibration silently failing. Resume automatically when the window is shown again.
+        if (document.hidden) return
         smileDetectorBusyRef.current = true
         try {
           const timestampMs = performance.now()
@@ -2276,6 +2299,10 @@ export default function App(): ReactElement {
           }
         } catch (error) {
           addLog(error instanceof Error ? `Smile detector error: ${error.message}` : 'Smile detector error.', 'error')
+          // The FaceLandmarker may be poisoned (e.g. its internal WebGL2 context was lost). Discard
+          // and rebuild it on the next start, otherwise re-enabling Automatic hands back the same
+          // broken instance and it fails forever until an app restart.
+          resetSmileFaceLandmarker()
           stopSmileDetector()
         } finally {
           smileDetectorBusyRef.current = false
@@ -2286,6 +2313,8 @@ export default function App(): ReactElement {
         error instanceof Error ? `Could not start local smile detection: ${error.message}` : 'Could not start local smile detection.',
         'error'
       )
+      // A load/start failure may have cached a broken landmarker; drop it so the next attempt rebuilds.
+      resetSmileFaceLandmarker()
       stopSmileDetector()
     }
   }, [addLog, handleLocalSmileDetectorEvent, isController, stopSmileDetector])
@@ -2316,6 +2345,11 @@ export default function App(): ReactElement {
     startSmileDetector,
     stopSmileDetector
   ])
+
+  // Tear the detector down on true unmount (HMR / full app teardown). Kept as its own effect so it
+  // does NOT stop+restart the detector — and lose calibration — on every dep change of the effect
+  // above (which relies on startSmileDetector's own idempotency guard instead).
+  useEffect(() => () => stopSmileDetector(), [stopSmileDetector])
 
   const retrySmileCalibration = (): void => {
     const detector = smileDetectorRef.current
@@ -2758,7 +2792,9 @@ export default function App(): ReactElement {
 
     const from = envelope.payload.from
     const peerMeta =
-      callPeers.find((item) => item.userId === from) ??
+      // Read the live ref, not the state captured when this SSE handler was bound at join time —
+      // handleSignalEvent is frozen per connection, so callPeers here would be the join-time list.
+      callPeersRef.current.find((item) => item.userId === from) ??
       ({
         userId: from,
         displayName: envelope.payload.displayName || from,
@@ -2896,11 +2932,67 @@ export default function App(): ReactElement {
     // Tell the main process a save is in flight so closing the window / quitting waits for it to finish
     // instead of truncating half-written manifests, CSVs, and the in-progress video copy.
     window.researchApi.setSavingState(true)
+
+    // Snapshot everything the save reads BEFORE the first await. finalize can run un-awaited (e.g.
+    // Conclude fires it, then Back-to-setup / Leave clears controlEventsRef / chatMessages) — reading
+    // the live refs mid-save would otherwise write an EMPTY manipulation_events.csv / chat_log.csv,
+    // which are the core research artifacts and exist nowhere else.
+    const sessionForm = form
+    const recordingStart = recordingStartRef.current
+    const controlsAtEnd = controlsRef.current
+    const controlEventsSnapshot = [...controlEventsRef.current]
+    const chatMessagesSnapshot = [...chatMessagesRef.current]
+    const callPeersSnapshot = [...callPeersRef.current]
+    const participantPeersSnapshot = [...participantPeers]
+    const mediaQualitySnapshot = [...mediaQualitySamplesRef.current]
+    const smileEventsSnapshot = [...smileOnsetAuditEventsRef.current]
+    const experimenterNotesSnapshot = experimenterNotesRef.current
+    const serverFilesSnapshot = { ...duckSoupFilesRef.current }
+    const namespace = duckSoupNamespace()
+    const interaction = sessionForm.roomId
+
     try {
-      const { sessionDir: createdDir } = await window.researchApi.createSessionDirectory(form)
+      const { sessionDir: createdDir } = await window.researchApi.createSessionDirectory(sessionForm)
       setSessionDir(createdDir)
-      const namespace = duckSoupNamespace()
-      const interaction = form.roomId
+
+      // Write the irreplaceable audit trail FIRST — these are tiny and exist nowhere else. The video
+      // copy below is slow and RECOVERABLE (the -dry/-wet files also stay in docker/ducksoup/data),
+      // so it must not run before the logs: an interruption during the copy (quit, crash, teardown)
+      // would otherwise cost the logs while sparing the data that survives elsewhere.
+      await Promise.all([
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'manipulation_events.csv',
+          contents: controlEventsToCsv(controlEventsSnapshot, recordingStart)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'chat_log.csv',
+          contents: chatMessagesToCsv(chatMessagesSnapshot, callPeersSnapshot)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'media_quality.csv',
+          contents: mediaQualitySamplesToCsv(mediaQualitySnapshot)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'smile_synchrony_events.csv',
+          contents: smileSynchronyEventsToCsv(smileEventsSnapshot)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'smile_onset_events.csv',
+          contents: smileSynchronyEventsToCsv(smileEventsSnapshot)
+        }),
+        window.researchApi.writeTextFile({
+          sessionDir: createdDir,
+          filename: 'experimenter_notes.txt',
+          contents: experimenterNotesSnapshot
+        })
+      ])
+
+      // Now the best-effort video copy (recoverable — also under docker/ducksoup/data).
       let copied: string[] = []
       let copiedPaths: string[] = []
       let serverDataDir: string | null = null
@@ -2913,7 +3005,7 @@ export default function App(): ReactElement {
             interaction,
             // Only copy files from THIS interaction's recording window, so a rejoined room's older
             // -dry/-wet attempts aren't bundled into the session folder.
-            sinceEpochMs: recordingStartRef.current ?? undefined
+            sinceEpochMs: recordingStart ?? undefined
           })
           copied = result.copied
           copiedPaths = result.copiedPaths
@@ -2927,25 +3019,25 @@ export default function App(): ReactElement {
         addLog('Could not auto-copy server recordings. They remain in the media server data folder.', 'warn')
       }
 
-      const serverFiles = Object.values(duckSoupFilesRef.current).flat()
+      const serverFiles = Object.values(serverFilesSnapshot).flat()
       const availableVideoFiles = [...copiedPaths, ...serverFiles]
       const ppsPlaybackPlan = buildPpsPlaybackPlan(
         availableVideoFiles,
-        participantPeers,
-        form.participantId,
-        form.partnerId
+        participantPeersSnapshot,
+        sessionForm.participantId,
+        sessionForm.partnerId
       )
 
       const manifest = {
         savedAt: new Date().toISOString(),
         transport: 'ducksoup',
-        session: form,
-        controlsAtEnd: controlsRef.current,
-        mediaServer: form.duckSoupUrl,
+        session: sessionForm,
+        controlsAtEnd,
+        mediaServer: sessionForm.duckSoupUrl,
         recording: {
-          startedAt: recordingStartRef.current ? new Date(recordingStartRef.current).toISOString() : null,
+          startedAt: recordingStart ? new Date(recordingStart).toISOString() : null,
           endedAt: new Date().toISOString(),
-          durationMs: recordingStartRef.current ? Date.now() - recordingStartRef.current : null,
+          durationMs: recordingStart ? Date.now() - recordingStart : null,
           note:
             'startedAt is video t=0 for the -dry/-wet recordings (the experimenter re-anchors it to when both participants are present). In manipulation_events.csv, elapsedMs is milliseconds from startedAt (negative = logged before recording began), so it lines up with the videos. For cross-machine alignment use the UTC timestamp column and keep the lab clocks NTP-synced.'
         },
@@ -2953,23 +3045,23 @@ export default function App(): ReactElement {
           namespace,
           interaction,
           recordingMode: 'reenc',
-          serverFiles: duckSoupFilesRef.current,
+          serverFiles: serverFilesSnapshot,
           serverDataDir,
           copiedFiles: copied,
           copiedPaths
         },
         ppsPlaybackPlan,
-        experimenterNotes: experimenterNotesRef.current,
-        chatLog: { file: 'chat_log.csv', messageCount: chatMessagesRef.current.length },
+        experimenterNotes: experimenterNotesSnapshot,
+        chatLog: { file: 'chat_log.csv', messageCount: chatMessagesSnapshot.length },
         mediaQuality: {
           file: 'media_quality.csv',
-          sampleCount: mediaQualitySamplesRef.current.length,
+          sampleCount: mediaQualitySnapshot.length,
           sampleInterval: 'approximately 1 second'
         },
         smileSynchrony: {
           file: 'smile_synchrony_events.csv',
           legacyOnsetFile: 'smile_onset_events.csv',
-          eventCount: smileOnsetAuditEventsRef.current.length,
+          eventCount: smileEventsSnapshot.length,
           detectionSource: 'participant clean local camera',
           experimenterEvaluatesCues: false,
           alignedResponse: {
@@ -3006,9 +3098,9 @@ export default function App(): ReactElement {
           contents: JSON.stringify(
             {
               savedAt: manifest.savedAt,
-              studyId: form.studyId,
-              roomId: form.roomId,
-              dyadId: form.dyadId,
+              studyId: sessionForm.studyId,
+              roomId: sessionForm.roomId,
+              dyadId: sessionForm.dyadId,
               instructions:
                 'For empathic accuracy ratings, show each participant their unmanipulated self video alongside the manipulated partner video they saw during the conversation.',
               playbackPlan: ppsPlaybackPlan
@@ -3016,44 +3108,24 @@ export default function App(): ReactElement {
             null,
             2
           )
-        }),
-        window.researchApi.writeTextFile({
-          sessionDir: createdDir,
-          filename: 'manipulation_events.csv',
-          contents: controlEventsToCsv(controlEventsRef.current, recordingStartRef.current)
-        }),
-        window.researchApi.writeTextFile({
-          sessionDir: createdDir,
-          filename: 'chat_log.csv',
-          contents: chatMessagesToCsv(chatMessagesRef.current, callPeersRef.current)
-        }),
-        window.researchApi.writeTextFile({
-          sessionDir: createdDir,
-          filename: 'media_quality.csv',
-          contents: mediaQualitySamplesToCsv(mediaQualitySamplesRef.current)
-        }),
-        window.researchApi.writeTextFile({
-          sessionDir: createdDir,
-          filename: 'smile_synchrony_events.csv',
-          contents: smileSynchronyEventsToCsv(smileOnsetAuditEventsRef.current)
-        }),
-        window.researchApi.writeTextFile({
-          sessionDir: createdDir,
-          filename: 'smile_onset_events.csv',
-          contents: smileSynchronyEventsToCsv(smileOnsetAuditEventsRef.current)
-        }),
-        window.researchApi.writeTextFile({
-          sessionDir: createdDir,
-          filename: 'experimenter_notes.txt',
-          contents: experimenterNotesRef.current
         })
       ])
       addLog(`Saved session files (manifests, logs, chat, notes) to ${createdDir}`, 'success')
-    } catch (error) {
-      addLog(error instanceof Error ? error.message : 'Could not finalize the session files.', 'error')
-    } finally {
       setRecordingState('idle')
       window.researchApi.setSavingState(false)
+    } catch (error) {
+      // A failed save must be RETRYABLE, not silently marked done. Clear the one-shot guard and keep
+      // the session in 'recording' so Leave / Conclude / Back-to-setup will try again instead of
+      // skipping the save and discarding the whole session on the next teardown.
+      sessionSavedRef.current = false
+      setRecordingState('recording')
+      window.researchApi.setSavingState(false)
+      addLog(
+        error instanceof Error
+          ? `Could not save the session: ${error.message}. Nothing was discarded — fix the output folder and try Conclude / Leave again.`
+          : 'Could not save the session. Nothing was discarded — try Conclude / Leave again.',
+        'error'
+      )
     }
   }, [addLog, form, participantPeers, isController])
 
@@ -3195,6 +3267,7 @@ export default function App(): ReactElement {
               duckSoupPlayerRef.current = null
             }
             duckSoupActiveRef.current = false
+            callErrorIsMediaDropRef.current = true
             setCallState('error')
             setCallErrorMessage('The video connection dropped. Press Rejoin to reconnect.')
           }
@@ -3221,6 +3294,7 @@ export default function App(): ReactElement {
               duckSoupPlayerRef.current = null
             }
             duckSoupActiveRef.current = false
+            callErrorIsMediaDropRef.current = true
             setCallState('error')
             setCallErrorMessage(detail)
           }
@@ -3296,6 +3370,14 @@ export default function App(): ReactElement {
       return
     }
 
+    // Reentrancy guard: a second join while one is mid-flight (rapid Rejoin taps) would both see
+    // "no player" during the multi-second renderDuckSoup await and open two sockets for one userId.
+    if (joinInFlightRef.current) {
+      addLog('Already joining the room — please wait.', 'warn')
+      return
+    }
+    joinInFlightRef.current = true
+
     // The header Join/Rejoin button reaches here from the 'error' state without going through
     // Leave, and a prior attempt (aborted join, dropped media, signaling error) can leave a live
     // player / EventSource attached. Tear that down first so we don't leak a second camera capture
@@ -3305,6 +3387,7 @@ export default function App(): ReactElement {
     }
 
     inCallRef.current = true
+    callErrorIsMediaDropRef.current = false
     setCallState('starting')
     setCallErrorMessage('')
     setInteractionCapReached(false)
@@ -3375,8 +3458,15 @@ export default function App(): ReactElement {
       events.onopen = () => {
         if (eventSourceErrorAtRef.current > 0) addLog('Room connection restored.', 'success')
         eventSourceErrorAtRef.current = 0
+        // Only clear the banner and recover state for a SIGNALING (SSE) issue. If the current error
+        // is a MEDIA drop, the video is still dead until the user rejoins — leave the "Press Rejoin"
+        // banner up even though the SSE channel just reconnected. Also recover from 'connecting'
+        // (a transient SSE blip while waiting solo) which previously stuck the UI on "connecting".
+        if (callErrorIsMediaDropRef.current) return
         setCallErrorMessage('')
-        setCallState((prev) => (prev === 'starting' || prev === 'error' ? 'waiting' : prev))
+        setCallState((prev) =>
+          prev === 'starting' || prev === 'error' || prev === 'connecting' ? 'waiting' : prev
+        )
       }
       events.onmessage = (message) => {
         handleSignalEvent(message).catch((error) =>
@@ -3413,6 +3503,8 @@ export default function App(): ReactElement {
       setCallState('error')
       setCallErrorMessage(message)
       addLog(message, 'error')
+    } finally {
+      joinInFlightRef.current = false
     }
   }
 
@@ -3854,13 +3946,15 @@ export default function App(): ReactElement {
     addLog(`Automatic smile synchrony mode set to ${mode}.`, mode === 'live' ? 'warn' : 'info')
   }
 
-  const concludeStudy = (): void => {
+  const concludeStudy = async (): Promise<void> => {
     appendControlEvent('study', 'conclude', 'Experimenter concluded the study for all participant stations.')
     sendDirectorPayload({ kind: 'session-conclude' })
     addLog('Study concluded. Participants will leave; saving session files + recordings here.', 'warn')
     // The experimenter saves the authoritative session folder (logs, chat, manifests) and collects
     // the videos. finalize retries the video copy so the participants' .mp4s have time to finish.
-    void finalizeDuckSoupSession()
+    // Awaited so a follow-on Back-to-setup / Leave / quit can't race the save (which also snapshots
+    // its inputs up front, so even a mid-save teardown can't empty the CSVs).
+    await finalizeDuckSoupSession()
   }
 
   const applyAudioPreset = (preset: (typeof audioPresets)[number]): void => {
@@ -3951,6 +4045,9 @@ export default function App(): ReactElement {
   const saveRecordings = async (): Promise<void> => {
     if (!sessionDir) return
     setRecordingState('saving')
+    // Block app-quit while the (potentially large) webm blobs + manifests write — closing the
+    // window mid-save would truncate them, and the mesh recording has no server-side copy to recover.
+    window.researchApi.setSavingState(true)
 
     const cleanBlob = new Blob(cleanChunksRef.current, { type: 'video/webm' })
     const alteredBlob = new Blob(alteredChunksRef.current, { type: 'video/webm' })
@@ -4055,6 +4152,7 @@ export default function App(): ReactElement {
 
     recordingStartRef.current = null
     setRecordingState('idle')
+    window.researchApi.setSavingState(false)
     addLog(`Saved clean and altered videos to ${sessionDir}`, 'success')
   }
 
@@ -4064,6 +4162,7 @@ export default function App(): ReactElement {
     window.setTimeout(() => {
       saveRecordings().catch((error) => {
         setRecordingState('idle')
+        window.researchApi.setSavingState(false)
         addLog(error instanceof Error ? error.message : 'Could not save recordings.', 'error')
       })
     }, 250)

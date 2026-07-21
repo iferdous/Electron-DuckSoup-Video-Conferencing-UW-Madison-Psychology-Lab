@@ -32,6 +32,27 @@ export const getSmileFaceLandmarker = (): Promise<FaceLandmarker> => {
   return faceLandmarkerPromise
 }
 
+// Discard the cached FaceLandmarker so the next getSmileFaceLandmarker() rebuilds a fresh one.
+// Needed because a landmarker that loaded fine but then FAULTED (e.g. its internal WebGL2 context
+// was lost, or detectForVideo threw natively) stays cached — every later re-enable of Automatic
+// would hand back the same poisoned instance and immediately fail again until a full app restart.
+// close() also frees the native wasm/GL resources. Best-effort: close() can itself throw on an
+// already-dead context, which we swallow.
+export const resetSmileFaceLandmarker = (): void => {
+  const pending = faceLandmarkerPromise
+  faceLandmarkerPromise = null
+  if (!pending) return
+  pending
+    .then((landmarker) => {
+      try {
+        landmarker.close()
+      } catch {
+        // context already gone
+      }
+    })
+    .catch(() => undefined)
+}
+
 const categoryScore = (
   categories: Array<{ categoryName?: string; displayName?: string; score?: number }>,
   name: string
