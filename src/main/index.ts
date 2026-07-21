@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, protocol, session, shell, systemPreferences } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import dgram, { type Socket } from 'node:dgram'
 import { mkdir, writeFile, readdir, copyFile, stat, readFile } from 'node:fs/promises'
@@ -142,6 +142,16 @@ let callSignalServerPort: number | null = null
 let isSaving = false
 const signalClients = new Map<string, SignalClient>()
 
+// Fix H: a single dead SSE socket or a stray async throw must never take down the whole main
+// process (and with it every room's signaling). Log and keep running. The per-request handlers
+// still guard their own writes; this is the last-resort backstop the standalone server has too.
+process.on('uncaughtException', (error) => {
+  console.error('[main] uncaught exception:', error)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[main] unhandled rejection:', reason)
+})
+
 // Fix F: serve the packaged renderer output dir over app://bundle/<path>. `/` and missing
 // paths fall back to index.html. Paths are normalized to stay inside the renderer dir.
 const registerRendererProtocol = (): void => {
@@ -168,6 +178,18 @@ const safeSegment = (value: string, fallback: string): string => {
 }
 
 const timestampSegment = (): string => new Date().toISOString().replace(/[:.]/g, '-')
+
+// Candidate roots for DuckSoup's server-side recording volume (docker/ducksoup/data), tried in
+// order. The env override and packaged-exe locations keep this working in a packaged build where
+// process.cwd()/getAppPath() no longer point at the repo; dev (cwd = repo root) resolves first.
+// Called lazily from handlers (after app is ready), so app.getAppPath/getPath are safe here.
+const duckSoupDataRootCandidates = (): string[] =>
+  [
+    process.env.SYNCLINK_DUCKSOUP_DATA,
+    join(process.cwd(), 'docker', 'ducksoup', 'data'),
+    join(app.getAppPath(), 'docker', 'ducksoup', 'data'),
+    join(dirname(app.getPath('exe')), 'docker', 'ducksoup', 'data')
+  ].filter((root): root is string => Boolean(root))
 
 const localAddresses = (): string[] => {
   const interfaces = os.networkInterfaces()
@@ -369,6 +391,12 @@ const sendSignalEvent = (client: SignalClient, type: string, payload: unknown): 
 const roomClients = (roomId: string): SignalClient[] =>
   [...signalClients.values()].filter((client) => client.roomId === roomId)
 
+// Fix H: only a peer that actually holds a live SSE connection in a room may push signals or
+// director-control into it. Blocks a departed/duplicate/rogue LAN client from injecting fake
+// smile cues, WebRTC offers, or experimenter control messages by knowing only the roomId.
+const userInRoom = (roomId: string, userId: string): boolean =>
+  roomClients(roomId).some((client) => client.userId === userId)
+
 const roomPeers = (roomId: string): Array<Omit<SignalClient, 'id' | 'response' | 'roomId'>> => {
   const unique = new Map<string, Omit<SignalClient, 'id' | 'response' | 'roomId'>>()
   for (const client of roomClients(roomId)) {
@@ -498,6 +526,16 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
             Connection: 'keep-alive',
             'Content-Type': 'text/event-stream'
           })
+          // Fix H: enable TCP keepalive so a silently dropped peer (sleep / Wi-Fi loss / NAT
+          // timeout — no FIN/RST) is detected and evicted in seconds instead of lingering as a
+          // ghost that keeps bothParticipantsPresent true and the call timer running. Disable the
+          // socket idle timeout so the long-lived SSE stream is never closed for being quiet.
+          try {
+            request.socket.setKeepAlive(true, 15000)
+            request.socket.setTimeout(0)
+          } catch {
+            // best effort — not all socket types support these
+          }
           try {
             response.write(': connected\n\n')
           } catch {
@@ -564,7 +602,10 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
           const from = message.from
           const connectionId = typeof message.connectionId === 'string' ? message.connectionId : ''
           for (const client of roomClients(message.roomId)) {
-            if (client.userId === from && (!connectionId || client.connectionId === connectionId)) {
+            // Scope by connectionId when given; a leave with none only removes connections that
+            // also have none, so a stale/early leave can't kick an already-rejoined peer.
+            const matches = connectionId ? client.connectionId === connectionId : !client.connectionId
+            if (client.userId === from && matches) {
               removeSignalClient(client, true, true)
             }
           }
@@ -577,6 +618,12 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
           const message = (await readJsonBody(request)) as SignalMessage
           if (!message.roomId || !message.from || !message.type) {
             jsonResponse(response, 400, { ok: false, error: 'Missing roomId, from, or type.' })
+            return
+          }
+          // Fix H: only a live member of the room may relay signals (smile cues, WebRTC
+          // offers/answers/candidates, monitor negotiation) through it.
+          if (!userInRoom(message.roomId, message.from)) {
+            jsonResponse(response, 403, { ok: false, error: 'Sender is not in this room.' })
             return
           }
           broadcastSignalEvent(
@@ -601,6 +648,13 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
           const message = (await readJsonBody(request)) as SignalMessage
           if (!message.roomId || !message.from) {
             jsonResponse(response, 400, { ok: false, error: 'Missing roomId or from.' })
+            return
+          }
+          // Fix H: gate director-control on room membership unconditionally (the standalone
+          // server does; the embedded one previously only checked when a connectionId was
+          // present, so a message that omitted it could broadcast control to any room).
+          if (!userInRoom(message.roomId, message.from)) {
+            jsonResponse(response, 403, { ok: false, error: 'Sender is not in this room.' })
             return
           }
           // Fix B: when a connectionId is supplied, verify the sender owns that live
@@ -655,7 +709,18 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
 
         jsonResponse(response, 404, { ok: false, error: 'Not found.' })
       } catch (error) {
-        jsonResponse(response, 500, { ok: false, error: error instanceof Error ? error.message : 'Signal server error.' })
+        // Fix H: on the SSE /events path the headers are already sent, so calling jsonResponse
+        // (which writes headers again) would throw a second time inside the catch → unhandled
+        // rejection. Only send a JSON error if the response hasn't started; otherwise just end it.
+        if (!response.headersSent) {
+          jsonResponse(response, 500, { ok: false, error: error instanceof Error ? error.message : 'Signal server error.' })
+        } else {
+          try {
+            response.end()
+          } catch {
+            // socket already gone
+          }
+        }
       }
     })
 
@@ -686,7 +751,17 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
 }
 
 const stopCallSignalServer = (): void => {
-  for (const client of signalClients.values()) client.response.end()
+  // Fix H: clear each client's heartbeat BEFORE emptying the map. If we cleared the map first,
+  // the still-armed 10 s heartbeats would fire, call removeSignalClient, hit its `!removed`
+  // early-return, and never clear themselves — leaking a timer (and the retained socket) forever.
+  for (const client of signalClients.values()) {
+    if (client.heartbeat) clearInterval(client.heartbeat)
+    try {
+      client.response.end()
+    } catch {
+      // socket already closed
+    }
+  }
   signalClients.clear()
   callSignalServer?.close()
   callSignalServer = null
@@ -753,7 +828,7 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (process.platform === 'darwin') {
     app.setActivationPolicy('regular')
     app.dock?.show()
@@ -763,6 +838,43 @@ app.whenReady().then(() => {
 
   // Fix F: wire up the app:// scheme so the production window can load app://bundle/index.html.
   registerRendererProtocol()
+
+  // Fix G2: Chromium routes every getUserMedia / device request through the session permission
+  // handlers. With none registered, our custom `app://bundle` origin is treated as an
+  // un-established permission on each request, which (on top of the unsigned-app TCC problem) is a
+  // classic cause of repeated media prompts and silent denials. This app IS the only content it
+  // ever loads, so grant camera/mic for our own renderer origins and remember devices.
+  const isTrustedRendererOrigin = (origin?: string | null): boolean =>
+    !!origin && (origin === `${APP_SCHEME}://${APP_HOST}` || origin.startsWith('http://localhost'))
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(permission === 'media' || permission === 'mediaKeySystem')
+  })
+  session.defaultSession.setPermissionCheckHandler((_wc, permission, requestingOrigin) => {
+    if (permission === 'media') return isTrustedRendererOrigin(requestingOrigin)
+    return false
+  })
+  session.defaultSession.setDevicePermissionHandler(() => true)
+
+  // Fix G: request camera + microphone access once, up front, on macOS, and AWAIT them before the
+  // window (and therefore any getUserMedia) can exist. The app otherwise only triggers the OS
+  // permission prompt via getUserMedia *inside* a call, where DuckSoup's 15 s fill-or-abort window
+  // can tear the prompt down before macOS commits the grant — so the mic kept re-prompting forever.
+  // Prompting at launch, outside any call, and blocking window creation until the user answers
+  // gives macOS a calm moment to record the grant. Awaited sequentially (mic then camera) so the
+  // two prompts don't race for the single TCC UI slot. Non-fatal if it throws (already
+  // granted / denied) — the in-call request still runs.
+  if (process.platform === 'darwin') {
+    try {
+      await systemPreferences.askForMediaAccess('microphone')
+    } catch {
+      // already granted or denied — nothing to do
+    }
+    try {
+      await systemPreferences.askForMediaAccess('camera')
+    } catch {
+      // already granted or denied — nothing to do
+    }
+  }
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -802,6 +914,8 @@ app.whenReady().then(() => {
     'save-blob',
     async (_, payload: { sessionDir: string; filename: string; buffer: ArrayBuffer }) => {
       const filePath = join(payload.sessionDir, 'video', safeSegment(payload.filename, 'recording.webm'))
+      // Ensure the target dir exists even if createSessionDirectory wasn't the caller's first step.
+      await mkdir(dirname(filePath), { recursive: true })
       await writeFile(filePath, Buffer.from(payload.buffer))
       return filePath
     }
@@ -811,6 +925,7 @@ app.whenReady().then(() => {
     'write-text-file',
     async (_, payload: { sessionDir: string; filename: string; contents: string }) => {
       const filePath = join(payload.sessionDir, 'data', safeSegment(payload.filename, 'session.txt'))
+      await mkdir(dirname(filePath), { recursive: true })
       await writeFile(filePath, payload.contents, 'utf8')
       return filePath
     }
@@ -863,15 +978,9 @@ app.whenReady().then(() => {
   ipcMain.handle(
     'collect-ducksoup-recordings',
     async (_, payload: { destDir: string; namespace: string; interaction: string; sinceEpochMs?: number }) => {
-      // Fix C (H3): candidate data roots, tried in order. The env override and the packaged-exe
-      // location keep this working in a packaged build where process.cwd()/getAppPath() no
-      // longer point at the repo; dev (cwd = repo root) still resolves when present.
-      const candidateRoots = [
-        process.env.SYNCLINK_DUCKSOUP_DATA,
-        join(process.cwd(), 'docker', 'ducksoup', 'data'),
-        join(app.getAppPath(), 'docker', 'ducksoup', 'data'),
-        join(dirname(app.getPath('exe')), 'docker', 'ducksoup', 'data')
-      ].filter((root): root is string => Boolean(root))
+      // Fix C (H3): candidate data roots keep this working in a packaged build where
+      // process.cwd()/getAppPath() no longer point at the repo (see duckSoupDataRootCandidates).
+      const candidateRoots = duckSoupDataRootCandidates()
       const copied: string[] = []
       const copiedPaths: string[] = []
       let dataDir: string | null = null
@@ -940,9 +1049,23 @@ app.whenReady().then(() => {
 
   // Absolute paths so the UI can show exactly where recordings land on this computer:
   // the DuckSoup server-side recordings (dry/wet .mp4) and the default session output folder.
-  ipcMain.handle('get-storage-paths', () => {
+  ipcMain.handle('get-storage-paths', async () => {
+    // Fix H: resolve the same candidate roots collect-ducksoup-recordings uses and prefer the
+    // first that exists, so a packaged build shows a real path (there, process.cwd() is the launch
+    // dir, not the repo, so the old join(process.cwd(), …) pointed at a folder that doesn't exist).
+    const candidates = duckSoupDataRootCandidates()
+    let serverDataDir = candidates[0] ?? join(process.cwd(), 'docker', 'ducksoup', 'data')
+    for (const root of candidates) {
+      try {
+        await stat(root)
+        serverDataDir = root
+        break
+      } catch {
+        // try the next candidate
+      }
+    }
     return {
-      serverDataDir: join(process.cwd(), 'docker', 'ducksoup', 'data'),
+      serverDataDir,
       sessionsDir: join(app.getPath('documents'), 'SyncLink Sessions')
     }
   })
