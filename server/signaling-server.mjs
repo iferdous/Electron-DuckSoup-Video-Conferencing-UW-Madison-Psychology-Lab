@@ -260,8 +260,14 @@ const server = http.createServer(async (request, response) => {
         return
       }
 
+      // Scope by connectionId when given (each join sends a fresh one). A leave with NO
+      // connectionId only removes connections that also have none, so a stale/early leave can't
+      // kick a peer that has already rejoined with a real connectionId.
       for (const client of roomClients(message.roomId)) {
-        if (client.userId === message.from && (!message.connectionId || client.connectionId === message.connectionId)) {
+        const matches = message.connectionId
+          ? client.connectionId === message.connectionId
+          : !client.connectionId
+        if (client.userId === message.from && matches) {
           removeSignalClient(client, true, true)
         }
       }
