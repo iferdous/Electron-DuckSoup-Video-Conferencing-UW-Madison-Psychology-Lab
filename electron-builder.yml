@@ -9,7 +9,27 @@ asarUnpack:
   - resources/**
 mac:
   target:
-    - dmg
+    # universal = one .dmg that runs on both Intel and Apple Silicon Macs
+    - target: dmg
+      arch: universal
+  category: public.app-category.education
+  # No paid Apple Developer account. The build instead signs with a SELF-SIGNED
+  # certificate generated in CI (see .github/workflows/build.yml). That gives the
+  # app a stable code signature, which is what macOS needs to REMEMBER the
+  # camera/mic permission across launches (an unsigned app is re-prompted forever).
+  # This is NOT notarized, so users still do the one-time "Open Anyway" on first
+  # launch (see docs/INSTALL_GUIDE.md).
+  identity: SyncLink Self-Signed
+  # hardenedRuntime is off: it is only required for notarization, which we don't do,
+  # and turning it on would need extra entitlements. gatekeeperAssess must be off or
+  # electron-builder fails the build asserting the app isn't notarized.
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  # These strings are what macOS shows when the app asks for camera/mic. Without
+  # them, macOS silently denies camera access and the participant sees no video.
+  extendInfo:
+    NSCameraUsageDescription: SyncLink uses your camera for the video call.
+    NSMicrophoneUsageDescription: SyncLink uses your microphone for the video call.
 win:
   target:
     - nsis
