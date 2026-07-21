@@ -44,57 +44,48 @@ jobs:
       - run: npm ci
 
       # macOS only: make sure the build is code-signed, so macOS remembers the camera/mic grant.
-      # If a stable cert is provided via secrets (CSC_LINK base64 .p12 + CSC_KEY_PASSWORD),
-      # electron-builder uses it directly and this step just no-ops. Otherwise we generate a
-      # throwaway self-signed cert, import it, TRUST it for code signing, and — critically — verify
-      # the identity is actually discoverable so a signing regression fails the build LOUDLY
-      # instead of silently shipping an unsigned app that re-prompts for the mic forever.
+      # Both a provided stable cert (CSC_LINK base64 .p12 + CSC_KEY_PASSWORD secrets) and the
+      # throwaway self-signed fallback are imported into a temp keychain HERE; the build step then
+      # signs via that keychain (auto-discovery). We verify the identity is discoverable and FAIL
+      # LOUD otherwise, so a signing regression can never silently ship an unsigned app that
+      # re-prompts for the mic forever.
       - name: Set up macOS code signing
         if: matrix.os == 'macos-latest'
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -n "${CSC_LINK:-}" ]; then
-            echo "CSC_LINK secret present — electron-builder will sign with the provided certificate."
-            exit 0
-          fi
-          echo "No CSC_LINK secret; generating a throwaway self-signed code-signing certificate."
           KPWD="ci-$RANDOM$RANDOM"
           KEYCHAIN="$RUNNER_TEMP/synclink.keychain-db"
-          cat > "$RUNNER_TEMP/cert.cnf" <<'EOF'
-          [req]
-          distinguished_name = dn
-          x509_extensions = v3
-          prompt = no
-          [dn]
-          CN = SyncLink Self-Signed
-          [v3]
-          basicConstraints = critical,CA:FALSE
-          keyUsage = critical,digitalSignature
-          extendedKeyUsage = critical,codeSigning
-          EOF
-          /usr/bin/openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
-            -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem" \
-            -config "$RUNNER_TEMP/cert.cnf"
-          # /usr/bin/openssl on macOS runners is LibreSSL, whose pkcs12 export already defaults to
-          # the legacy PBE algorithms (RC2-40 / 3DES / SHA1 MAC) that macOS's Security importer
-          # accepts. LibreSSL has no OpenSSL-3 -legacy flag, so do NOT pass it (it errors out).
-          /usr/bin/openssl pkcs12 -export -out "$RUNNER_TEMP/cert.p12" \
-            -inkey "$RUNNER_TEMP/key.pem" -in "$RUNNER_TEMP/cert.pem" -passout pass:"$KPWD"
           security create-keychain -p "$KPWD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KPWD" "$KEYCHAIN"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$KPWD" -T /usr/bin/codesign -T /usr/bin/security
+          if [ -n "${CSC_LINK:-}" ]; then
+            echo "Importing the provided signing certificate (CSC_LINK secret)."
+            echo "$CSC_LINK" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "${CSC_KEY_PASSWORD:-}" -T /usr/bin/codesign -T /usr/bin/security
+          else
+            echo "No CSC_LINK secret; generating a throwaway self-signed code-signing certificate."
+            # Build the openssl config with printf (not a heredoc) to avoid YAML/heredoc indentation traps.
+            printf '%s\n' '[req]' 'distinguished_name = dn' 'x509_extensions = v3' 'prompt = no' \
+              '[dn]' 'CN = SyncLink Self-Signed' \
+              '[v3]' 'basicConstraints = critical,CA:FALSE' 'keyUsage = critical,digitalSignature' \
+              'extendedKeyUsage = critical,codeSigning' > "$RUNNER_TEMP/cert.cnf"
+            /usr/bin/openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+              -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem" -config "$RUNNER_TEMP/cert.cnf"
+            # LibreSSL (/usr/bin/openssl on macOS) defaults to macOS-compatible PBE; it has no -legacy flag.
+            /usr/bin/openssl pkcs12 -export -out "$RUNNER_TEMP/cert.p12" \
+              -inkey "$RUNNER_TEMP/key.pem" -in "$RUNNER_TEMP/cert.pem" -passout pass:"$KPWD"
+            security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$KPWD" -T /usr/bin/codesign -T /usr/bin/security
+            # Trust the self-signed leaf for code signing, else find-identity -v filters it out and
+            # signing is skipped (the app then ships unsigned and re-prompts for the mic forever).
+            sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+              -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem" \
+              || sudo security add-trusted-cert -d -r trustAsRoot -p codeSign \
+                -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+          fi
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KPWD" "$KEYCHAIN"
-          # Trust the self-signed leaf as a code-signing anchor in the System keychain. WITHOUT this,
-          # `security find-identity -v -p codesigning` (how electron-builder discovers the identity)
-          # filters out the untrusted cert, signing is skipped, and the app ships unsigned. Runners
-          # have passwordless sudo.
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
-            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem" \
-            || sudo security add-trusted-cert -d -r trustAsRoot -p codeSign \
-              -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
           # Put our keychain on the search list AND make it default so osx-sign looks there.
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
           security default-keychain -s "$KEYCHAIN"
@@ -110,12 +101,9 @@ jobs:
       - name: Build the installer
         run: npm run ${{ matrix.script }}
         env:
-          # Provided-cert path (macOS only): electron-builder imports CSC_LINK/CSC_KEY_PASSWORD
-          # itself. Empty on Windows so the .exe is not signed with a Mac cert.
-          CSC_LINK: ${{ matrix.os == 'macos-latest' && secrets.CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.CSC_KEY_PASSWORD || '' }}
-          # On macOS this must be on so electron-builder finds the (self-)signed identity above.
-          # On Windows it stays off (no cert) so the .exe is just built unsigned.
+          # macOS signs via the identity the setup step imported into CSC_KEYCHAIN (auto-discovery).
+          # Do NOT set CSC_LINK here: an empty value makes electron-builder try to load a certificate
+          # from an empty path and die with "<repo> not a file". Windows just builds unsigned.
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.os == 'macos-latest' }}
 
       - name: Upload installers
