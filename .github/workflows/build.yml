@@ -77,8 +77,10 @@ jobs:
           /usr/bin/openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
             -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem" \
             -config "$RUNNER_TEMP/cert.cnf"
-          # -legacy: macOS's Security importer rejects OpenSSL 3's default PBES2/AES .p12 encryption.
-          /usr/bin/openssl pkcs12 -export -legacy -out "$RUNNER_TEMP/cert.p12" \
+          # /usr/bin/openssl on macOS runners is LibreSSL, whose pkcs12 export already defaults to
+          # the legacy PBE algorithms (RC2-40 / 3DES / SHA1 MAC) that macOS's Security importer
+          # accepts. LibreSSL has no OpenSSL-3 -legacy flag, so do NOT pass it (it errors out).
+          /usr/bin/openssl pkcs12 -export -out "$RUNNER_TEMP/cert.p12" \
             -inkey "$RUNNER_TEMP/key.pem" -in "$RUNNER_TEMP/cert.pem" -passout pass:"$KPWD"
           security create-keychain -p "$KPWD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
@@ -90,7 +92,9 @@ jobs:
           # filters out the untrusted cert, signing is skipped, and the app ships unsigned. Runners
           # have passwordless sudo.
           sudo security add-trusted-cert -d -r trustRoot -p codeSign \
-            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem" \
+            || sudo security add-trusted-cert -d -r trustAsRoot -p codeSign \
+              -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
           # Put our keychain on the search list AND make it default so osx-sign looks there.
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
           security default-keychain -s "$KEYCHAIN"
