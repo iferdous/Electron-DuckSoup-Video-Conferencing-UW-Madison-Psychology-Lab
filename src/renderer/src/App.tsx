@@ -915,6 +915,7 @@ export default function App(): ReactElement {
   const [setupChecking, setSetupChecking] = useState(false)
   const [linkStatus, setLinkStatus] = useState<ParticipantLinkStatus>('not-ready')
   const [finalParticipantLink, setFinalParticipantLink] = useState('')
+  const [finalParticipantDuckSoupUrl, setFinalParticipantDuckSoupUrl] = useState('')
   const [linkErrorMessage, setLinkErrorMessage] = useState('')
   // When the embedded LAN signal server is running, the experimenter keeps talking to it over
   // localhost (so isLocalSignalUrl still recognizes it and can restart it), but participants on
@@ -980,6 +981,7 @@ export default function App(): ReactElement {
     if (!isController || setupComplete) return
     setLinkStatus('not-ready')
     setFinalParticipantLink('')
+    setFinalParticipantDuckSoupUrl('')
     setLinkErrorMessage('')
   }, [isController, previewSessionLink, setupComplete])
 
@@ -1394,18 +1396,24 @@ export default function App(): ReactElement {
 
   const finalizeParticipantLink = (
     linkBase: string,
-    options: { allowLocalhost?: boolean } = {}
+    options: { allowLocalhost?: boolean; checkedDuckSoupUrl?: string } = {}
   ): { ok: true; link: string } | { ok: false; reason: string } => {
     let link: string
     try {
-      link = buildParticipantSessionLink(form, linkBase, normalizeMediaUrl)
+      link = buildParticipantSessionLink(
+        options.checkedDuckSoupUrl ? { ...form, duckSoupUrl: options.checkedDuckSoupUrl } : form,
+        linkBase,
+        normalizeMediaUrl
+      )
     } catch {
       return { ok: false, reason: 'Could not build the participant link. Check the room server URL.' }
     }
 
     const validation = validateParticipantSessionLink(link, {
       allowLocalhost: options.allowLocalhost,
-      requireDuckSoupDs: form.mediaTransport === 'ducksoup'
+      allowLocalhostDs: options.allowLocalhost,
+      requireDuckSoupDs: form.mediaTransport === 'ducksoup',
+      expectedDuckSoupUrl: options.checkedDuckSoupUrl
     })
     if (!validation.ok) return { ok: false, reason: validation.reason }
     return { ok: true, link: validation.url }
@@ -1413,7 +1421,8 @@ export default function App(): ReactElement {
 
   const copySessionLink = async (): Promise<void> => {
     const validation = validateParticipantSessionLink(finalParticipantLink, {
-      requireDuckSoupDs: form.mediaTransport === 'ducksoup'
+      requireDuckSoupDs: form.mediaTransport === 'ducksoup',
+      expectedDuckSoupUrl: form.mediaTransport === 'ducksoup' ? finalParticipantDuckSoupUrl : undefined
     })
     if (linkStatus !== 'ready' || !validation.ok) {
       const message =
@@ -4466,19 +4475,22 @@ export default function App(): ReactElement {
           addLog(message, 'error')
           return
         }
+        nextDuckSoupUrl = mediaCheck.url
         if (mediaCheck.url !== form.duckSoupUrl) updateForm('duckSoupUrl', mediaCheck.url)
         addLog(`Media server reachable at ${mediaCheck.url}.`, 'success')
         // Reachable from the experimenter's machine is necessary but not sufficient: localhost only
-        // works if every participant runs on THIS computer. Warn (don't block — single-machine
-        // testing legitimately uses localhost) so a multi-computer session isn't shipped a link that
-        // points each participant at their own empty localhost.
+        // works if every participant runs on THIS computer. Block copied multi-computer links that
+        // would send participants to their own empty localhost media server.
         try {
           const mediaHost = new URL(mediaCheck.url).hostname
-          if (['localhost', '127.0.0.1', '0.0.0.0'].includes(mediaHost)) {
-            addLog(
-              'Media server is set to localhost — that only works if every participant runs on THIS computer. For a multi-computer lab session, set the media server to this machine’s LAN address (e.g. http://192.168.1.50:8100) before copying the link.',
-              'warn'
-            )
+          if (isController && ['localhost', '127.0.0.1', '0.0.0.0'].includes(mediaHost)) {
+            const message =
+              'DuckSoup/Mozza is reachable only as localhost. For participant computers, set the media server to the host LAN address, such as http://192.168.1.50:8100, then continue again.'
+            setSetupErrorMessage(message)
+            setLinkStatus('error')
+            setLinkErrorMessage(message)
+            addLog(message, 'error')
+            return
           }
         } catch {
           // mediaCheck.url was already validated by normalizeMediaUrl + the probe above.
@@ -4486,7 +4498,9 @@ export default function App(): ReactElement {
       }
 
       if (isController) {
-        const finalized = finalizeParticipantLink(participantLinkBase || nextSignalUrl)
+        const finalized = finalizeParticipantLink(participantLinkBase || nextSignalUrl, {
+          checkedDuckSoupUrl: nextMediaTransport === 'ducksoup' ? nextDuckSoupUrl : undefined
+        })
         if (!finalized.ok) {
           setLinkStatus('error')
           setLinkErrorMessage(finalized.reason)
@@ -4495,6 +4509,7 @@ export default function App(): ReactElement {
           return
         }
         setFinalParticipantLink(finalized.link)
+        setFinalParticipantDuckSoupUrl(nextMediaTransport === 'ducksoup' ? nextDuckSoupUrl : '')
         setLinkStatus('ready')
         setLinkErrorMessage('')
         addLog('Participant link ready. Copy this link for participant computers.', 'success')

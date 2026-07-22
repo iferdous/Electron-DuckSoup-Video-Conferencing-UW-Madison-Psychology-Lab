@@ -66,7 +66,10 @@ describe('participant session links', () => {
       duckSoupUrl: '192.168.1.50:8100'
     }
     const link = buildParticipantSessionLink(form, 'http://192.168.1.50:8765', normalizeMediaUrl)
-    const validation = validateParticipantSessionLink(link, { requireDuckSoupDs: true })
+    const validation = validateParticipantSessionLink(link, {
+      requireDuckSoupDs: true,
+      expectedDuckSoupUrl: 'http://192.168.1.50:8100'
+    })
     const url = new URL(link)
 
     expect(validation).toEqual({ ok: true, url: link })
@@ -82,5 +85,48 @@ describe('participant session links', () => {
     )
 
     expect(validateParticipantSessionLink(link, { requireDuckSoupDs: true }).ok).toBe(false)
+  })
+
+  it('rejects DuckSoup links with local-only media server addresses', () => {
+    const link = buildParticipantSessionLink(
+      { ...baseForm, mediaTransport: 'ducksoup', duckSoupUrl: 'http://localhost:8100' },
+      'http://192.168.1.50:8765',
+      normalizeMediaUrl
+    )
+
+    const validation = validateParticipantSessionLink(link, { requireDuckSoupDs: true })
+    expect(validation.ok).toBe(false)
+    if (!validation.ok) expect(validation.reason).toContain('LAN address')
+  })
+
+  it('rejects DuckSoup links whose media server does not match the checked server', () => {
+    const link = buildParticipantSessionLink(
+      { ...baseForm, mediaTransport: 'ducksoup', duckSoupUrl: 'http://192.168.1.99:8100' },
+      'http://192.168.1.50:8765',
+      normalizeMediaUrl
+    )
+
+    const validation = validateParticipantSessionLink(link, {
+      requireDuckSoupDs: true,
+      expectedDuckSoupUrl: 'http://192.168.1.50:8100'
+    })
+    expect(validation.ok).toBe(false)
+    if (!validation.ok) expect(validation.reason).toContain('outdated')
+  })
+
+  it('allows localhost DuckSoup media only for explicit one-machine testing', () => {
+    const link = buildParticipantSessionLink(
+      { ...baseForm, mediaTransport: 'ducksoup', duckSoupUrl: 'localhost:8100' },
+      'http://192.168.1.50:8765',
+      normalizeMediaUrl
+    )
+
+    expect(
+      validateParticipantSessionLink(link, {
+        requireDuckSoupDs: true,
+        allowLocalhostDs: true,
+        expectedDuckSoupUrl: 'http://localhost:8100'
+      }).ok
+    ).toBe(true)
   })
 })

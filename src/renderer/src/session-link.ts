@@ -10,6 +10,19 @@ const LOCAL_ONLY_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0'])
 
 export const isLocalOnlyHost = (host: string): boolean => LOCAL_ONLY_HOSTS.has(host.toLowerCase())
 
+const normalizeUrlForCompare = (value: string): string => {
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`
+  try {
+    const url = new URL(withScheme)
+    url.hash = ''
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return ''
+  }
+}
+
 export const buildParticipantSessionLink = (
   form: Pick<
     SessionForm,
@@ -32,7 +45,12 @@ export const buildParticipantSessionLink = (
 
 export const validateParticipantSessionLink = (
   value: string,
-  options: { allowLocalhost?: boolean; requireDuckSoupDs?: boolean } = {}
+  options: {
+    allowLocalhost?: boolean
+    allowLocalhostDs?: boolean
+    requireDuckSoupDs?: boolean
+    expectedDuckSoupUrl?: string
+  } = {}
 ): ParticipantLinkValidation => {
   if (!value.trim()) return { ok: false, reason: 'The participant link is not ready yet. Create the room first.' }
 
@@ -53,8 +71,32 @@ export const validateParticipantSessionLink = (
         'This link only works on this computer. Create the room first so participants receive the host computer link.'
     }
   }
-  if (options.requireDuckSoupDs && !url.searchParams.get('ds')?.trim()) {
-    return { ok: false, reason: 'The DuckSoup participant link is missing the media server address.' }
+  if (options.requireDuckSoupDs) {
+    const ds = url.searchParams.get('ds')?.trim() ?? ''
+    if (!ds) return { ok: false, reason: 'The DuckSoup participant link is missing the media server address.' }
+
+    const normalizedDs = normalizeUrlForCompare(ds)
+    if (!normalizedDs) {
+      return { ok: false, reason: 'The DuckSoup media server address in the participant link is malformed.' }
+    }
+
+    const dsUrl = new URL(normalizedDs)
+    if (!options.allowLocalhostDs && isLocalOnlyHost(dsUrl.hostname)) {
+      return {
+        ok: false,
+        reason:
+          'The DuckSoup media server in the participant link points to this computer only. Use the host computer LAN address before copying the link.'
+      }
+    }
+
+    const expectedDuckSoupUrl = normalizeUrlForCompare(options.expectedDuckSoupUrl ?? '')
+    if (expectedDuckSoupUrl && normalizedDs !== expectedDuckSoupUrl) {
+      return {
+        ok: false,
+        reason:
+          'The participant link contains an outdated DuckSoup media server address. Recreate the room link after checking the media server.'
+      }
+    }
   }
 
   return { ok: true, url: url.toString() }
