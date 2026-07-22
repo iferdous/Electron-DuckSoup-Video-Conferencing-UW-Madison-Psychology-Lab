@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  duckSoupStartGate,
   monitorFeedKey,
   monitorWaitingState,
   resolveDuckSoupTrackUserId,
@@ -47,7 +48,7 @@ describe('experimenter monitor helpers', () => {
     ).toEqual({ userId: null, reason: 'ambiguous' })
   })
 
-  it('filters unsafe monitor descriptors before the controller accepts them', () => {
+  it('filters synthetic monitor descriptors before the controller accepts them', () => {
     const descriptors: MonitorStreamDescriptor[] = [
       { streamId: 'clean-p1', kind: 'clean', userId: 'p1', displayName: 'P1' },
       { streamId: 'altered-p2', kind: 'altered', userId: 'p2', displayName: 'P2' },
@@ -56,7 +57,7 @@ describe('experimenter monitor helpers', () => {
       { streamId: 'unknown-clean', kind: 'clean', userId: 'p9', displayName: 'Unknown' }
     ]
 
-    expect(safeMonitorDescriptors(descriptors, new Set(['p1', 'p2']))).toEqual(descriptors.slice(0, 2))
+    expect(safeMonitorDescriptors(descriptors)).toEqual([descriptors[0], descriptors[1], descriptors[4]])
   })
 
   it('builds stable feed keys and default waiting messages', () => {
@@ -67,5 +68,57 @@ describe('experimenter monitor helpers', () => {
     expect(monitorWaitingState(peer('p1'), 'altered')).toMatchObject({
       status: 'waiting-partner-stream'
     })
+  })
+
+  it('holds DuckSoup media until all expected dyad participants are visible in signaling', () => {
+    expect(
+      duckSoupStartGate({
+        isController: false,
+        useDuckSoup: true,
+        duckSoupActive: false,
+        duckSoupStartInFlight: false,
+        localUserId: 'p1',
+        peers: [peer('p1')],
+        expectedParticipants: 2
+      })
+    ).toMatchObject({ ready: false, reason: 'waiting-participants', participantCount: 1 })
+
+    expect(
+      duckSoupStartGate({
+        isController: false,
+        useDuckSoup: true,
+        duckSoupActive: false,
+        duckSoupStartInFlight: false,
+        localUserId: 'p1',
+        peers: [peer('p1'), peer('p2'), peer('experimenter', 'controller')],
+        expectedParticipants: 2
+      })
+    ).toMatchObject({ ready: true, reason: 'ready', participantCount: 2 })
+  })
+
+  it('does not start DuckSoup media for the experimenter or an already-started participant', () => {
+    expect(
+      duckSoupStartGate({
+        isController: true,
+        useDuckSoup: true,
+        duckSoupActive: false,
+        duckSoupStartInFlight: false,
+        localUserId: 'experimenter',
+        peers: [peer('p1'), peer('p2'), peer('experimenter', 'controller')],
+        expectedParticipants: 2
+      }).reason
+    ).toBe('controller')
+
+    expect(
+      duckSoupStartGate({
+        isController: false,
+        useDuckSoup: true,
+        duckSoupActive: true,
+        duckSoupStartInFlight: false,
+        localUserId: 'p1',
+        peers: [peer('p1'), peer('p2')],
+        expectedParticipants: 2
+      }).reason
+    ).toBe('already-started')
   })
 })

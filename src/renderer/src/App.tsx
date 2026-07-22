@@ -28,6 +28,7 @@ import {
   type SmileSynchronyCue
 } from './smile-onset'
 import {
+  duckSoupStartGate,
   monitorFeedKey,
   monitorWaitingState,
   resolveDuckSoupTrackUserId,
@@ -785,10 +786,12 @@ export default function App(): ReactElement {
   // DuckSoup (SFU + Mozza) media path
   const duckSoupPlayerRef = useRef<DuckSoupPlayer | null>(null)
   const duckSoupActiveRef = useRef(false)
+  const duckSoupStartInFlightRef = useRef(false)
   // Set when the DuckSoup interaction ends normally ('end'/'ending'), so a following 'closed'
   // event isn't misread as an unexpected mid-call media drop. Reset on each (re)join.
   const interactionEndedRef = useRef(false)
   const streamUserMapRef = useRef<Map<string, string>>(new Map())
+  const pendingDuckSoupTracksRef = useRef<Array<{ stream: MediaStream; track: MediaStreamTrack }>>([])
   const callPeersRef = useRef<CallPeer[]>([])
   const duckSoupFilesRef = useRef<Record<string, string[]>>({})
   const controlEventsRef = useRef<ControlEvent[]>([])
@@ -2664,8 +2667,7 @@ export default function App(): ReactElement {
     if (kind === 'monitor-offer') {
       // Controller side: receive a participant's clean + partner-altered streams.
     const body = payload.payload as { sdp: RTCSessionDescriptionInit; streamMap: MonitorStreamDescriptor[] }
-      const knownParticipantIds = new Set(callPeersRef.current.filter((peer) => peer.role === 'participant').map((peer) => peer.userId))
-      const streamMap = safeMonitorDescriptors(body.streamMap ?? [], knownParticipantIds)
+      const streamMap = safeMonitorDescriptors(body.streamMap ?? [])
       if (streamMap.length === 0) {
         addLog('Experimenter monitor rejected an unlabeled stream. Ask the participant to rejoin if a tile stays empty.', 'warn')
       }
@@ -2757,6 +2759,78 @@ export default function App(): ReactElement {
     }
   }
 
+  const attachDuckSoupTrackToUser = (stream: MediaStream, track: MediaStreamTrack, userId: string): void => {
+    let tile = remoteStreamsRef.current.get(userId)
+    if (!tile) {
+      const meta = callPeersRef.current.find((peer) => peer.userId === userId)
+      tile = {
+        userId,
+        displayName: meta?.displayName || userId,
+        role: meta?.role || 'participant',
+        stream: new MediaStream()
+      }
+      remoteStreamsRef.current.set(userId, tile)
+    }
+    if (!tile.stream.getTrackById(track.id)) tile.stream.addTrack(track)
+    if (stream.id) streamUserMapRef.current.set(stream.id, userId)
+    syncRemoteTiles()
+    publishMonitorStreams().catch(() => undefined)
+  }
+
+  const flushPendingDuckSoupTracks = (): void => {
+    if (pendingDuckSoupTracksRef.current.length === 0) return
+    const remaining: Array<{ stream: MediaStream; track: MediaStreamTrack }> = []
+    for (const pending of pendingDuckSoupTracksRef.current) {
+      const mappedUserId = streamUserMapRef.current.get(pending.stream.id)
+      const resolution = resolveDuckSoupTrackUserId({
+        streamId: pending.stream.id,
+        mappedUserId,
+        localUserId: callUserIdRef.current,
+        peers: callPeersRef.current
+      })
+      if (resolution.userId) {
+        attachDuckSoupTrackToUser(pending.stream, pending.track, resolution.userId)
+      } else if (resolution.reason !== 'ambiguous') {
+        remaining.push(pending)
+      }
+    }
+    pendingDuckSoupTracksRef.current = remaining
+  }
+
+  const maybeStartDuckSoupMedia = async (peersSnapshot = callPeersRef.current): Promise<void> => {
+    const gate = duckSoupStartGate({
+      isController,
+      useDuckSoup,
+      duckSoupActive: duckSoupActiveRef.current,
+      duckSoupStartInFlight: duckSoupStartInFlightRef.current,
+      localUserId: callUserIdRef.current,
+      peers: peersSnapshot,
+      expectedParticipants
+    })
+
+    if (!gate.ready) {
+      if (gate.reason === 'waiting-participants') {
+        setCallState('waiting')
+        setCallErrorMessage('')
+      }
+      return
+    }
+
+    duckSoupStartInFlightRef.current = true
+    setCallState('connecting')
+    try {
+      await startDuckSoupMedia()
+    } catch (error) {
+      const message = readableJoinError(error)
+      callErrorIsMediaDropRef.current = true
+      setCallState('error')
+      setCallErrorMessage(message)
+      addLog(message, 'error')
+    } finally {
+      duckSoupStartInFlightRef.current = false
+    }
+  }
+
   const handleSignalEvent = async (event: MessageEvent<string>): Promise<void> => {
     if (!inCallRef.current) return
     const envelope = JSON.parse(event.data) as SignalEnvelope
@@ -2767,21 +2841,25 @@ export default function App(): ReactElement {
         if (typeof serverEpochMs === 'number') serverClockOffsetRef.current = serverEpochMs - Date.now()
       }
       const peers = envelope.payload?.peers ?? []
+      callPeersRef.current = peers
       const mediaPeers = peers.filter((peer) => peer.userId !== callUserIdRef.current && peer.role === 'participant')
       setCallPeers(peers)
       if (mediaPeers.length > 0) setCallState('connecting')
       mediaPeers.forEach(maybeOfferToPeer)
+      flushPendingDuckSoupTracks()
+      await maybeStartDuckSoupMedia(peers)
       return
     }
 
     if (envelope.type === 'peer-joined' && envelope.payload?.peer) {
       const joinedPeer = envelope.payload.peer
-      setCallPeers((prev) => {
-        const next = prev.filter((peer) => peer.userId !== joinedPeer.userId)
-        return [...next, joinedPeer]
-      })
+      const nextPeers = [...callPeersRef.current.filter((peer) => peer.userId !== joinedPeer.userId), joinedPeer]
+      callPeersRef.current = nextPeers
+      setCallPeers(nextPeers)
       addLog(`${joinedPeer.displayName} joined the room.`, 'success')
       maybeOfferToPeer(joinedPeer)
+      flushPendingDuckSoupTracks()
+      await maybeStartDuckSoupMedia(nextPeers)
       // A participant may join after the experimenter selected Detect or Live. Send the
       // current automatic-session state directly so late joiners never silently stay Off.
       if (isController && joinedPeer.role === 'participant') {
@@ -2833,7 +2911,9 @@ export default function App(): ReactElement {
         // altered), so clear the monitor and let the remaining participants re-publish.
         closeMonitorConnection(userId)
         teardownMonitor()
-        setCallPeers((prev) => prev.filter((peer) => peer.userId !== userId))
+        const nextPeers = callPeersRef.current.filter((peer) => peer.userId !== userId)
+        callPeersRef.current = nextPeers
+        setCallPeers(nextPeers)
       }
       addLog('Someone left the room.', 'warn')
       return
@@ -3286,11 +3366,16 @@ export default function App(): ReactElement {
             syncRemoteTiles()
           }
           addLog('Another participant connected to the media server.', 'success')
+          flushPendingDuckSoupTracks()
           break
         }
         case 'track': {
           const event = payload as RTCTrackEvent
           const stream = event.streams[0]
+          if (!stream) {
+            addLog('Received an altered DuckSoup track without a media stream.', 'warn')
+            break
+          }
           const mappedUserId = stream ? streamUserMapRef.current.get(stream.id) : undefined
           const resolution = resolveDuckSoupTrackUserId({
             streamId: stream?.id,
@@ -3300,32 +3385,19 @@ export default function App(): ReactElement {
           })
           const userId = resolution.userId
           if (!userId) {
-            addLog(
-              resolution.reason === 'ambiguous'
-                ? 'Received an altered DuckSoup stream, but it could not be safely matched to one participant.'
-                : 'Received an altered DuckSoup stream before a partner identity was available.',
-              'warn'
-            )
+            if (resolution.reason === 'ambiguous') {
+              addLog('Received an altered DuckSoup stream, but it could not be safely matched to one participant.', 'warn')
+            } else if (!pendingDuckSoupTracksRef.current.some((pending) => pending.track.id === event.track.id)) {
+              pendingDuckSoupTracksRef.current.push({ stream, track: event.track })
+              addLog('Received an altered DuckSoup stream before partner identity was ready. Holding it for matching.', 'info')
+            }
             break
           }
           if (resolution.reason === 'dyad-fallback' && stream) {
             streamUserMapRef.current.set(stream.id, userId)
             addLog('Matched the altered DuckSoup stream to the dyad partner.', 'info')
           }
-          let tile = remoteStreamsRef.current.get(userId)
-          if (!tile) {
-            const meta = callPeersRef.current.find((peer) => peer.userId === userId)
-            tile = {
-              userId,
-              displayName: meta?.displayName || userId,
-              role: meta?.role || 'participant',
-              stream: new MediaStream()
-            }
-            remoteStreamsRef.current.set(userId, tile)
-          }
-          if (!tile.stream.getTrackById(event.track.id)) tile.stream.addTrack(event.track)
-          syncRemoteTiles()
-          publishMonitorStreams().catch(() => undefined)
+          attachDuckSoupTrackToUser(stream, event.track, userId)
           setCallState('connected')
           break
         }
@@ -3407,6 +3479,7 @@ export default function App(): ReactElement {
               duckSoupPlayerRef.current = null
             }
             duckSoupActiveRef.current = false
+            duckSoupStartInFlightRef.current = false
             callErrorIsMediaDropRef.current = true
             setCallState('error')
             setCallErrorMessage('The video connection dropped. Press Rejoin to reconnect.')
@@ -3434,6 +3507,7 @@ export default function App(): ReactElement {
               duckSoupPlayerRef.current = null
             }
             duckSoupActiveRef.current = false
+            duckSoupStartInFlightRef.current = false
             callErrorIsMediaDropRef.current = true
             setCallState('error')
             setCallErrorMessage(detail)
@@ -3459,7 +3533,9 @@ export default function App(): ReactElement {
       duckSoupPlayerRef.current = null
     }
     duckSoupActiveRef.current = false
+    duckSoupStartInFlightRef.current = false
     streamUserMapRef.current.clear()
+    pendingDuckSoupTracksRef.current = []
     duckSoupFilesRef.current = {}
     mediaQualitySamplesRef.current = []
     pendingMozzaControlsRef.current = null
@@ -3546,8 +3622,10 @@ export default function App(): ReactElement {
 
       if (!isController) {
         if (useDuckSoup) {
-          // DuckSoup grabs the camera/mic itself and routes media through the SFU + Mozza.
-          await startDuckSoupMedia()
+          // DuckSoup media starts after signaling confirms the expected participants are in the room.
+          // Starting it here is too early: the SFU can abort if one participant reaches it before the
+          // other participant has joined the room and is ready to start media.
+          addLog('Room joined. Waiting for the other participant before starting DuckSoup media.', 'info')
         } else {
           const rawStream = await navigator.mediaDevices.getUserMedia({
             video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
@@ -3650,6 +3728,8 @@ export default function App(): ReactElement {
 
   const leaveLiveCall = (): void => {
     inCallRef.current = false
+    duckSoupStartInFlightRef.current = false
+    pendingDuckSoupTracksRef.current = []
     stopSmileDetector()
     returnAutomaticSmileToNeutral('Station left the room.', false)
     clearSmileEnvelopeTimers()

@@ -24,7 +24,13 @@ export type MonitorFeedState = {
 
 export type DuckSoupStreamResolution = {
   userId: string | null
-  reason: 'mapped' | 'dyad-fallback' | 'self' | 'missing-stream' | 'ambiguous' | 'no-partner'
+  reason: 'mapped' | 'dyad-fallback' | 'missing-stream' | 'ambiguous' | 'no-partner'
+}
+
+export type DuckSoupStartGate = {
+  ready: boolean
+  reason: 'controller' | 'not-ducksoup' | 'already-started' | 'waiting-participants' | 'ready'
+  participantCount: number
 }
 
 export const monitorFeedKey = (userId: string, kind: MonitorFeedKind): string => `${userId}:${kind}`
@@ -68,11 +74,31 @@ export function resolveDuckSoupTrackUserId(params: {
 }
 
 export function safeMonitorDescriptors(
-  descriptors: MonitorStreamDescriptor[],
-  knownParticipantIds: Set<string>
+  descriptors: MonitorStreamDescriptor[]
 ): MonitorStreamDescriptor[] {
   return descriptors.filter((descriptor) => {
     if (!descriptor.streamId || !descriptor.userId || descriptor.userId.startsWith('peer-')) return false
-    return knownParticipantIds.has(descriptor.userId)
+    return descriptor.kind === 'clean' || descriptor.kind === 'altered'
   })
+}
+
+export function duckSoupStartGate(params: {
+  isController: boolean
+  useDuckSoup: boolean
+  duckSoupActive: boolean
+  duckSoupStartInFlight: boolean
+  localUserId: string
+  peers: CallPeer[]
+  expectedParticipants: number
+}): DuckSoupStartGate {
+  const participantCount = params.peers.filter((peer) => peer.role === 'participant').length
+  if (params.isController) return { ready: false, reason: 'controller', participantCount }
+  if (!params.useDuckSoup) return { ready: false, reason: 'not-ducksoup', participantCount }
+  if (params.duckSoupActive || params.duckSoupStartInFlight) {
+    return { ready: false, reason: 'already-started', participantCount }
+  }
+  if (participantCount < params.expectedParticipants) {
+    return { ready: false, reason: 'waiting-participants', participantCount }
+  }
+  return { ready: true, reason: 'ready', participantCount }
 }
