@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, session, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, session, shell, systemPreferences } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import dgram, { type Socket } from 'node:dgram'
 import { mkdir, writeFile, readdir, copyFile, stat, readFile } from 'node:fs/promises'
@@ -1068,6 +1068,11 @@ app.whenReady().then(async () => {
       serverDataDir,
       sessionsDir: join(app.getPath('documents'), 'SyncLink Sessions')
     }
+  })
+
+  ipcMain.handle('copy-text-to-clipboard', async (_, value: string) => {
+    clipboard.writeText(value)
+    return { ok: true }
   })
 
   ipcMain.handle('advertise-ducksoup-host', async (_, payload: HostAdvertisement) => {

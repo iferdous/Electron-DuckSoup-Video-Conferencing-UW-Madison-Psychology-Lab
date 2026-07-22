@@ -38,6 +38,7 @@ declare global {
       checkDuckSoup: (baseUrl: string) => Promise<{ ok: boolean; status: number; detail: string }>
       getNetworkInfo: () => Promise<{ hostname: string; addresses: string[] }>
       getStoragePaths: () => Promise<{ serverDataDir: string; sessionsDir: string }>
+      copyTextToClipboard: (value: string) => Promise<{ ok: boolean }>
       advertiseDuckSoupHost: (payload: {
         serverName: string
         duckSoupUrl: string

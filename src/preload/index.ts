@@ -21,6 +21,8 @@ const researchApi = {
     ipcRenderer.invoke('get-network-info'),
   getStoragePaths: (): Promise<{ serverDataDir: string; sessionsDir: string }> =>
     ipcRenderer.invoke('get-storage-paths'),
+  copyTextToClipboard: (value: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('copy-text-to-clipboard', value),
   advertiseDuckSoupHost: (payload: {
     serverName: string
     duckSoupUrl: string

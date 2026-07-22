@@ -40,6 +40,11 @@ import type {
   SessionForm,
   SessionFormat
 } from './types'
+import {
+  buildParticipantSessionLink,
+  validateParticipantSessionLink,
+  type ParticipantLinkStatus
+} from './session-link'
 
 // DuckSoup interactions are capped server-side at 1200s (20 min). Lab conversations longer
 // than this must rejoin. Kept as a constant so it's easy to surface as a setting later.
@@ -903,6 +908,9 @@ export default function App(): ReactElement {
   const [sessionLinkNotice, setSessionLinkNotice] = useState('')
   const [setupErrorMessage, setSetupErrorMessage] = useState('')
   const [setupChecking, setSetupChecking] = useState(false)
+  const [linkStatus, setLinkStatus] = useState<ParticipantLinkStatus>('not-ready')
+  const [finalParticipantLink, setFinalParticipantLink] = useState('')
+  const [linkErrorMessage, setLinkErrorMessage] = useState('')
   // When the embedded LAN signal server is running, the experimenter keeps talking to it over
   // localhost (so isLocalSignalUrl still recognizes it and can restart it), but participants on
   // other machines must be handed this machine's LAN address instead. Localhost in a copied link
@@ -933,30 +941,16 @@ export default function App(): ReactElement {
     : form.targetUserId
       ? form.targetUserId
       : 'all participants'
-  const sessionLink = useMemo(() => {
-    // Participants get the LAN address of the embedded server, never localhost (which would resolve
-    // to their own machine). Every fallback stays local: a link must never silently point at a
-    // remote/hosted server the experimenter did not choose.
+  const previewSessionLink = useMemo(() => {
     const linkBase =
       isLocalSignalUrl(form.callSignalUrl) && localSignalLanUrl
         ? localSignalLanUrl
         : form.callSignalUrl || localSignalLanUrl || localSignalUrl
-    let url: URL
     try {
-      url = new URL('/join', linkBase)
+      return buildParticipantSessionLink(form, linkBase, normalizeMediaUrl)
     } catch {
-      url = new URL('/join', localSignalLanUrl || localSignalUrl)
+      return buildParticipantSessionLink(form, localSignalLanUrl || localSignalUrl, normalizeMediaUrl)
     }
-    url.searchParams.set('roomId', form.roomId)
-    url.searchParams.set('studyId', form.studyId)
-    url.searchParams.set('format', form.sessionFormat)
-    url.searchParams.set('transport', form.mediaTransport)
-    if (form.mediaTransport === 'ducksoup' && form.duckSoupUrl.trim()) {
-      // Normalize so participants always receive a parseable http(s):// address in the link.
-      url.searchParams.set('ds', normalizeMediaUrl(form.duckSoupUrl) || form.duckSoupUrl.trim())
-    }
-    if (form.dyadId.trim()) url.searchParams.set('dyadId', form.dyadId.trim())
-    return url.toString()
   }, [
     form.callSignalUrl,
     form.dyadId,
@@ -967,6 +961,22 @@ export default function App(): ReactElement {
     form.studyId,
     localSignalLanUrl
   ])
+  const copyableParticipantLink = linkStatus === 'ready' ? finalParticipantLink : ''
+  const participantLinkStatusText =
+    linkStatus === 'ready'
+      ? 'Participant link ready'
+      : linkStatus === 'starting-server'
+        ? 'Starting room server...'
+        : linkStatus === 'error'
+          ? 'Could not generate participant link'
+          : 'Room link not ready'
+
+  useEffect(() => {
+    if (!isController || setupComplete) return
+    setLinkStatus('not-ready')
+    setFinalParticipantLink('')
+    setLinkErrorMessage('')
+  }, [isController, previewSessionLink, setupComplete])
 
   const addLog = useCallback((message: string, level: LogEvent['level'] = 'info') => {
     setLogs((prev) =>
@@ -1377,12 +1387,54 @@ export default function App(): ReactElement {
     }
   }
 
-  const copySessionLink = async (): Promise<void> => {
+  const finalizeParticipantLink = (
+    linkBase: string,
+    options: { allowLocalhost?: boolean } = {}
+  ): { ok: true; link: string } | { ok: false; reason: string } => {
+    let link: string
     try {
-      await navigator.clipboard.writeText(sessionLink)
-      addLog('Participant session link copied.', 'success')
+      link = buildParticipantSessionLink(form, linkBase, normalizeMediaUrl)
     } catch {
-      addLog('Could not copy automatically. Select and copy the session link manually.', 'warn')
+      return { ok: false, reason: 'Could not build the participant link. Check the room server URL.' }
+    }
+
+    const validation = validateParticipantSessionLink(link, {
+      allowLocalhost: options.allowLocalhost,
+      requireDuckSoupDs: form.mediaTransport === 'ducksoup'
+    })
+    if (!validation.ok) return { ok: false, reason: validation.reason }
+    return { ok: true, link: validation.url }
+  }
+
+  const copySessionLink = async (): Promise<void> => {
+    const validation = validateParticipantSessionLink(finalParticipantLink, {
+      requireDuckSoupDs: form.mediaTransport === 'ducksoup'
+    })
+    if (linkStatus !== 'ready' || !validation.ok) {
+      const message =
+        linkStatus === 'ready' && !validation.ok
+          ? validation.reason
+          : 'The participant link is not ready yet. Create the room first.'
+      setLinkErrorMessage(message)
+      setLinkStatus('error')
+      playNoticeTone()
+      addLog(message, 'error')
+      return
+    }
+
+    try {
+      await window.researchApi.copyTextToClipboard(validation.url)
+      setLinkErrorMessage('')
+      addLog('Participant link copied. Send this to participant computers.', 'success')
+    } catch {
+      try {
+        await navigator.clipboard.writeText(validation.url)
+        setLinkErrorMessage('')
+        addLog('Participant link copied. Send this to participant computers.', 'success')
+      } catch {
+        setLinkErrorMessage('Could not copy automatically. Select and copy the participant link manually.')
+        addLog('Could not copy automatically. Select and copy the participant link manually.', 'warn')
+      }
     }
   }
 
@@ -4176,6 +4228,7 @@ export default function App(): ReactElement {
     let nextSignalUrl = form.callSignalUrl
     let nextMediaTransport = form.mediaTransport
     let nextDuckSoupUrl = form.duckSoupUrl
+    let participantLinkBase = ''
 
     try {
       // Participants must load the experimenter's session link. Without it they would silently join their
@@ -4216,11 +4269,22 @@ export default function App(): ReactElement {
 
       if (isController) {
         if (isLocalSignalUrl(nextSignalUrl)) {
+          setLinkStatus('starting-server')
+          setLinkErrorMessage('')
           const result = await startSignalServer()
-          if (!result.ok) return
+          if (!result.ok) {
+            const message = 'Could not generate participant link because the room server did not start.'
+            setLinkStatus('error')
+            setLinkErrorMessage(message)
+            setSetupErrorMessage(message)
+            return
+          }
+          participantLinkBase = result.lanUrl
+          nextSignalUrl = result.localUrl
         } else {
           const reachable = await checkRoomStatus(false, { roomId: nextRoomId, callSignalUrl: nextSignalUrl })
           if (!reachable) return
+          participantLinkBase = nextSignalUrl
         }
       }
 
@@ -4251,6 +4315,21 @@ export default function App(): ReactElement {
         } catch {
           // mediaCheck.url was already validated by normalizeMediaUrl + the probe above.
         }
+      }
+
+      if (isController) {
+        const finalized = finalizeParticipantLink(participantLinkBase || nextSignalUrl)
+        if (!finalized.ok) {
+          setLinkStatus('error')
+          setLinkErrorMessage(finalized.reason)
+          setSetupErrorMessage(finalized.reason)
+          addLog(finalized.reason, 'error')
+          return
+        }
+        setFinalParticipantLink(finalized.link)
+        setLinkStatus('ready')
+        setLinkErrorMessage('')
+        addLog('Participant link ready. Copy this link for participant computers.', 'success')
       }
 
       setSetupComplete(true)
@@ -4402,9 +4481,15 @@ export default function App(): ReactElement {
               {isController ? (
                 <div className="share-card">
                   <span>Participant session link</span>
-                  <input value={sessionLink} readOnly />
+                  <input
+                    value={copyableParticipantLink || 'Create the room first to generate the participant link.'}
+                    readOnly
+                    disabled={linkStatus !== 'ready'}
+                  />
+                  <p className={`link-status link-status-${linkStatus}`}>{participantLinkStatusText}</p>
+                  {linkErrorMessage && <p className="setup-notice">{linkErrorMessage}</p>}
                   <div className="button-row no-margin">
-                    <button className="primary" onClick={() => copySessionLink()}>
+                    <button className="primary" onClick={() => copySessionLink()} disabled={linkStatus !== 'ready'}>
                       Copy link
                     </button>
                   </div>
@@ -4577,8 +4662,12 @@ export default function App(): ReactElement {
               </div>
             </div>
             <div className="button-row">
-              <button onClick={() => copySessionLink()}>Copy link</button>
+              <button onClick={() => copySessionLink()} disabled={linkStatus !== 'ready'}>Copy link</button>
             </div>
+            <p className={`link-status link-status-${linkStatus}`}>
+              {copyableParticipantLink || 'Participant link will appear after the room server is ready.'}
+            </p>
+            {linkErrorMessage && <p className="setup-notice">{linkErrorMessage}</p>}
           </section>
 
           <section className="panel">

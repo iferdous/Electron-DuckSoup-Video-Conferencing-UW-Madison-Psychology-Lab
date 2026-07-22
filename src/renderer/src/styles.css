@@ -626,6 +626,32 @@ label {
   font-size: 12px;
 }
 
+.share-card input:disabled {
+  color: var(--muted);
+  opacity: 1;
+}
+
+.link-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.link-status-ready {
+  color: var(--success);
+}
+
+.link-status-starting-server {
+  color: var(--accent);
+}
+
+.link-status-error {
+  color: var(--red);
+}
+
 .advanced-connection {
   border-color: rgb(75 85 99 / 0.5);
   background: rgb(31 41 55 / 0.5);
