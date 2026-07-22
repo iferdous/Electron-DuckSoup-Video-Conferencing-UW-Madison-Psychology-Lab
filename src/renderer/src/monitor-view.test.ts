@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   duckSoupStartGate,
+  duckSoupPeerInfo,
   monitorFeedKey,
   monitorWaitingState,
   resolveDuckSoupTrackUserId,
@@ -17,6 +18,19 @@ const peer = (userId: string, role: CallPeer['role'] = 'participant'): CallPeer 
 })
 
 describe('experimenter monitor helpers', () => {
+  it('normalizes DuckSoup peer payloads from strings and objects', () => {
+    expect(duckSoupPeerInfo('p2')).toEqual({ userId: 'p2' })
+    expect(duckSoupPeerInfo({ userId: 'p2', streamId: 'stream-p2' })).toEqual({
+      userId: 'p2',
+      streamId: 'stream-p2'
+    })
+    expect(duckSoupPeerInfo({ id: 'p3', stream: 'stream-p3' })).toEqual({
+      userId: 'p3',
+      streamId: 'stream-p3'
+    })
+    expect(duckSoupPeerInfo('')).toBeNull()
+  })
+
   it('uses the explicit DuckSoup stream mapping when available', () => {
     expect(
       resolveDuckSoupTrackUserId({

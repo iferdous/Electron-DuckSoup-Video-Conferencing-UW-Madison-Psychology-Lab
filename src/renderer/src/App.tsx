@@ -29,6 +29,7 @@ import {
 } from './smile-onset'
 import {
   duckSoupStartGate,
+  duckSoupPeerInfo,
   monitorFeedKey,
   monitorWaitingState,
   resolveDuckSoupTrackUserId,
@@ -3377,9 +3378,9 @@ export default function App(): ReactElement {
           break
         }
         case 'other_joined': {
-          const info = (payload ?? {}) as { userId?: string; streamId?: string }
-          if (info.userId && info.streamId) streamUserMapRef.current.set(info.streamId, info.userId)
-          if (info.userId && !remoteStreamsRef.current.has(info.userId)) {
+          const info = duckSoupPeerInfo(payload)
+          if (info?.userId && info.streamId) streamUserMapRef.current.set(info.streamId, info.userId)
+          if (info?.userId && info.userId !== callUserIdRef.current && !remoteStreamsRef.current.has(info.userId)) {
             const meta = callPeersRef.current.find((peer) => peer.userId === info.userId)
             remoteStreamsRef.current.set(info.userId, {
               userId: info.userId,

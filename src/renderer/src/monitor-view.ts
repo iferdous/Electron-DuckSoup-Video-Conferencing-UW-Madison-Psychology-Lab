@@ -27,6 +27,11 @@ export type DuckSoupStreamResolution = {
   reason: 'mapped' | 'dyad-fallback' | 'dyad-local-loopback' | 'missing-stream' | 'ambiguous' | 'no-partner'
 }
 
+export type DuckSoupPeerInfo = {
+  userId: string
+  streamId?: string
+}
+
 export type DuckSoupStartGate = {
   ready: boolean
   reason: 'controller' | 'not-ducksoup' | 'already-started' | 'waiting-participants' | 'ready'
@@ -34,6 +39,31 @@ export type DuckSoupStartGate = {
 }
 
 export const monitorFeedKey = (userId: string, kind: MonitorFeedKind): string => `${userId}:${kind}`
+
+export function duckSoupPeerInfo(payload: unknown): DuckSoupPeerInfo | null {
+  if (typeof payload === 'string') {
+    const userId = payload.trim()
+    return userId ? { userId } : null
+  }
+  if (!payload || typeof payload !== 'object') return null
+  const record = payload as Record<string, unknown>
+  const userId =
+    typeof record.userId === 'string'
+      ? record.userId.trim()
+      : typeof record.user === 'string'
+        ? record.user.trim()
+        : typeof record.id === 'string'
+          ? record.id.trim()
+          : ''
+  if (!userId) return null
+  const streamId =
+    typeof record.streamId === 'string'
+      ? record.streamId.trim()
+      : typeof record.stream === 'string'
+        ? record.stream.trim()
+        : undefined
+  return streamId ? { userId, streamId } : { userId }
+}
 
 export function monitorWaitingState(peer: CallPeer | undefined, kind: MonitorFeedKind): MonitorFeedState {
   if (!peer) {
