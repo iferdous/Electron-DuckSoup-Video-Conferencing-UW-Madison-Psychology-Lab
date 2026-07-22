@@ -27,6 +27,15 @@ import {
   type SmileOnsetCue,
   type SmileSynchronyCue
 } from './smile-onset'
+import {
+  monitorFeedKey,
+  monitorWaitingState,
+  resolveDuckSoupTrackUserId,
+  safeMonitorDescriptors,
+  type MonitorFeedKind,
+  type MonitorFeedState,
+  type MonitorStreamDescriptor
+} from './monitor-view'
 import type {
   CallPeer,
   CallRole,
@@ -209,15 +218,11 @@ type RemoteTile = {
 // A single feed in the experimenter's 4-view monitor: one participant's clean or altered stream.
 type MonitorTile = {
   key: string // `${userId}:${kind}`
-  kind: 'clean' | 'altered'
+  kind: MonitorFeedKind
   userId: string
   displayName: string
   stream: MediaStream
 }
-
-// Stream descriptor a participant sends with its monitor offer so the controller knows what each
-// forwarded MediaStream is, by its msid (stream.id), without inspecting the media.
-type MonitorStreamDescriptor = { streamId: string; kind: 'clean' | 'altered'; userId: string; displayName: string }
 
 type DuckSoupRtpStats = {
   jitter?: number
@@ -363,12 +368,6 @@ const smileSynchronyEventsToCsv = (events: SmileOnsetAuditEvent[]): string => {
 
 const appTitle = 'SyncLink'
 const appSubtitle = 'A real-time platform for studying social connection'
-
-// "Alice · P001" once the participant's study ID has been relayed; otherwise just the name.
-const peerStripLabel = (peer: CallPeer): string => {
-  const id = peer.role === 'participant' ? peer.participantId : ''
-  return id ? `${peer.displayName} · ${id}` : peer.displayName
-}
 
 const audioPresets: Array<{
   label: string
@@ -831,8 +830,10 @@ export default function App(): ReactElement {
   // receives from the SFU) to the controller. Every forwarded stream is self-labelled with
   // { kind: 'clean'|'altered', userId } so the controller can drop it in the right tile.
   const monitorConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map())
-  const monitorStreamMetaRef = useRef<Map<string, { kind: 'clean' | 'altered'; userId: string; displayName: string }>>(new Map())
+  const monitorStreamMetaRef = useRef<Map<string, { kind: MonitorFeedKind; userId: string; displayName: string }>>(new Map())
   const monitorPendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map())
+  const monitorConnectionFeedKeysRef = useRef<Map<string, string[]>>(new Map())
+  const monitorFeedStatesRef = useRef<Map<string, MonitorFeedState>>(new Map())
   const publishedMonitorSigRef = useRef<string>('')
   const monitorReceivedRef = useRef<Map<string, MonitorTile>>(new Map())
   // True from the moment the user initiates a join until they leave. Late async callbacks
@@ -875,6 +876,7 @@ export default function App(): ReactElement {
   const [callPeers, setCallPeers] = useState<CallPeer[]>([])
   const [remoteTiles, setRemoteTiles] = useState<RemoteTile[]>([])
   const [monitorTiles, setMonitorTiles] = useState<MonitorTile[]>([])
+  const [monitorFeedStates, setMonitorFeedStates] = useState<Record<string, MonitorFeedState>>({})
   const [storagePaths, setStoragePaths] = useState<{ serverDataDir: string; sessionsDir: string } | null>(null)
   const [experimenterNotes, setExperimenterNotes] = useState('')
   const experimenterNotesRef = useRef('')
@@ -1323,7 +1325,7 @@ export default function App(): ReactElement {
       addLog(error instanceof Error ? error.message : 'Could not share view with the experimenter.', 'error')
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [callPeers, remoteTiles, callState, useDuckSoup, isController])
+  }, [callPeers, remoteTiles, callState, cleanStreamVersion, useDuckSoup, isController])
 
   const updateForm = <K extends keyof SessionForm>(field: K, value: SessionForm[K]): void => {
     setForm((prev) => ({ ...prev, [field]: value }))
@@ -2551,12 +2553,32 @@ export default function App(): ReactElement {
   const monitorIceServers = [{ urls: 'stun:stun.l.google.com:19302' }]
 
   const syncMonitorTiles = (): void => setMonitorTiles([...monitorReceivedRef.current.values()])
+  const syncMonitorFeedStates = (): void => setMonitorFeedStates(Object.fromEntries(monitorFeedStatesRef.current))
+
+  const setMonitorFeedState = (key: string, state: MonitorFeedState): void => {
+    monitorFeedStatesRef.current.set(key, state)
+    syncMonitorFeedStates()
+  }
+
+  const setMonitorConnectionFeedsState = (userId: string, state: MonitorFeedState): void => {
+    const keys = monitorConnectionFeedKeysRef.current.get(userId) ?? []
+    for (const key of keys) monitorFeedStatesRef.current.set(key, state)
+    syncMonitorFeedStates()
+  }
+
+  const dropMonitorConnectionTiles = (userId: string): void => {
+    const keys = monitorConnectionFeedKeysRef.current.get(userId) ?? []
+    let changed = false
+    for (const key of keys) changed = monitorReceivedRef.current.delete(key) || changed
+    if (changed) syncMonitorTiles()
+  }
 
   const closeMonitorConnection = (userId: string): void => {
     const pc = monitorConnectionsRef.current.get(userId)
     if (pc) {
       pc.onicecandidate = null
       pc.ontrack = null
+      pc.onconnectionstatechange = null
       try {
         pc.close()
       } catch {
@@ -2565,12 +2587,16 @@ export default function App(): ReactElement {
       monitorConnectionsRef.current.delete(userId)
     }
     monitorPendingIceRef.current.delete(userId)
+    monitorConnectionFeedKeysRef.current.delete(userId)
   }
 
   const teardownMonitor = (): void => {
     for (const userId of [...monitorConnectionsRef.current.keys()]) closeMonitorConnection(userId)
     monitorStreamMetaRef.current.clear()
     monitorPendingIceRef.current.clear()
+    monitorConnectionFeedKeysRef.current.clear()
+    monitorFeedStatesRef.current.clear()
+    syncMonitorFeedStates()
     publishedMonitorSigRef.current = ''
     if (monitorReceivedRef.current.size > 0) {
       monitorReceivedRef.current.clear()
@@ -2609,6 +2635,13 @@ export default function App(): ReactElement {
     closeMonitorConnection(controller.userId)
     const pc = new RTCPeerConnection({ iceServers: monitorIceServers })
     monitorConnectionsRef.current.set(controller.userId, pc)
+    pc.onconnectionstatechange = () => {
+      if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
+        publishedMonitorSigRef.current = ''
+        addLog('Experimenter monitor connection dropped. Re-sharing this station view.', 'warn')
+        window.setTimeout(() => publishMonitorStreams().catch(() => undefined), 500)
+      }
+    }
     pc.onicecandidate = (event) => {
       if (event.candidate) postSignal('monitor-candidate', event.candidate.toJSON(), controller.userId).catch(() => undefined)
     }
@@ -2630,15 +2663,27 @@ export default function App(): ReactElement {
 
     if (kind === 'monitor-offer') {
       // Controller side: receive a participant's clean + partner-altered streams.
-      const body = payload.payload as { sdp: RTCSessionDescriptionInit; streamMap: MonitorStreamDescriptor[] }
-      for (const descriptor of body.streamMap ?? []) {
+    const body = payload.payload as { sdp: RTCSessionDescriptionInit; streamMap: MonitorStreamDescriptor[] }
+      const knownParticipantIds = new Set(callPeersRef.current.filter((peer) => peer.role === 'participant').map((peer) => peer.userId))
+      const streamMap = safeMonitorDescriptors(body.streamMap ?? [], knownParticipantIds)
+      if (streamMap.length === 0) {
+        addLog('Experimenter monitor rejected an unlabeled stream. Ask the participant to rejoin if a tile stays empty.', 'warn')
+      }
+      const feedKeys = streamMap.map((descriptor) => monitorFeedKey(descriptor.userId, descriptor.kind))
+      monitorConnectionFeedKeysRef.current.set(from, feedKeys)
+      for (const descriptor of streamMap) {
         monitorStreamMetaRef.current.set(descriptor.streamId, {
           kind: descriptor.kind,
           userId: descriptor.userId,
           displayName: descriptor.displayName
         })
+        setMonitorFeedState(monitorFeedKey(descriptor.userId, descriptor.kind), {
+          status: 'sharing-with-experimenter',
+          message: `${descriptor.displayName} is sharing this ${descriptor.kind === 'clean' ? 'unaltered' : 'altered'} feed.`
+        })
       }
       closeMonitorConnection(from)
+      monitorConnectionFeedKeysRef.current.set(from, feedKeys)
       const pc = new RTCPeerConnection({ iceServers: monitorIceServers })
       monitorConnectionsRef.current.set(from, pc)
       pc.ontrack = (event) => {
@@ -2646,9 +2691,31 @@ export default function App(): ReactElement {
         if (!stream) return
         const meta = monitorStreamMetaRef.current.get(stream.id)
         if (!meta) return
-        const key = `${meta.userId}:${meta.kind}`
+        const key = monitorFeedKey(meta.userId, meta.kind)
+        event.track.onended = () => {
+          monitorReceivedRef.current.delete(key)
+          setMonitorFeedState(key, {
+            status: 'failed',
+            message: 'Monitor feed ended. Waiting for the participant to re-share.'
+          })
+          syncMonitorTiles()
+        }
         monitorReceivedRef.current.set(key, { key, kind: meta.kind, userId: meta.userId, displayName: meta.displayName, stream })
+        setMonitorFeedState(key, {
+          status: 'connected',
+          message: `${meta.displayName} ${meta.kind === 'clean' ? 'unaltered' : 'altered'} feed connected.`
+        })
         syncMonitorTiles()
+      }
+      pc.onconnectionstatechange = () => {
+        if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
+          dropMonitorConnectionTiles(from)
+          setMonitorConnectionFeedsState(from, {
+            status: 'failed',
+            message: 'Monitor feed disconnected. Waiting for the participant to re-share.'
+          })
+          addLog('One experimenter monitor feed disconnected.', 'warn')
+        }
       }
       pc.onicecandidate = (event) => {
         if (event.candidate) postSignal('monitor-candidate', event.candidate.toJSON(), from).catch(() => undefined)
@@ -3202,6 +3269,7 @@ export default function App(): ReactElement {
             void callLocalVideoRef.current.play().catch(() => undefined)
           }
           addLog('Camera and mic started. Your self-view is unedited; partners see the manipulated stream.', 'success')
+          publishMonitorStreams().catch(() => undefined)
           break
         }
         case 'other_joined': {
@@ -3224,7 +3292,26 @@ export default function App(): ReactElement {
           const event = payload as RTCTrackEvent
           const stream = event.streams[0]
           const mappedUserId = stream ? streamUserMapRef.current.get(stream.id) : undefined
-          const userId = mappedUserId || `peer-${stream?.id ?? makeId()}`
+          const resolution = resolveDuckSoupTrackUserId({
+            streamId: stream?.id,
+            mappedUserId,
+            localUserId: callUserIdRef.current,
+            peers: callPeersRef.current
+          })
+          const userId = resolution.userId
+          if (!userId) {
+            addLog(
+              resolution.reason === 'ambiguous'
+                ? 'Received an altered DuckSoup stream, but it could not be safely matched to one participant.'
+                : 'Received an altered DuckSoup stream before a partner identity was available.',
+              'warn'
+            )
+            break
+          }
+          if (resolution.reason === 'dyad-fallback' && stream) {
+            streamUserMapRef.current.set(stream.id, userId)
+            addLog('Matched the altered DuckSoup stream to the dyad partner.', 'info')
+          }
           let tile = remoteStreamsRef.current.get(userId)
           if (!tile) {
             const meta = callPeersRef.current.find((peer) => peer.userId === userId)
@@ -3238,6 +3325,7 @@ export default function App(): ReactElement {
           }
           if (!tile.stream.getTrackById(event.track.id)) tile.stream.addTrack(event.track)
           syncRemoteTiles()
+          publishMonitorStreams().catch(() => undefined)
           setCallState('connected')
           break
         }
@@ -4835,36 +4923,36 @@ export default function App(): ReactElement {
                             : ['Unaltered']
                       return labels.map((label) => {
                         const monKind = label === 'Unaltered' ? 'clean' : 'altered'
-                        const tile = peer ? monitorByKey.get(`${peer.userId}:${monKind}`) : undefined
+                        const key = peer ? monitorFeedKey(peer.userId, monKind) : `${index}:${monKind}`
+                        const tile = peer ? monitorByKey.get(key) : undefined
+                        const state = tile
+                          ? {
+                              status: 'connected' as const,
+                              message: `${who} ${label.toLowerCase()} feed connected.`
+                            }
+                          : peer
+                            ? monitorFeedStates[key] ?? monitorWaitingState(peer, monKind)
+                            : monitorWaitingState(undefined, monKind)
                         return (
                           <MonitorVideoCard
                             key={`${index}-${label}`}
                             label={`${who} · ${label}`}
                             stream={tile?.stream ?? null}
+                            state={state}
                           />
                         )
                       })
                     })}
                   </div>
                 </>
-              ) : remoteTiles.length > 0 ? (
-                <div className={`conference-grid tiles-${Math.min(remoteTiles.length, 4)}`}>
-                  {remoteTiles.map((tile) => (
-                    <RemoteVideoCard key={tile.userId} tile={tile} volume={controls.partnerVolume} />
-                  ))}
-                </div>
               ) : (
-                <div className="conference-grid tiles-4">
-                  {Array.from({ length: expectedParticipants }).map((_, index) => {
-                    const peer = participantPeers[index]
-                    const who = peer ? peerStripLabel(peer) : `Participant ${index + 1}`
-                    return (['Unaltered', 'Altered'] as const).map((kind) => (
-                      <div className="video-panel" key={`${index}-${kind}`}>
-                        <div className="video-label">{`${who} · ${kind}`}</div>
-                        <div className="video-empty">(waiting)</div>
-                      </div>
-                    ))
-                  })}
+                <div className="conference-grid tiles-1">
+                  <div className="video-panel diagnostic-panel">
+                    <div className="video-label">Experimenter monitor</div>
+                    <div className="video-empty video-empty-diagnostic">
+                      Four-video clean/altered monitoring requires DuckSoup/Mozza mode.
+                    </div>
+                  </div>
                 </div>
               )
             ) : (
@@ -5389,7 +5477,15 @@ function LiveClock({ running }: { running: boolean }): ReactElement {
 
 // One tile of the experimenter monitor. Video only (muted) — the experimenter watches all four
 // feeds, so playing four audio tracks would be chaos. Shows a placeholder until the feed arrives.
-function MonitorVideoCard({ label, stream }: { label: string; stream: MediaStream | null }): ReactElement {
+function MonitorVideoCard({
+  label,
+  stream,
+  state
+}: {
+  label: string
+  stream: MediaStream | null
+  state: MonitorFeedState
+}): ReactElement {
   const videoRef = useRef<HTMLVideoElement>(null)
 
   useEffect(() => {
@@ -5405,7 +5501,10 @@ function MonitorVideoCard({ label, stream }: { label: string; stream: MediaStrea
       {stream ? (
         <video ref={videoRef} autoPlay playsInline muted className="video-surface" />
       ) : (
-        <div className="video-empty">(waiting)</div>
+        <div className="video-empty monitor-empty">
+          <strong>{state.status.replaceAll('-', ' ')}</strong>
+          <span>{state.message}</span>
+        </div>
       )}
     </div>
   )

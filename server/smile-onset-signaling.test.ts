@@ -27,9 +27,15 @@ const waitForHealth = async (baseUrl: string): Promise<void> => {
   throw new Error('Signaling server did not become healthy.')
 }
 
-const connectEvents = async (baseUrl: string, roomId: string, userId: string, controller: AbortController) => {
+const connectEvents = async (
+  baseUrl: string,
+  roomId: string,
+  userId: string,
+  controller: AbortController,
+  role = 'participant'
+) => {
   const response = await fetch(
-    `${baseUrl}/events?roomId=${roomId}&userId=${userId}&role=participant&displayName=${userId}`,
+    `${baseUrl}/events?roomId=${roomId}&userId=${userId}&role=${role}&displayName=${userId}`,
     { signal: controller.signal }
   )
   if (!response.ok || !response.body) throw new Error(`Could not connect ${userId} to signaling events.`)
@@ -64,6 +70,33 @@ const waitForSignal = async (
     }
   }
   throw new Error(`Timed out waiting for ${signalType}.`)
+}
+
+const expectNoSignal = async (
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signalType: string,
+  timeoutMs = 250
+): Promise<void> => {
+  const decoder = new TextDecoder()
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const remaining = Math.max(1, deadline - Date.now())
+    const read = await Promise.race([
+      reader.read(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), remaining))
+    ])
+    if (!read) return
+    if (read.done) return
+    const text = decoder.decode(read.value, { stream: true })
+    for (const block of text.split('\n\n')) {
+      const line = block
+        .split('\n')
+        .find((candidate) => candidate.startsWith('data: '))
+      if (!line) continue
+      const message = JSON.parse(line.slice(6)) as SseMessage
+      expect(message.payload?.type).not.toBe(signalType)
+    }
+  }
 }
 
 afterEach(() => {
@@ -150,5 +183,82 @@ describe('smile synchrony signaling', () => {
     p2Abort.abort()
     await p1Reader.cancel().catch(() => undefined)
     await p2Reader.cancel().catch(() => undefined)
+  })
+
+  it('routes experimenter monitor offers, answers, and ICE candidates only to the intended peer', async () => {
+    const port = 19_000 + Math.floor(Math.random() * 1_000)
+    const baseUrl = `http://127.0.0.1:${port}`
+    const child = spawn(process.execPath, ['server/signaling-server.mjs'], {
+      cwd: process.cwd(),
+      env: { ...process.env, PORT: String(port) },
+      stdio: 'ignore'
+    })
+    processes.push(child)
+    await waitForHealth(baseUrl)
+
+    const p1Abort = new AbortController()
+    const p2Abort = new AbortController()
+    const controllerAbort = new AbortController()
+    const p1Reader = await connectEvents(baseUrl, 'monitor-room', 'p1', p1Abort)
+    const p2Reader = await connectEvents(baseUrl, 'monitor-room', 'p2', p2Abort)
+    const controllerReader = await connectEvents(baseUrl, 'monitor-room', 'controller', controllerAbort, 'controller')
+
+    const offerResponse = await fetch(`${baseUrl}/signal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roomId: 'monitor-room',
+        from: 'p1',
+        to: 'controller',
+        type: 'monitor-offer',
+        payload: { sdp: { type: 'offer', sdp: 'fake' }, streamMap: [] },
+        role: 'participant',
+        displayName: 'P1'
+      })
+    })
+    expect(offerResponse.ok).toBe(true)
+    const offer = await waitForSignal(controllerReader, 'monitor-offer')
+    expect(offer.payload?.from).toBe('p1')
+    expect(offer.payload?.to).toBe('controller')
+    await expectNoSignal(p2Reader, 'monitor-offer')
+
+    const answerResponse = await fetch(`${baseUrl}/signal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roomId: 'monitor-room',
+        from: 'controller',
+        to: 'p1',
+        type: 'monitor-answer',
+        payload: { type: 'answer', sdp: 'fake-answer' },
+        role: 'controller',
+        displayName: 'Experimenter'
+      })
+    })
+    expect(answerResponse.ok).toBe(true)
+    expect((await waitForSignal(p1Reader, 'monitor-answer')).payload?.to).toBe('p1')
+
+    const candidateResponse = await fetch(`${baseUrl}/signal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roomId: 'monitor-room',
+        from: 'p1',
+        to: 'controller',
+        type: 'monitor-candidate',
+        payload: { candidate: 'candidate', sdpMid: '0' },
+        role: 'participant',
+        displayName: 'P1'
+      })
+    })
+    expect(candidateResponse.ok).toBe(true)
+    expect((await waitForSignal(controllerReader, 'monitor-candidate')).payload?.to).toBe('controller')
+
+    p1Abort.abort()
+    p2Abort.abort()
+    controllerAbort.abort()
+    await p1Reader.cancel().catch(() => undefined)
+    await p2Reader.cancel().catch(() => undefined)
+    await controllerReader.cancel().catch(() => undefined)
   })
 })
