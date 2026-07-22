@@ -28,6 +28,30 @@ describe('experimenter monitor helpers', () => {
     ).toEqual({ userId: 'p2', reason: 'mapped' })
   })
 
+  it('can treat dyad local-loopback metadata as the only partner when requested', () => {
+    expect(
+      resolveDuckSoupTrackUserId({
+        streamId: 'loopback-stream',
+        mappedUserId: 'p1',
+        localUserId: 'p1',
+        peers: [peer('p1'), peer('p2')],
+        preferDyadPartnerForLocalLoopback: true
+      })
+    ).toEqual({ userId: 'p2', reason: 'dyad-local-loopback' })
+  })
+
+  it('does not guess local-loopback metadata in triads or quads', () => {
+    expect(
+      resolveDuckSoupTrackUserId({
+        streamId: 'loopback-stream',
+        mappedUserId: 'p1',
+        localUserId: 'p1',
+        peers: [peer('p1'), peer('p2'), peer('p3')],
+        preferDyadPartnerForLocalLoopback: true
+      })
+    ).toEqual({ userId: 'p1', reason: 'mapped' })
+  })
+
   it('falls back to the only possible dyad partner instead of creating a peer stream id', () => {
     expect(
       resolveDuckSoupTrackUserId({

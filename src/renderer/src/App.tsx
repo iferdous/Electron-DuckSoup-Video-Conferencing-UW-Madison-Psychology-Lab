@@ -939,6 +939,12 @@ export default function App(): ReactElement {
   // the clock starts when both join and pauses the moment either one leaves.
   const bothParticipantsPresent = expectedParticipants > 0 && participantPeers.length >= expectedParticipants
   const monitorByKey = useMemo(() => new Map(monitorTiles.map((tile) => [tile.key, tile])), [monitorTiles])
+  const visiblePartnerTile = useMemo(
+    () =>
+      remoteTiles.find((tile) => tile.role === 'participant' && tile.userId !== callUserIdRef.current && tile.stream.getTracks().length > 0) ??
+      null,
+    [remoteTiles]
+  )
   const selectedControlTarget = useMemo(
     () => participantPeers.find((peer) => peer.userId === form.targetUserId),
     [form.targetUserId, participantPeers]
@@ -2797,7 +2803,8 @@ export default function App(): ReactElement {
         streamId: pending.stream.id,
         mappedUserId,
         localUserId: callUserIdRef.current,
-        peers: callPeersRef.current
+        peers: callPeersRef.current,
+        preferDyadPartnerForLocalLoopback: true
       })
       if (resolution.userId) {
         attachDuckSoupTrackToUser(pending.stream, pending.track, resolution.userId)
@@ -3398,7 +3405,8 @@ export default function App(): ReactElement {
             streamId: stream?.id,
             mappedUserId,
             localUserId: callUserIdRef.current,
-            peers: callPeersRef.current
+            peers: callPeersRef.current,
+            preferDyadPartnerForLocalLoopback: true
           })
           const userId = resolution.userId
           if (!userId) {
@@ -3410,9 +3418,14 @@ export default function App(): ReactElement {
             }
             break
           }
-          if (resolution.reason === 'dyad-fallback' && stream) {
+          if ((resolution.reason === 'dyad-fallback' || resolution.reason === 'dyad-local-loopback') && stream) {
             streamUserMapRef.current.set(stream.id, userId)
-            addLog('Matched the altered DuckSoup stream to the dyad partner.', 'info')
+            addLog(
+              resolution.reason === 'dyad-local-loopback'
+                ? 'DuckSoup labeled the altered stream as local; using the dyad partner mapping.'
+                : 'Matched the altered DuckSoup stream to the dyad partner.',
+              'info'
+            )
           }
           attachDuckSoupTrackToUser(stream, event.track, userId)
           setCallState('connected')
@@ -5111,10 +5124,10 @@ export default function App(): ReactElement {
                   </div>
                 )}
                 <div className="participant-stage">
-                  {remoteTiles.length > 0 ? (
+                  {visiblePartnerTile ? (
                     <RemoteVideoCard
-                      key={remoteTiles[0].userId}
-                      tile={remoteTiles[0]}
+                      key={visiblePartnerTile.userId}
+                      tile={visiblePartnerTile}
                       volume={controls.partnerVolume}
                     />
                   ) : (

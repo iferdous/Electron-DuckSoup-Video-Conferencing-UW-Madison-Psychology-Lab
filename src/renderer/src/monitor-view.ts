@@ -24,7 +24,7 @@ export type MonitorFeedState = {
 
 export type DuckSoupStreamResolution = {
   userId: string | null
-  reason: 'mapped' | 'dyad-fallback' | 'missing-stream' | 'ambiguous' | 'no-partner'
+  reason: 'mapped' | 'dyad-fallback' | 'dyad-local-loopback' | 'missing-stream' | 'ambiguous' | 'no-partner'
 }
 
 export type DuckSoupStartGate = {
@@ -59,13 +59,23 @@ export function resolveDuckSoupTrackUserId(params: {
   mappedUserId?: string
   localUserId: string
   peers: CallPeer[]
+  preferDyadPartnerForLocalLoopback?: boolean
 }): DuckSoupStreamResolution {
-  if (params.mappedUserId) return { userId: params.mappedUserId, reason: 'mapped' }
-  if (!params.streamId) return { userId: null, reason: 'missing-stream' }
-
   const participantPeers = params.peers.filter(
     (peer) => peer.role === 'participant' && peer.userId !== params.localUserId
   )
+
+  if (params.mappedUserId) {
+    if (
+      params.preferDyadPartnerForLocalLoopback &&
+      params.mappedUserId === params.localUserId &&
+      participantPeers.length === 1
+    ) {
+      return { userId: participantPeers[0].userId, reason: 'dyad-local-loopback' }
+    }
+    return { userId: params.mappedUserId, reason: 'mapped' }
+  }
+  if (!params.streamId) return { userId: null, reason: 'missing-stream' }
 
   if (participantPeers.length === 0) return { userId: null, reason: 'no-partner' }
   if (participantPeers.length === 1) return { userId: participantPeers[0].userId, reason: 'dyad-fallback' }
