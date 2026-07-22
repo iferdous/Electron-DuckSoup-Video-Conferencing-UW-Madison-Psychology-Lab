@@ -184,6 +184,7 @@ type SignalEnvelope = {
     role?: CallRole
     displayName?: string
     userId?: string
+    connectionId?: string
   } & Partial<ChatMessage>
 }
 
@@ -1773,7 +1774,8 @@ export default function App(): ReactElement {
         type,
         payload,
         role: form.role,
-        displayName: callDisplayName()
+        displayName: callDisplayName(),
+        connectionId: connectionIdRef.current
       })
     })
     if (!response.ok) {
@@ -2903,10 +2905,16 @@ export default function App(): ReactElement {
     if (envelope.type === 'peer-left') {
       const userId = envelope.payload?.userId || envelope.payload?.from || envelope.payload?.peer?.userId
       if (userId) {
+        const leftConnectionId = envelope.payload?.connectionId || envelope.payload?.peer?.connectionId
+        const currentPeer = callPeersRef.current.find((peer) => peer.userId === userId)
+        if (leftConnectionId && currentPeer?.connectionId && currentPeer.connectionId !== leftConnectionId) {
+          addLog('Ignored a stale leave event from an earlier station connection.', 'info')
+          return
+        }
         // A participant dropping ends the DuckSoup interaction; if they rejoin, DuckSoup starts a new
         // recording (video t=0 resets). Re-arm the controller's anchor so the log re-aligns to the new
         // recording window instead of staying pinned to the original t=0.
-        const leaver = callPeersRef.current.find((peer) => peer.userId === userId)
+        const leaver = currentPeer
         if (isController && leaver?.role === 'participant') recordingReanchoredRef.current = false
         if (activeSmileEnvelopeRef.current?.sourceUserId === userId) {
           returnAutomaticSmileToNeutral('Source participant left the room.')

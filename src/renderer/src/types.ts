@@ -91,6 +91,7 @@ export type CallPeer = {
   displayName: string
   role: CallRole
   joinedAt: number
+  connectionId?: string
   // The participant-entered station ID (P001 etc.), relayed via the signaling presence so the
   // experimenter console can map each peer to its study ID. Optional: older/unredeployed
   // signaling servers won't include it.

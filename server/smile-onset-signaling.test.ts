@@ -32,10 +32,20 @@ const connectEvents = async (
   roomId: string,
   userId: string,
   controller: AbortController,
-  role = 'participant'
+  role = 'participant',
+  connectionId = '',
+  participantId = ''
 ) => {
+  const params = new URLSearchParams({
+    roomId,
+    userId,
+    role,
+    displayName: userId
+  })
+  if (connectionId) params.set('connectionId', connectionId)
+  if (participantId) params.set('participantId', participantId)
   const response = await fetch(
-    `${baseUrl}/events?roomId=${roomId}&userId=${userId}&role=${role}&displayName=${userId}`,
+    `${baseUrl}/events?${params.toString()}`,
     { signal: controller.signal }
   )
   if (!response.ok || !response.body) throw new Error(`Could not connect ${userId} to signaling events.`)
@@ -260,5 +270,85 @@ describe('smile synchrony signaling', () => {
     await p1Reader.cancel().catch(() => undefined)
     await p2Reader.cancel().catch(() => undefined)
     await controllerReader.cancel().catch(() => undefined)
+  })
+
+  it('keeps a rejoined station active when stale leave and signal messages arrive later', async () => {
+    const port = 20_000 + Math.floor(Math.random() * 1_000)
+    const baseUrl = `http://127.0.0.1:${port}`
+    const child = spawn(process.execPath, ['server/signaling-server.mjs'], {
+      cwd: process.cwd(),
+      env: { ...process.env, PORT: String(port) },
+      stdio: 'ignore'
+    })
+    processes.push(child)
+    await waitForHealth(baseUrl)
+
+    const p1OldAbort = new AbortController()
+    const p1NewAbort = new AbortController()
+    const p2Abort = new AbortController()
+    const p1OldReader = await connectEvents(baseUrl, 'rejoin-room', 'p1', p1OldAbort, 'participant', 'p1-old', 'P001')
+    const p2Reader = await connectEvents(baseUrl, 'rejoin-room', 'p2', p2Abort, 'participant', 'p2-live', 'P002')
+    const p1NewReader = await connectEvents(baseUrl, 'rejoin-room', 'p1', p1NewAbort, 'participant', 'p1-new', 'P001')
+
+    const statusAfterRejoin = await fetch(`${baseUrl}/room?roomId=rejoin-room`).then((response) => response.json())
+    expect(statusAfterRejoin.peers).toHaveLength(2)
+    expect(statusAfterRejoin.peers.find((peer: { userId: string }) => peer.userId === 'p1')).toMatchObject({
+      participantId: 'P001',
+      connectionId: 'p1-new'
+    })
+
+    const staleLeave = await fetch(`${baseUrl}/leave`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomId: 'rejoin-room', from: 'p1', connectionId: 'p1-old' })
+    })
+    expect(staleLeave.ok).toBe(true)
+
+    const statusAfterStaleLeave = await fetch(`${baseUrl}/room?roomId=rejoin-room`).then((response) => response.json())
+    expect(statusAfterStaleLeave.peers).toHaveLength(2)
+    expect(statusAfterStaleLeave.peers.find((peer: { userId: string }) => peer.userId === 'p1')).toMatchObject({
+      participantId: 'P001',
+      connectionId: 'p1-new'
+    })
+
+    const staleSignal = await fetch(`${baseUrl}/signal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roomId: 'rejoin-room',
+        from: 'p1',
+        to: 'p2',
+        type: 'offer',
+        connectionId: 'p1-old',
+        payload: { sdp: 'stale' }
+      })
+    })
+    expect(staleSignal.ok).toBe(true)
+    await expect(staleSignal.json()).resolves.toMatchObject({ ok: true, dropped: true, reason: 'stale-connection' })
+
+    const currentSignal = await fetch(`${baseUrl}/signal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roomId: 'rejoin-room',
+        from: 'p1',
+        to: 'p2',
+        type: 'offer',
+        connectionId: 'p1-new',
+        payload: { sdp: 'current' }
+      })
+    })
+    expect(currentSignal.ok).toBe(true)
+    const delivered = await waitForSignal(p2Reader, 'offer')
+    expect(delivered.payload?.from).toBe('p1')
+    expect(delivered.payload?.connectionId).toBe('p1-new')
+    expect(delivered.payload?.payload).toMatchObject({ sdp: 'current' })
+
+    p1OldAbort.abort()
+    p1NewAbort.abort()
+    p2Abort.abort()
+    await p1OldReader.cancel().catch(() => undefined)
+    await p1NewReader.cancel().catch(() => undefined)
+    await p2Reader.cancel().catch(() => undefined)
   })
 })

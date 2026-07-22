@@ -57,6 +57,7 @@ const roomPeers = (roomId) => {
       role: client.role,
       displayName: client.displayName,
       joinedAt: client.joinedAt,
+      connectionId: client.connectionId,
       participantId: client.participantId
     })
   }
@@ -68,6 +69,7 @@ const peerPayload = (client) => ({
   role: client.role,
   displayName: client.displayName,
   joinedAt: client.joinedAt,
+  connectionId: client.connectionId,
   participantId: client.participantId
 })
 
@@ -96,7 +98,8 @@ const removeSignalClient = (client, notify = true, closeResponse = false) => {
     broadcastSignalEvent(client.roomId, 'peer-left', {
       userId: client.userId,
       displayName: client.displayName,
-      role: client.role
+      role: client.role,
+      connectionId: client.connectionId
     })
     broadcastSignalEvent(client.roomId, 'peer-list', { peers: roomPeers(client.roomId) })
   }
@@ -286,6 +289,16 @@ const server = http.createServer(async (request, response) => {
         jsonResponse(response, 403, { ok: false, error: 'Sender is not an active member of this room.' })
         return
       }
+      const connectionId = typeof message.connectionId === 'string' ? message.connectionId : ''
+      if (connectionId) {
+        const sender = roomClients(message.roomId).find(
+          (client) => client.userId === message.from && client.connectionId === connectionId
+        )
+        if (!sender) {
+          jsonResponse(response, 200, { ok: true, dropped: true, reason: 'stale-connection' })
+          return
+        }
+      }
 
       broadcastSignalEvent(
         message.roomId,
@@ -296,7 +309,8 @@ const server = http.createServer(async (request, response) => {
           type: message.type,
           payload: message.payload,
           role: message.role,
-          displayName: message.displayName
+          displayName: message.displayName,
+          connectionId
         },
         undefined,
         message.to

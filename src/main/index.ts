@@ -405,6 +405,7 @@ const roomPeers = (roomId: string): Array<Omit<SignalClient, 'id' | 'response' |
       role: client.role,
       displayName: client.displayName,
       joinedAt: client.joinedAt,
+      connectionId: client.connectionId,
       participantId: client.participantId
     })
   }
@@ -416,6 +417,7 @@ const peerPayload = (client: SignalClient): Omit<SignalClient, 'id' | 'response'
   role: client.role,
   displayName: client.displayName,
   joinedAt: client.joinedAt,
+  connectionId: client.connectionId,
   participantId: client.participantId
 })
 
@@ -430,7 +432,8 @@ const removeSignalClient = (client: SignalClient, notify = true, closeResponse =
     broadcastSignalEvent(client.roomId, 'peer-left', {
       userId: client.userId,
       displayName: client.displayName,
-      role: client.role
+      role: client.role,
+      connectionId: client.connectionId
     })
     broadcastSignalEvent(client.roomId, 'peer-list', { peers: roomPeers(client.roomId) })
   }
@@ -626,6 +629,16 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
             jsonResponse(response, 403, { ok: false, error: 'Sender is not in this room.' })
             return
           }
+          const connectionId = typeof message.connectionId === 'string' ? message.connectionId : ''
+          if (connectionId) {
+            const sender = roomClients(message.roomId).find(
+              (client) => client.userId === message.from && client.connectionId === connectionId
+            )
+            if (!sender) {
+              jsonResponse(response, 200, { ok: true, dropped: true, reason: 'stale-connection' })
+              return
+            }
+          }
           broadcastSignalEvent(
             message.roomId,
             'signal',
@@ -635,7 +648,8 @@ const startCallSignalServer = (port = DEFAULT_SIGNAL_PORT): Promise<{ ok: boolea
               type: message.type,
               payload: message.payload,
               role: message.role,
-              displayName: message.displayName
+              displayName: message.displayName,
+              connectionId
             },
             undefined,
             message.to
