@@ -3,10 +3,11 @@ name: Build installers
 # Builds the Mac .dmg and Windows installer automatically.
 #
 # How to use:
-#  - Push a tag like v0.1.0  -> builds both AND publishes a Releases page with
+#  - Every push to main            -> builds both and attaches the .dmg and .exe
+#    to that run as downloadable artifacts (no manual step needed).
+#  - Push a tag like v0.1.0        -> builds both AND publishes a Releases page with
 #    the .dmg and .exe attached (this is what you send lab people to).
-#  - Or click "Run workflow" on the Actions tab -> builds both and attaches them
-#    to that run as downloadable artifacts (good for a quick test build).
+#  - Or click "Run workflow" on the Actions tab -> same as a push, a quick test build.
 #
 # Code signing: the lab has no paid Apple/Windows developer account. The Windows .exe is
 # unsigned. The macOS build IS signed with a self-signed certificate (see the signing step below)
@@ -18,6 +19,8 @@ name: Build installers
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch: {}
